@@ -78,7 +78,7 @@ class ScanRequest(BaseModel):
 @app.get("/health")
 def health():
     """Liveness check — Render/Railway ping this to confirm the service is up."""
-    return {"status": "ok"}
+    return {"status": "ok", "code_version": "step-labels-v3-2026-07-03"}
 
 
 @app.get("/api/counties", response_model=list[CountyInfo])

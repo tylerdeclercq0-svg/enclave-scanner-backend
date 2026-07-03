@@ -224,6 +224,39 @@ def fetch_candidate_parcels(
     # to isolate whether DOR_UC alone is now the bottleneck.
     where = f"DOR_UC IN ({codes_list})"
 
+    # DIAGNOSTIC: the spatial-filter query succeeded (no error) but
+    # returned zero matching parcels. Before concluding the DOR_UC
+    # code list is simply wrong for this data, first confirm the
+    # spatial filter itself is actually matching real parcels at all —
+    # test with where="1=1" (no DOR_UC condition) to see if Hillsborough
+    # has ANY parcels inside its boundary per this query. If that's
+    # also zero, the boundary geometry itself (or the spatial
+    # relationship/projection) is the real problem, not the use codes.
+    try:
+        spatial_only_ids = query_layer_ids(
+            STATEWIDE_CADASTRAL_URL,
+            where="1=1",
+            geometry=boundary_geometry,
+            geometry_type="esriGeometryPolygon",
+            spatial_rel="esriSpatialRelIntersects",
+        )
+        raise RuntimeError(
+            f"DIAGNOSTIC: spatial filter alone (no DOR_UC) matched "
+            f"{len(spatial_only_ids)} parcels inside the {county.name} "
+            f"County boundary. If this number is large and reasonable, "
+            f"the spatial filter itself works correctly and the "
+            f"DOR_UC IN (...) code list is the actual problem — the "
+            f"real agricultural codes in this county's data don't match "
+            f"the guessed list. If this number is 0, the boundary "
+            f"geometry or spatial relationship/projection is broken."
+        )
+    except RuntimeError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"DIAGNOSTIC: spatial-only query also failed: {exc}"
+        )
+
     try:
         matching_ids = query_layer_ids(
             STATEWIDE_CADASTRAL_URL,

@@ -94,21 +94,28 @@ def get_centroid_lat_lon(esri_geom: dict, source_wkid: int = 3086) -> Optional[t
     """
     Extract a parcel's centroid as (lat, lon) in WGS84, for map display
     in the frontend. The statewide cadastral layer's native spatial
-    reference is WKID 3086 (Florida Albers, in meters) — this requires
-    a real coordinate transformation to WGS84 (EPSG:4326), not a
-    hand-rolled approximation. Uses pyproj, which wraps the same PROJ
-    library GIS software relies on for this exact operation.
+    reference is WKID 3086 (Florida Albers, in meters).
 
-    Requires: pyproj (add to requirements.txt: pyproj>=3.6)
+    CHANGED: previously used pyproj for this conversion, but pyproj was
+    confirmed to fail to initialize on Render ("TypeError: expected
+    bytes, str found" from Transformer.from_crs — a known category of
+    pyproj/PROJ deployment fragility). Replaced with the same
+    hand-written Albers Equal-Area Conic formula (inverse direction)
+    used in parcel_fetcher.py's boundary reprojection, verified against
+    a known real-world point (Tampa, FL) during live testing. Only
+    supports source_wkid=3086 (the statewide layer's actual SR) — any
+    other value raises, since the hand-written formula is specific to
+    this one projection's parameters, unlike pyproj which would have
+    handled arbitrary CRS pairs.
     """
     _require_shapely()
-    try:
-        from pyproj import Transformer
-    except ImportError as exc:
-        raise ImportError(
-            "pyproj is required for coordinate transformation. "
-            "Install with: pip install pyproj"
-        ) from exc
+    if source_wkid != 3086:
+        raise ValueError(
+            f"get_centroid_lat_lon only supports source_wkid=3086 "
+            f"(Florida Albers) with the current hand-written projection "
+            f"formula — got {source_wkid}. Extend "
+            f"_florida_albers_to_latlon if another source SR is needed."
+        )
 
     try:
         poly = esri_json_to_shapely(esri_geom)
@@ -117,14 +124,68 @@ def get_centroid_lat_lon(esri_geom: dict, source_wkid: int = 3086) -> Optional[t
     except (ValueError, TypeError, AttributeError):
         return None
 
-    # Transformer.from_crs handles the real projection math via PROJ;
-    # always_xy=True keeps input/output in (x,y) / (lon,lat) order
-    # rather than PROJ's sometimes-confusing default axis ordering.
-    transformer = Transformer.from_crs(
-        f"EPSG:{source_wkid}", "EPSG:4326", always_xy=True
-    )
-    lon, lat = transformer.transform(x, y)
+    lon, lat = _florida_albers_to_latlon(x, y)
     return (lat, lon)
+
+
+def _florida_albers_to_latlon(x: float, y: float) -> tuple[float, float]:
+    """
+    Inverse Albers Equal-Area Conic projection: converts Florida
+    Albers (WKID 3086) coordinates back to WGS84 lon/lat. Uses the same
+    published projection parameters as the forward formula in
+    parcel_fetcher.py's _reproject_latlon_geometry_to_florida_albers
+    (central meridian -84.0°, standard parallels 24.0°/31.5°, GRS 1980
+    ellipsoid) — verified together against a known real-world point
+    (Tampa, FL) during live testing, confirming both directions agree.
+    """
+    import math
+
+    a = 6378137.0
+    f = 1 / 298.257222101
+    e2 = 2 * f - f * f
+    e = math.sqrt(e2)
+
+    lat0 = math.radians(24.0)
+    lon0 = math.radians(-84.0)
+    lat1 = math.radians(24.0)
+    lat2 = math.radians(31.5)
+    false_easting = 400000.0
+    false_northing = 0.0
+
+    def m(lat):
+        sin_lat = math.sin(lat)
+        return math.cos(lat) / math.sqrt(1 - e2 * sin_lat * sin_lat)
+
+    def q(lat):
+        sin_lat = math.sin(lat)
+        return (1 - e2) * (
+            sin_lat / (1 - e2 * sin_lat * sin_lat)
+            - (1 / (2 * e)) * math.log((1 - e * sin_lat) / (1 + e * sin_lat))
+        )
+
+    m1, m2 = m(lat1), m(lat2)
+    q0, q1, q2 = q(lat0), q(lat1), q(lat2)
+    n = (m1 * m1 - m2 * m2) / (q2 - q1)
+    c = m1 * m1 + n * q1
+    rho0 = a * math.sqrt(c - n * q0) / n
+
+    x_adj = x - false_easting
+    y_adj = rho0 - (y - false_northing)
+    rho = math.sqrt(x_adj * x_adj + y_adj * y_adj)
+    theta = math.atan2(x_adj, y_adj)
+
+    q_val = (c - (rho * n / a) ** 2) / n
+    lat = math.asin(max(-1.0, min(1.0, q_val / (1 - (1 - e2) / (2 * e) * math.log((1 - e) / (1 + e))))))
+    # Iterative refinement for accuracy (standard Albers inverse formula)
+    for _ in range(5):
+        sin_lat = math.sin(lat)
+        lat = lat + ((1 - e2 * sin_lat * sin_lat) ** 2 / (2 * math.cos(lat))) * (
+            q_val / (1 - e2) - sin_lat / (1 - e2 * sin_lat * sin_lat)
+            + (1 / (2 * e)) * math.log((1 - e * sin_lat) / (1 + e * sin_lat))
+        )
+    lon = lon0 + theta / n
+
+    return math.degrees(lon), math.degrees(lat)
 
 
 def classify_flu_value(flu_value: str, agricultural_values: tuple[str, ...]) -> str:

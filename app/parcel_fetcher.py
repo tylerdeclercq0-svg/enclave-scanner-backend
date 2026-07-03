@@ -43,19 +43,23 @@ def fetch_county_boundary_geometry(county_name: str) -> Optional[dict]:
     yet confirmed against live data; may need adjustment (title case,
     "County" suffix, etc.) once tested.
 
-    BUG FIX: this layer's confirmed spatial reference is WKID 26917
-    (UTM Zone 17N), per its live metadata — but ArcGIS feature query
-    responses do not necessarily embed spatialReference inside each
-    individual feature's geometry object (it's typically only present
-    once at the top level of the response). The caller
-    (query_layer_ids' inSR handling) was relying on
-    geometry["spatialReference"]["wkid"] being present and silently
-    falling back to 4326 (plain lat/lon) when it wasn't — while the
-    coordinates were actually still in 26917. This produced a spatial
-    filter that looked successful (no error) but matched zero real
-    parcels, since the "boundary" was being interpreted as being in
-    the wrong coordinate system entirely. Explicitly attaching the
-    correct, confirmed spatialReference here closes that gap.
+    CHANGED: pyproj (previously used to reproject this layer's native
+    WKID 26917 / UTM 17N geometry to the statewide cadastral layer's
+    WKID 3086 / Florida Albers) failed to initialize on Render with a
+    "TypeError: expected bytes, str found" — a known category of
+    pyproj/PROJ deployment fragility (its compiled C dependency, PROJ,
+    can fail to locate its coordinate system data files depending on
+    how the Python environment is set up). Rather than fight that
+    dependency further, this now requests the geometry directly in
+    WGS84 (WKID 4326, plain lat/lon) via the outSR parameter — ArcGIS
+    Server performs this specific reprojection server-side reliably
+    (it's the single most common SR conversion any GIS service
+    supports), removing the need for pyproj or a hand-written UTM
+    transform. The hand-written Albers projection math needed to go
+    from lat/lon to the statewide layer's native SR is implemented in
+    _latlon_to_florida_albers below using published, verified
+    projection parameters — simpler and more reliable than a full
+    UTM-to-Albers conversion would have been.
     """
     where = f"UPPER(NAME) = '{county_name.upper()}'"
     features = list(query_layer(
@@ -64,81 +68,85 @@ def fetch_county_boundary_geometry(county_name: str) -> Optional[dict]:
         out_fields="NAME,FIPS",
         return_geometry=True,
         page_size=1,
+        out_sr=4326,
     ))
     if not features:
         return None
     geometry = features[0].get("geometry")
-    if geometry is not None and "spatialReference" not in geometry:
-        geometry["spatialReference"] = {"wkid": 26917}
+    if geometry is None:
+        return None
+    if "spatialReference" not in geometry:
+        geometry["spatialReference"] = {"wkid": 4326}
 
-    # FURTHER FIX: rather than rely on ArcGIS's server-side reprojection
-    # via inSR (which was set correctly but still produced zero matches
-    # against the statewide cadastral layer, confirmed to be in WKID
-    # 3086 / Florida Albers meters, vs. this boundary layer's WKID
-    # 26917 / UTM 17N) — reproject the geometry ourselves explicitly
-    # using pyproj before sending it, removing any dependency on
-    # whether the target server actually performs the inSR conversion
-    # correctly for this particular geometry/layer combination.
-    if geometry is not None:
-        geometry = _reproject_esri_geometry(geometry, from_wkid=26917, to_wkid=3086)
-    return geometry
+    return _reproject_latlon_geometry_to_florida_albers(geometry)
 
 
-def _reproject_esri_geometry(geometry: dict, from_wkid: int, to_wkid: int) -> dict:
+def _reproject_latlon_geometry_to_florida_albers(geometry: dict) -> dict:
     """
-    Reproject an ArcGIS-format polygon geometry's coordinates from one
-    spatial reference to another using pyproj, returning a new
-    geometry dict already tagged with the target spatialReference.
-    Used to sidestep uncertainty about whether a given ArcGIS server
-    correctly performs inSR-based server-side reprojection for a
-    specific geometry/layer combination — doing it client-side removes
-    that variable entirely.
+    Convert a WGS84 (lat/lon) polygon geometry to Florida Albers Equal
+    Area Conic (the statewide cadastral layer's native SR, WKID 3086),
+    using the published projection parameters for this exact CRS
+    (confirmed via Esri's own support documentation for UTM-to-Albers
+    Florida conversions): central meridian -84.0°, standard parallels
+    24.0° and 31.5°, latitude of origin 24.0°, false easting 400,000m,
+    false northing 0m, on the GRS 1980 ellipsoid.
+
+    This hand-implements the standard Albers Equal-Area Conic forward
+    projection formula (a well-documented, non-controversial piece of
+    cartographic math) rather than depending on pyproj, after pyproj
+    was confirmed to fail to initialize in this deployment environment.
     """
-    try:
-        from pyproj import Transformer
-    except ImportError as exc:
-        raise RuntimeError(
-            f"pyproj is not installed or failed to import: {exc}. "
-            f"Add 'pyproj' to requirements.txt and ensure it actually "
-            f"installed on the deployment (check Render's build logs "
-            f"for pyproj-related errors — it has a compiled C extension "
-            f"dependency, PROJ, which can fail to build/find its data "
-            f"files on some hosts)."
+    import math
+
+    # GRS 1980 ellipsoid parameters (matches the statewide layer's datum)
+    a = 6378137.0  # semi-major axis, meters
+    f = 1 / 298.257222101  # flattening
+    e2 = 2 * f - f * f  # eccentricity squared
+    e = math.sqrt(e2)
+
+    lat0 = math.radians(24.0)
+    lon0 = math.radians(-84.0)
+    lat1 = math.radians(24.0)
+    lat2 = math.radians(31.5)
+    false_easting = 400000.0
+    false_northing = 0.0
+
+    def m(lat):
+        sin_lat = math.sin(lat)
+        return math.cos(lat) / math.sqrt(1 - e2 * sin_lat * sin_lat)
+
+    def q(lat):
+        sin_lat = math.sin(lat)
+        return (1 - e2) * (
+            sin_lat / (1 - e2 * sin_lat * sin_lat)
+            - (1 / (2 * e)) * math.log((1 - e * sin_lat) / (1 + e * sin_lat))
         )
 
-    try:
-        transformer = Transformer.from_crs(
-            f"EPSG:{from_wkid}", f"EPSG:{to_wkid}", always_xy=True
-        )
-    except Exception as exc:  # noqa: BLE001 — pyproj/PROJ initialization failures can raise several different internal exception types depending on what's misconfigured
-        raise RuntimeError(
-            f"pyproj Transformer.from_crs(EPSG:{from_wkid}, EPSG:{to_wkid}) "
-            f"failed to initialize: {type(exc).__name__}: {exc}. This "
-            f"usually means PROJ's coordinate system data files aren't "
-            f"correctly installed/located in this environment — check "
-            f"whether the PROJ_LIB or PROJ_DATA environment variable "
-            f"needs to be set explicitly on Render, or whether pyproj's "
-            f"wheel installed its bundled data correctly."
-        )
+    m1, m2 = m(lat1), m(lat2)
+    q0, q1, q2 = q(lat0), q(lat1), q(lat2)
+
+    n = (m1 * m1 - m2 * m2) / (q2 - q1)
+    c = m1 * m1 + n * q1
+    rho0 = a * math.sqrt(c - n * q0) / n
+
+    def project(lon_deg: float, lat_deg: float) -> tuple[float, float]:
+        lat = math.radians(lat_deg)
+        lon = math.radians(lon_deg)
+        q_lat = q(lat)
+        rho = a * math.sqrt(c - n * q_lat) / n
+        theta = n * (lon - lon0)
+        x = false_easting + rho * math.sin(theta)
+        y = false_northing + rho0 - rho * math.cos(theta)
+        return x, y
 
     new_rings = []
-    try:
-        for ring in geometry.get("rings", []):
-            new_ring = []
-            for point in ring:
-                x, y = point[0], point[1]
-                new_x, new_y = transformer.transform(x, y)
-                new_ring.append([float(new_x), float(new_y)])
-            new_rings.append(new_ring)
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(
-            f"Reprojection transform failed partway through: "
-            f"{type(exc).__name__}: {exc}"
-        )
+    for ring in geometry.get("rings", []):
+        new_ring = [list(project(point[0], point[1])) for point in ring]
+        new_rings.append(new_ring)
 
     return {
         "rings": new_rings,
-        "spatialReference": {"wkid": to_wkid},
+        "spatialReference": {"wkid": 3086},
     }
 
 

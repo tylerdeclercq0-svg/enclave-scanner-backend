@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ag Enclave Scanner — SB 686/HB 691</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap');
+
+  :root{
+    --ink:#1a2420;
+    --parchment:#f6f4ee;
+    --panel:#ffffff;
+    --line:#d8d3c4;
+    --field:#3f6b4a;
+    --field-dim:#e7ede8;
+    --dev:#a8562f;
+    --dev-dim:#f3e4da;
+    --muted:#6b6558;
+    --gold:#b08a3e;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--parchment);
+    color:var(--ink);
+    font-family:'Inter',sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1180px;margin:0 auto;padding:40px 28px 80px;}
+
+  header{border-bottom:2px solid var(--ink);padding-bottom:20px;margin-bottom:28px;}
+  .eyebrow{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:12px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--gold);margin-bottom:8px;
+  }
+  h1{
+    font-family:'Source Serif 4',serif;
+    font-weight:700;
+    font-size:38px;
+    margin:0 0 8px;
+    letter-spacing:-.01em;
+  }
+  .sub{color:var(--muted);font-size:15px;max-width:640px;line-height:1.5;}
+
+  .panel{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:2px;
+    padding:24px;
+    margin-bottom:24px;
+  }
+  .panel h2{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:12px;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--muted);margin:0 0 16px;
+  }
+
+  .county-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:20px;}
+  .county-card{
+    border:1px solid var(--line);border-radius:2px;padding:14px 16px;
+    display:flex;align-items:center;gap:12px;cursor:pointer;
+    transition:border-color .15s, background .15s;
+  }
+  .county-card:hover{border-color:var(--field);}
+  .county-card.active{border-color:var(--field);background:var(--field-dim);}
+  .county-card input{accent-color:var(--field);width:16px;height:16px;}
+  .county-name{font-weight:600;font-size:15px;}
+  .county-meta{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--muted);}
+
+  .controls-row{display:flex;flex-wrap:wrap;gap:20px;align-items:flex-end;margin-bottom:4px;}
+  .field{display:flex;flex-direction:column;gap:6px;}
+  .field label{font-size:12px;color:var(--muted);font-weight:500;}
+  .field input{
+    font-family:'IBM Plex Mono',monospace;
+    border:1px solid var(--line);border-radius:2px;
+    padding:9px 10px;font-size:14px;width:140px;background:var(--parchment);
+  }
+  .field-check{display:flex;align-items:center;gap:8px;}
+  .field-check input{width:16px;height:16px;accent-color:var(--field);}
+  .field-check label{font-size:13px;color:var(--ink);}
+
+  button.run{
+    font-family:'IBM Plex Mono',monospace;
+    font-weight:600;font-size:13px;letter-spacing:.04em;text-transform:uppercase;
+    background:var(--ink);color:var(--parchment);
+    border:none;border-radius:2px;padding:13px 26px;cursor:pointer;
+    transition:background .15s;
+  }
+  button.run:hover{background:var(--field);}
+  button.run:disabled{background:var(--line);color:var(--muted);cursor:not-allowed;}
+
+  .status{font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--muted);margin-top:16px;min-height:20px;}
+  .status.error{color:var(--dev);}
+  .bar-outer{height:4px;background:var(--line);border-radius:2px;overflow:hidden;margin-top:8px;}
+  .bar-inner{height:100%;background:var(--field);width:0%;transition:width .2s;}
+
+  .results-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px;flex-wrap:wrap;gap:8px;}
+  .results-count{font-family:'Source Serif 4',serif;font-size:20px;font-weight:600;}
+  .results-count span{color:var(--field);}
+  button.export{
+    font-family:'IBM Plex Mono',monospace;font-size:12px;
+    background:none;border:1px solid var(--ink);border-radius:2px;
+    padding:8px 14px;cursor:pointer;color:var(--ink);
+  }
+  button.export:hover{background:var(--ink);color:var(--parchment);}
+
+  table{width:100%;border-collapse:collapse;font-size:13px;}
+  thead th{
+    text-align:left;font-family:'IBM Plex Mono',monospace;font-size:11px;
+    text-transform:uppercase;letter-spacing:.05em;color:var(--muted);
+    border-bottom:2px solid var(--ink);padding:10px 8px;font-weight:500;
+    cursor:pointer;user-select:none;
+  }
+  thead th:hover{color:var(--ink);}
+  tbody td{padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:middle;}
+  tbody tr:hover{background:var(--field-dim);}
+  .num{font-family:'IBM Plex Mono',monospace;text-align:right;}
+  .adj-cell{display:flex;align-items:center;gap:8px;min-width:120px;}
+  .adj-bar{flex:1;height:6px;background:var(--dev-dim);border-radius:3px;overflow:hidden;}
+  .adj-fill{height:100%;background:var(--field);}
+  .adj-pct{font-family:'IBM Plex Mono',monospace;font-size:12px;width:38px;text-align:right;}
+  .owner{max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+  .caveats{
+    font-size:12.5px;color:var(--muted);line-height:1.6;
+    border-left:2px solid var(--gold);padding-left:16px;margin-top:32px;
+  }
+  .caveats strong{color:var(--ink);}
+
+  ::selection{background:var(--field);color:var(--parchment);}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">Falcone Group &middot; Land Development</div>
+    <h1>Agricultural Enclave Scanner</h1>
+    <div class="sub">Screens Florida parcels against the SB 686 / HB 691 agricultural enclave pathway (eff. 7/1/2026): ag-classified, &le;1,280 acres, and adjacency to existing development. Calls the project's own backend (per-county parcel + FLUM layers, real encirclement geometry), not a generic statewide query.</div>
+  </header>
+
+  <div class="panel">
+    <h2>00 &mdash; Backend</h2>
+    <div class="controls-row" style="margin-bottom:0;">
+      <div class="field" style="width:360px;">
+        <label>API base URL</label>
+        <input type="text" id="apiBase" style="width:100%;" placeholder="https://your-render-url.onrender.com">
+      </div>
+      <div class="status" id="apiStatus" style="margin-top:0;"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>01 &mdash; Counties</h2>
+    <div class="county-grid" id="countyGrid"><div class="county-meta">Loading from /api/counties&hellip;</div></div>
+
+    <h2 style="margin-top:8px;">02 &mdash; Parameters</h2>
+    <div class="controls-row">
+      <div class="field">
+        <label>Max acreage</label>
+        <input type="number" id="maxAcres" value="1280">
+      </div>
+      <div class="field">
+        <label>Min acreage</label>
+        <input type="number" id="minAcres" value="20">
+      </div>
+      <div class="field">
+        <label>Max candidates / county (encirclement check)</label>
+        <input type="number" id="maxCandidates" value="25">
+      </div>
+      <button class="run" id="runBtn">Run scan</button>
+    </div>
+    <div class="status" id="status"></div>
+    <div class="bar-outer"><div class="bar-inner" id="progressBar"></div></div>
+  </div>
+
+  <div class="panel" id="resultsPanel" style="display:none;">
+    <div class="results-head">
+      <div class="results-count"><span id="resultCount">0</span> candidate parcels</div>
+      <button class="export" id="exportBtn">Export CSV</button>
+    </div>
+    <div style="overflow-x:auto;">
+      <table id="resultsTable">
+        <thead>
+          <tr>
+            <th data-key="county_id">County</th>
+            <th data-key="parcel_id">Parcel ID</th>
+            <th data-key="acreage" class="num">Acres</th>
+            <th data-key="use_code">Use Code</th>
+            <th data-key="owner_name">Owner</th>
+            <th data-key="pct_perimeter_qualifying">Qualifying Perimeter</th>
+            <th data-key="likely_pathways">Pathway(s)</th>
+            <th data-key="attractiveness_score" class="num">Score</th>
+            <th data-key="flags"></th>
+          </tr>
+        </thead>
+        <tbody id="resultsBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="caveats">
+    <strong>Not automated &mdash; verify before relying on any result:</strong> 5-year continuous agricultural use history (this is a single point-in-time snapshot), Wekiva Study Area / Everglades Protection Area exclusions, public services availability, and single-owner control specifically as of 1/1/2025. Pathways 3 &amp; 4 (interstate / urban service boundary) are not yet wired to a real data source and never match. "Qualifying Perimeter" is the share of the candidate's boundary line falling inside an adjacent qualifying FLUM designation, not a certified survey. County population cap (&le;1.75M) is satisfied by county selection above. Only Pasco, Nassau, St. Johns and Osceola have been run end-to-end against live data — other counties returned by the backend are unconfirmed.
+  </div>
+
+</div>
+
+<script>
+// Counties this project has actually run end-to-end against live data
+// (see STATUS.md). Other ids the backend's /api/counties may return
+// (hillsborough, orange, sarasota, manatee, brevard, volusia) are
+// carried-over guesses not yet ground-truthed — offered but flagged.
+const CONFIRMED_LIVE = new Set(["pasco", "nassau", "st_johns", "osceola"]);
+
+const API_BASE_KEY = "ag_enclave_api_base";
+function getApiBase(){
+  return document.getElementById('apiBase').value.trim().replace(/\/+$/, '');
+}
+
+let counties = [];
+const selected = new Set();
+let results = [];
+let sortKey = null, sortAsc = true;
+
+function setStatus(msg, isError=false){
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = 'status' + (isError ? ' error' : '');
+}
+function setApiStatus(msg, isError=false){
+  const el = document.getElementById('apiStatus');
+  el.textContent = msg;
+  el.className = 'status' + (isError ? ' error' : '');
+}
+function setProgress(pct){
+  document.getElementById('progressBar').style.width = pct + '%';
+}
+
+function renderCounties(){
+  const grid = document.getElementById('countyGrid');
+  grid.innerHTML = '';
+  if(counties.length === 0){
+    grid.innerHTML = '<div class="county-meta">No counties loaded — set the API base URL above and reload.</div>';
+    return;
+  }
+  counties.forEach(c => {
+    const confirmed = CONFIRMED_LIVE.has(c.id);
+    const card = document.createElement('label');
+    card.className = 'county-card' + (selected.has(c.id) ? ' active' : '');
+    card.innerHTML = `<input type="checkbox" ${selected.has(c.id) ? 'checked' : ''} data-id="${c.id}">
+      <div><div class="county-name">${c.name}</div><div class="county-meta">${confirmed ? 'confirmed live end-to-end' : 'unconfirmed &mdash; guessed field names'} &middot; ${c.flu_field}</div></div>`;
+    const cb = card.querySelector('input');
+    cb.addEventListener('change', () => {
+      if(cb.checked){selected.add(c.id); card.classList.add('active');}
+      else{selected.delete(c.id); card.classList.remove('active');}
+    });
+    grid.appendChild(card);
+  });
+}
+
+async function loadCounties(){
+  const base = getApiBase();
+  if(!base){
+    setApiStatus('Enter your backend URL (see DEPLOYMENT.md) to load counties.', true);
+    renderCounties();
+    return;
+  }
+  setApiStatus('Loading counties from ' + base + '...');
+  try{
+    const res = await fetch(`${base}/api/counties`);
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    counties = await res.json();
+    counties.forEach(c => { if(CONFIRMED_LIVE.has(c.id)) selected.add(c.id); });
+    renderCounties();
+    setApiStatus(`Connected. ${counties.length} counties available (${CONFIRMED_LIVE.size} confirmed live).`);
+    localStorage.setItem(API_BASE_KEY, base);
+  }catch(err){
+    setApiStatus('Could not reach backend: ' + err.message, true);
+    renderCounties();
+  }
+}
+
+document.getElementById('apiBase').addEventListener('change', loadCounties);
+(function initApiBase(){
+  const saved = localStorage.getItem(API_BASE_KEY) || 'http://localhost:8000';
+  document.getElementById('apiBase').value = saved;
+  loadCounties();
+})();
+
+function pathwayLabel(pathways){
+  return (pathways && pathways.length) ? pathways.map(p => `#${p}`).join(', ') : '—';
+}
+
+async function scanCounty(base, countyId, minAcres, maxAcres, maxCandidates){
+  const params = new URLSearchParams({
+    min_acreage: minAcres, max_acreage: maxAcres, max_candidates: maxCandidates,
+  });
+  const res = await fetch(`${base}/api/counties/${countyId}/scan?${params.toString()}`);
+  const data = await res.json();
+  if(!res.ok){
+    const detail = data && data.detail;
+    const msg = (detail && detail.message) ? `${detail.message}: ${detail.exception_str}` : (detail || `HTTP ${res.status}`);
+    throw new Error(msg);
+  }
+  return data.candidates || [];
+}
+
+async function runScan(){
+  const base = getApiBase();
+  if(!base){
+    setStatus('Set the API base URL above first.', true);
+    return;
+  }
+  const btn = document.getElementById('runBtn');
+  btn.disabled = true;
+  results = [];
+  const minAcres = parseFloat(document.getElementById('minAcres').value) || 0;
+  const maxAcres = parseFloat(document.getElementById('maxAcres').value) || 1280;
+  const maxCandidates = parseInt(document.getElementById('maxCandidates').value) || 25;
+  const activeCounties = counties.filter(c => selected.has(c.id));
+
+  if(activeCounties.length === 0){
+    setStatus('Select at least one county.', true);
+    btn.disabled = false;
+    return;
+  }
+
+  try{
+    for(let ci=0; ci<activeCounties.length; ci++){
+      const county = activeCounties[ci];
+      setStatus(`Scanning ${county.name} County via backend (this makes real ArcGIS calls, can take tens of seconds)...`);
+      setProgress((ci/activeCounties.length)*100);
+      const rows = await scanCounty(base, county.id, minAcres, maxAcres, maxCandidates);
+      results = results.concat(rows);
+      setStatus(`${county.name}: ${rows.length} candidates returned.`);
+    }
+    setProgress(100);
+    results.sort((a,b) => (b.pct_perimeter_qualifying||0) - (a.pct_perimeter_qualifying||0));
+    renderResults();
+    setStatus(`Done. ${results.length} candidate parcels across ${activeCounties.length} counties.`);
+  }catch(err){
+    setStatus('Error: ' + err.message, true);
+  }
+  btn.disabled = false;
+  setProgress(0);
+}
+
+function renderResults(){
+  document.getElementById('resultsPanel').style.display = 'block';
+  document.getElementById('resultCount').textContent = results.length;
+  const body = document.getElementById('resultsBody');
+  body.innerHTML = '';
+  results.forEach(r => {
+    const tr = document.createElement('tr');
+    const pct = r.pct_perimeter_qualifying;
+    const owner = [r.owner_name, r.owner_name_2].filter(Boolean).join(' / ');
+    const flags = (r.exclusion_flags||[]).concat(r.needs_manual_review||[]);
+    tr.innerHTML = `
+      <td>${r.county_id}</td>
+      <td>${r.parcel_id || '—'}</td>
+      <td class="num">${r.acreage!=null ? r.acreage.toFixed(1) : '—'}</td>
+      <td>${r.use_code || '—'}</td>
+      <td class="owner" title="${owner}">${owner || '—'}</td>
+      <td>${pct==null ? '<span style="color:var(--muted)">not computed</span>' :
+        `<div class="adj-cell"><div class="adj-bar"><div class="adj-fill" style="width:${pct}%"></div></div><div class="adj-pct">${pct.toFixed(0)}%</div></div>`}
+      </td>
+      <td>${pathwayLabel(r.likely_pathways)}</td>
+      <td class="num">${r.attractiveness_score!=null ? r.attractiveness_score : '—'}</td>
+      <td>${flags.length ? `<span title="${flags.join('; ')}" style="color:var(--dev);font-family:'IBM Plex Mono',monospace;font-size:11px;">${flags.length} flag${flags.length>1?'s':''}</span>` : ''}</td>`;
+    body.appendChild(tr);
+  });
+}
+
+document.querySelectorAll('#resultsTable thead th').forEach(th => {
+  th.addEventListener('click', () => {
+    const key = th.dataset.key;
+    if(!key) return;
+    sortAsc = (sortKey === key) ? !sortAsc : true;
+    sortKey = key;
+    results.sort((a,b) => {
+      let va = a[key], vb = b[key];
+      if(Array.isArray(va)) va = va.length;
+      if(Array.isArray(vb)) vb = vb.length;
+      if(typeof va === 'string'){ va = va||''; vb = vb||''; return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va); }
+      va = va==null ? -Infinity : va; vb = vb==null ? -Infinity : vb;
+      return sortAsc ? va-vb : vb-va;
+    });
+    renderResults();
+  });
+});
+
+document.getElementById('exportBtn').addEventListener('click', () => {
+  const headers = ['county_id','parcel_id','acreage','use_code','owner_name','owner_name_2','pct_perimeter_qualifying','likely_pathways','attractiveness_score','exclusion_flags','needs_manual_review','centroid_lat','centroid_lon'];
+  const csv = [headers.join(',')].concat(
+    results.map(r => headers.map(h => {
+      let v = r[h];
+      if(Array.isArray(v)) v = v.join('; ');
+      return `"${(v??'').toString().replace(/"/g,'""')}"`;
+    }).join(','))
+  ).join('\n');
+  const blob = new Blob([csv], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'ag_enclave_candidates.csv';
+  a.click();
+});
+
+document.getElementById('runBtn').addEventListener('click', runScan);
+</script>
+</body>
+</html>

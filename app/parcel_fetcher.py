@@ -94,15 +94,48 @@ def _reproject_esri_geometry(geometry: dict, from_wkid: int, to_wkid: int) -> di
     specific geometry/layer combination — doing it client-side removes
     that variable entirely.
     """
-    from pyproj import Transformer
+    try:
+        from pyproj import Transformer
+    except ImportError as exc:
+        raise RuntimeError(
+            f"pyproj is not installed or failed to import: {exc}. "
+            f"Add 'pyproj' to requirements.txt and ensure it actually "
+            f"installed on the deployment (check Render's build logs "
+            f"for pyproj-related errors — it has a compiled C extension "
+            f"dependency, PROJ, which can fail to build/find its data "
+            f"files on some hosts)."
+        )
 
-    transformer = Transformer.from_crs(
-        f"EPSG:{from_wkid}", f"EPSG:{to_wkid}", always_xy=True
-    )
+    try:
+        transformer = Transformer.from_crs(
+            f"EPSG:{from_wkid}", f"EPSG:{to_wkid}", always_xy=True
+        )
+    except Exception as exc:  # noqa: BLE001 — pyproj/PROJ initialization failures can raise several different internal exception types depending on what's misconfigured
+        raise RuntimeError(
+            f"pyproj Transformer.from_crs(EPSG:{from_wkid}, EPSG:{to_wkid}) "
+            f"failed to initialize: {type(exc).__name__}: {exc}. This "
+            f"usually means PROJ's coordinate system data files aren't "
+            f"correctly installed/located in this environment — check "
+            f"whether the PROJ_LIB or PROJ_DATA environment variable "
+            f"needs to be set explicitly on Render, or whether pyproj's "
+            f"wheel installed its bundled data correctly."
+        )
+
     new_rings = []
-    for ring in geometry.get("rings", []):
-        new_ring = [list(transformer.transform(x, y)) for x, y in ring]
-        new_rings.append(new_ring)
+    try:
+        for ring in geometry.get("rings", []):
+            new_ring = []
+            for point in ring:
+                x, y = point[0], point[1]
+                new_x, new_y = transformer.transform(x, y)
+                new_ring.append([float(new_x), float(new_y)])
+            new_rings.append(new_ring)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"Reprojection transform failed partway through: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
     return {
         "rings": new_rings,
         "spatialReference": {"wkid": to_wkid},

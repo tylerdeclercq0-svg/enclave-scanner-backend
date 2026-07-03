@@ -151,7 +151,26 @@ def scan_county(
             detail=f"Missing dependency: {exc}. Run: pip install shapely",
         )
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"Scan failed: {exc}")
+        # Exhaustive raw diagnostic: print every possible representation
+        # of the exception to rule out any silent truncation, exception
+        # chaining, or __str__ override hiding the real message —
+        # repeated attempts to add labeled context inside
+        # parcel_fetcher.py were not appearing in this endpoint's
+        # response despite being confirmed present in the deployed
+        # source, so this bypasses all of that and reports the rawest
+        # possible view of exactly what Python caught here.
+        import traceback
+        tb_str = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Scan failed",
+                "exception_type": type(exc).__name__,
+                "exception_str": str(exc),
+                "exception_repr": repr(exc),
+                "traceback": tb_str,
+            },
+        )
 
     return {
         "county_id": county_id,

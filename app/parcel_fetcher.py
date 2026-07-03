@@ -148,44 +148,76 @@ def fetch_candidate_parcels(
     where_variants = [where]
 
     last_error: Optional[Exception] = None
-    features_iter = None
+    attrs_only_features = None
     for where in where_variants:
         try:
-            # Peek at the first page only to validate the WHERE clause
-            # works before committing to the full paginated fetch below —
-            # cheap way to fail fast on a bad query instead of discovering
-            # it partway through pagination.
-            probe = list(query_layer(
+            # PASS 1: attributes only, NO geometry. This is deliberately
+            # split from the geometry fetch below — a 504 Gateway
+            # Timeout was observed even on a single-record probe WITH
+            # geometry requested, while the exact same WHERE clause
+            # without geometry is expected to be much cheaper for the
+            # server to answer (no polygon assembly/serialization).
+            # If this pass is ALSO slow, the bottleneck is the WHERE
+            # clause / table scan itself, not geometry — that would
+            # point to needing a narrower county-specific query
+            # instead of hitting the 10.8M-row statewide layer directly.
+            attrs_only_features = list(query_layer(
                 STATEWIDE_CADASTRAL_URL,
                 where=where,
                 out_fields=out_fields,
-                return_geometry=True,
-                page_size=1,
+                return_geometry=False,
+                page_size=200,
             ))
-            features_iter = query_layer(
-                STATEWIDE_CADASTRAL_URL,
-                where=where,
-                out_fields=out_fields,
-                return_geometry=True,
-                page_size=100,
-            )
             break
-        except Exception as exc:  # noqa: BLE001 — deliberately broad: trying the next WHERE variant regardless of failure reason
+        except Exception as exc:  # noqa: BLE001
             last_error = exc
             continue
 
-    if features_iter is None:
+    if attrs_only_features is None:
         raise RuntimeError(
-            f"Could not query the statewide cadastral layer with either "
-            f"numeric or string DOR_UC comparison. Last error: {last_error}"
+            f"Could not query the statewide cadastral layer (attributes-only "
+            f"pass). This suggests the bottleneck is the WHERE clause "
+            f"itself, not geometry fetching. Last error: {last_error}"
         )
 
-    candidates: list[CandidateParcel] = []
-    for feat in features_iter:
+    # Apply the acreage filter BEFORE fetching any geometry — this is
+    # the actual point of the two-pass split: only pull expensive
+    # polygon geometry for the small number of parcels that survive
+    # the cheap attribute filter, instead of fetching geometry for
+    # every agricultural parcel in the county up front.
+    surviving_attrs = []
+    for feat in attrs_only_features:
         attrs = feat.get("attributes", {})
         acreage = _acreage_from_record(attrs)
         if acreage is not None and not (min_acreage <= acreage <= max_acreage):
             continue
+        surviving_attrs.append((attrs, acreage))
+        if len(surviving_attrs) >= max_candidates:
+            break
+
+    # PASS 2: fetch geometry only for surviving parcels, one at a time
+    # by PARCEL_ID. This trades more individual requests for much
+    # smaller/cheaper individual responses — appropriate here since
+    # surviving_attrs is capped at max_candidates (small), not the
+    # full agricultural parcel set for the county.
+    candidates: list[CandidateParcel] = []
+    for attrs, acreage in surviving_attrs:
+        parcel_id = attrs.get("PARCEL_ID")
+        geometry = None
+        if parcel_id:
+            try:
+                geom_where = f"CO_NO = {county.fips} AND PARCEL_ID = '{parcel_id}'"
+                geom_features = list(query_layer(
+                    STATEWIDE_CADASTRAL_URL,
+                    where=geom_where,
+                    out_fields="PARCEL_ID",
+                    return_geometry=True,
+                    page_size=1,
+                ))
+                if geom_features:
+                    geometry = geom_features[0].get("geometry")
+            except Exception:  # noqa: BLE001 — a single parcel's geometry failing shouldn't abort the whole scan; it just gets flagged downstream as "no geometry, verify manually" per scan_orchestrator.py's existing handling
+                geometry = None
 
         candidates.append(CandidateParcel(
             parcel_id=attrs.get("PARCEL_ID"),
@@ -203,7 +235,7 @@ def fetch_candidate_parcels(
             township=attrs.get("TWN"),
             range_=attrs.get("RNG"),
             legal_desc=attrs.get("S_LEGAL"),
-            geometry=feat.get("geometry"),
+            geometry=geometry,
         ))
 
         if len(candidates) >= max_candidates:

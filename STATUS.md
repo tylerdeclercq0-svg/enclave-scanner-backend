@@ -1,4 +1,4 @@
-# Status — 2026-07-03
+# Status — 2026-07-03 (updated: blockers 1 and 2 resolved)
 
 Ground-truthing pass against live data for the FL agricultural enclave
 scanner (SB 686 / HB 691, F.S. 163.3164(4)). This file is the handoff
@@ -81,67 +81,192 @@ point if context resets — read this before re-deriving anything.
   county-scoped tables are far smaller and confirmed fast even with
   geometry included.
 
-## Blockers (not silently routed around — need a decision)
+## Blockers 1 and 2 — RESOLVED 2026-07-03
 
-### Blocker 1: `shapely` fails to build on this machine
-`pip install -r requirements.txt` fails building `shapely` from source:
-`fatal error C1083: Cannot open include file: 'geos_c.h'`. Root cause:
-Python 3.14 here has no prebuilt wheel available for `shapely==2.0.7`,
-so pip falls back to a source build, which needs the GEOS C library
-headers (not installed, and not trivial to install correctly on
-Windows). `requests` installs fine on its own.
+### Blocker 1: `shapely` fails to build on this machine — RESOLVED
+Root cause confirmed: Python 3.14 (the only version the `py` launcher
+had registered) has no prebuilt wheel for `shapely==2.0.7`, forcing a
+source build that needs GEOS headers not installed on this machine.
+Rather than chasing a cp314 wheel, installed Python 3.12.10 via
+`winget install Python.Python.3.12` and created a project-local venv:
+`.venv312/` at the repo root. `pip install -r requirements.txt` there
+pulls a prebuilt `shapely-2.0.7-cp312-cp312-win_amd64.whl` — no source
+build, no GEOS headers needed. Confirmed both `import shapely` (basic
+polygon `.area`) and `import encirclement` (the actual module blocked
+by this) work cleanly in `.venv312`. Use `.venv312/Scripts/python` for
+all local dev/testing from now on instead of the system `py -3.14`.
 
-Impact: blocks `encirclement.py` (perimeter/adjacency test) and
-therefore the full `scan_orchestrator.py` pipeline. `parcel_fetcher.py`
-itself does NOT need shapely and works today.
+Added `certifi>=2024.0` to `requirements.txt` as a direct (previously
+only transitive) dependency — needed for Blocker 2's fix below.
 
-Likely fixes (not yet attempted): pin to an older shapely version with
-a Windows cp314 wheel available, or install via conda/a wheel from
-Christoph Gohlke's archive, or just run the real deploy target (Linux,
-e.g. Render) where prebuilt manylinux wheels exist — this may be a
-local-machine-only problem, worth checking there before spending more
-effort on the Windows build specifically.
+### Blocker 2: Osceola's server has a broken TLS certificate chain — RESOLVED
+Fetched the missing intermediate ("Entrust DV TLS Issuing RSA CA 2")
+from the leaf cert's own AIA "CA Issuers" URL
+(`http://crt.sectigo.com/EntrustDVTLSIssuingRSACA2.crt`), converted
+DER→PEM, and committed it at
+`app/certs/entrust_dv_tls_issuing_rsa_ca_2.pem`. `app/arcgis_client.py`
+now builds a combined CA bundle (certifi's default bundle + this one
+extra cert, cached per-process via `functools.lru_cache` to a temp
+file) and passes it as `verify=` specifically for requests to
+`gis.osceola.org` (`_HOST_EXTRA_INTERMEDIATES` dict, keyed by hostname,
+checked in `_verify_for_url()`); every other host keeps default
+`verify=True`. This is real chain validation, not a `verify=False`
+downgrade. Confirmed live: `describe_layer()` and `query_layer_count()`
+against Osceola's parcel layer both succeed now with no SSL error.
 
-### Blocker 2: Osceola's server has a broken TLS certificate chain
-`gis.osceola.org` sends only its leaf certificate, no intermediate —
-confirmed via `openssl s_client -showcerts` (1 cert returned, vs. 3 for
-St. Johns' host and 2 for ArcGIS Online). The intermediate is Entrust's
-"Entrust DV TLS Issuing RSA CA 2".
+**Bug found and fixed while verifying the above**: once TLS was no
+longer the blocker, `fetch_candidate_parcels("osceola")` failed with a
+live ArcGIS 400 "Unable to complete operation" — caused by
+`parcel_fetcher.py` using `CountyEndpoint.jurisdiction_field`
+("Jurisdiction") in the PARCEL layer's `outFields`, but that field name
+belongs to Osceola's separate FLUM layer; the parcel layer's real field
+is `Jurisdicti` (per this file's own pre-existing note, previously
+never actually exercised because TLS blocked every Osceola parcel
+call). Fixed by adding a distinct `parcel_jurisdiction_field` to
+`CountyEndpoint` (`county_registry.py`), set to `"Jurisdicti"` for
+Osceola and `None` elsewhere (no other county's parcel layer has a
+jurisdiction field), and switching `parcel_fetcher.py` to read that
+instead of the FLUM-layer field. All four counties now confirmed live
+end-to-end via `fetch_candidate_parcels()`, including Osceola (real
+parcels returned, e.g. Walt Disney Parks and Resorts US Inc, Farmland
+Reserve Inc).
 
-This is why it worked during Step 3 testing via `curl` on Windows: curl
-uses Windows' schannel, which automatically fetches missing
-intermediates via the certificate's AIA (Authority Information Access)
-extension. Python's `requests`/`certifi` uses a static trust bundle with
-no such fallback, so it fails with
-`SSLCertVerificationError: unable to get local issuer certificate`. This
-is a REAL SERVER MISCONFIGURATION on Osceola's end, not an environment
-quirk — it will also fail on a Linux production server (e.g. Render),
-not just here.
+**New data gap found, not a code bug**: Osceola's parcel-layer
+`Jurisdicti`/`JurisDesc` fields exist and are queryable (the 400 is
+gone) but are NULL on every sampled row — so the previously-noted
+"best-supported unincorporated filter" data does NOT actually exist at
+the parcel-layer level after all. The FLUM layer's `Jurisdiction` field
+(a separate service, confirmed populated with real values earlier) is
+unaffected by this — the unincorporated hard filter would need to join
+against the FLUM layer, not rely on the parcel layer's own jurisdiction
+fields as previously assumed.
 
-Did NOT disable SSL verification to route around this — that's a real
-security tradeoff, not a call to make unilaterally.
+## `run_county_scan()` run end-to-end — 2026-07-03, three real bugs found and fixed
 
-Likely fixes (not yet attempted): (a) fetch the missing Entrust
-intermediate cert and pass it to `requests` via a custom CA bundle
-(`verify=` pointing at certifi's bundle + the one extra cert) — a real
-fix, not a security downgrade, since full chain validation still
-happens; or (b) file a request with Osceola County GIS to fix their
-server's cert chain (out of our control/timeline).
+Ran the full pipeline (`fetch_candidate_parcels` → `encirclement` →
+`exclusions` → `scoring`) live via `.venv312` for all four counties, not
+just Pasco. No exceptions anywhere, but the FIRST run silently returned
+`pct_perimeter_qualifying = 0.0` for every single Pasco candidate
+regardless of real acreage/location — a red flag, not a real result
+(confirmed real variation exists once fixed: see below). Root-caused
+three separate, real bugs, all now fixed:
+
+1. **`_buffer_esri_geometry` asserted the wrong spatial reference**
+   (`scan_orchestrator.py`). It read `geometry.get("spatialReference")`
+   with a fallback default of wkid 2236 — but ArcGIS Server does NOT
+   include a `spatialReference` on each feature's geometry in a
+   `/query` response (only once, at the FeatureSet root, which
+   `arcgis_client.query_layer` discards), so the fallback always fired.
+   Every candidate geometry is actually in `AREA_SR` (3086, meters) —
+   asserting 2236 (State Plane feet) mislabeled the coordinates sent to
+   the FLUM layer's spatial filter, so the query silently matched zero
+   real neighbors. Fixed: hardcode `{"wkid": AREA_SR}` instead of
+   reading a field that's never actually present. Also fixed a related
+   unit bug this exposed: the buffer distance parameter is named/passed
+   in feet, but was being applied directly to coordinates now correctly
+   known to be in meters — added an explicit feet→meters conversion
+   before calling Shapely's `.buffer()`.
+
+2. **`query_layer` call for FLUM neighbors didn't request `out_sr`**
+   (`scan_orchestrator.py`). Once bug 1 was fixed, real neighbors
+   started coming back — but in the FLUM layer's own native SR (Web
+   Mercator/3857 for Pasco, confirmed via `describe_layer`), not 3086,
+   so `compute_encirclement`'s Shapely intersection was comparing two
+   geometries in incompatible coordinate systems. Fixed by passing
+   `out_sr=AREA_SR` on that query, same as every other geometry fetch in
+   this project.
+
+3. **`esri_json_to_shapely` mishandled real multipart FLUM polygons**
+   (`encirclement.py`) — this was already flagged as a known gap in its
+   own docstring, now hit live. It assumed ring 0 is always the sole
+   exterior and every other ring is a hole; Pasco's FLUM layer has
+   genuinely multipart geometries (multiple real exterior rings, not
+   holes), and the naive version produced an INVALID, self-intersecting
+   Shapely polygon whose intersection with the real candidate geometry
+   came back nonsensical (confirmed live: intersection area equaled the
+   candidate's own full area, boundary-to-boundary length came back
+   0.0). Fixed by classifying each ring as exterior vs. hole by winding
+   direction (Esri's actual convention — clockwise/negative signed
+   shoelace area = exterior, counter-clockwise/positive = hole) and
+   assigning each hole to whichever exterior ring actually contains it,
+   returning a `MultiPolygon` when there's more than one real part.
+   `_buffer_esri_geometry` was updated to handle a `MultiPolygon` result
+   (build one Esri ring per part) instead of assuming `.exterior`
+   always exists.
+
+**Fourth issue found, algorithmic not a data bug**: even after fixing
+1–3, `compute_encirclement` still returned 0% for a candidate with a
+real, valid, correctly-classified qualifying (`RES-6`) neighbor. Cause:
+it measured `boundary.intersection(neighbor_poly.boundary)` — a
+boundary-to-boundary LINE intersection, which requires the candidate's
+edge to exactly coincide with the FLUM polygon's edge. Confirmed live
+this is essentially never true: FLUM designations are a land-use
+overlay, not a parcel-boundary layer, and routinely CONTAIN a candidate
+parcel entirely (the ground a currently-agricultural parcel sits on can
+already carry a future-residential FLUM designation) rather than merely
+bordering it — in that case the neighbor polygon's boundary never
+touches the candidate's edge at all, even though the correct real-world
+answer is "100% encircled." Fixed by measuring
+`boundary.intersection(neighbor_poly)` instead (candidate boundary LINE
+intersected with neighbor AREA, not neighbor boundary) — this correctly
+handles both a parcel sitting inside one big qualifying zone (full
+perimeter counts) and a parcel merely bordering a smaller adjacent zone
+(only the touching stretch counts). Added a defensive cap so summed
+segment lengths can never nonsensically exceed 100% of the real
+perimeter.
+
+**Confirmed correct after all four fixes**: ran all four counties
+end-to-end again. Pasco and Osceola candidates now show real,
+differentiated results (e.g. one Pasco parcel at exactly 100% qualifying
+→ pathway 1 matched; others at 3–32%, no pathway). Nassau and St. Johns
+still correctly show 0% for their sampled candidates (large remote
+Rayonier timberland tracts) — verified this is a REAL result, not the
+same bug: their one real neighbor per parcel is genuinely
+`'Agriculture'` (Nassau) / `'RUR/SYLV'` (St. Johns), both correctly
+non-qualifying, not an artifact of zero-neighbors-found.
+
+**Fifth issue, a real data-correction, not a code bug**: while
+debugging, discovered Pasco's `CountyEndpoint.flu_field`/
+`agricultural_flu_values` (`county_registry.py`) — already flagged as
+an UNCONFIRMED CARRYOVER guess (`"COMP_LAND_"` / `"Agricultural/Rural"`)
+— don't exist on the real layer at all. Confirmed via live
+`describe_layer` + a full distinct-values query (48 combinations, 1476
+features): the real field is `FLU_CODE`, and the real agricultural
+codes are `'AG'` and `'AG/R'`. Fixed in `county_registry.py`. Before
+this fix, every Pasco encirclement check was silently comparing against
+a field that always returned `None` — this compounded with bugs 1–4
+above to make the very first live run fully invisible as a bug (0% for
+every candidate looked plausible on its own).
+
+Centroid computation (`get_centroid_lat_lon`, hand-written Albers
+inverse) was also exercised live for the first time this pass and
+checked out — Pasco/Osceola parcels came back at real, correct-looking
+lat/lon (e.g. 28.41°N/-82.66°W for a Pasco parcel, genuinely within
+Pasco County).
+
+`exclusions.py` and `scoring.py` ran without incident — both are pure
+Python with no live-data assumptions, and produced sensible output
+(manual-review flags, 0–100 scores with visible breakdowns) on the
+first try.
 
 ## Exact next step
 
-1. Decide how to handle Blocker 1 (shapely) — try an older
-   pinned version, or defer full pipeline testing to the real Linux
-   deploy target.
-2. Decide how to handle Blocker 2 (Osceola cert chain) — build the
-   custom CA bundle fix, or proceed with three of four counties
-   working and flag Osceola as pending.
-3. Once shapely is available, run `run_county_scan()` end-to-end for at
-   least Pasco (already fully confirmed at the parcel_fetcher layer) and
-   see what breaks in `encirclement.py`/`exclusions.py`/`scoring.py` —
-   none of those have been exercised against live data yet.
-4. Then Step 5 (wire the `web/` dashboard to real endpoints) is still
-   fully unstarted.
+1. Step 5 (wire the `web/` dashboard to real endpoints) is still fully
+   unstarted — this is now unblocked, since `run_county_scan()` is
+   confirmed working end-to-end for real data in all four counties.
+2. Revisit the unincorporated-status hard filter given the Osceola
+   parcel-layer jurisdiction data gap found earlier in this file —
+   likely needs a spatial join against the FLUM layer's `Jurisdiction`
+   field instead of the parcel layer's own (NULL) jurisdiction fields.
+3. Consider re-running the same live `describe_layer` + distinct-values
+   spot-check that caught Pasco's wrong `flu_field` against the other
+   three counties' FLUM layers, now that there's a concrete example of
+   how an "UNCONFIRMED CARRYOVER guess" note in this file turned out to
+   be silently wrong in production-relevant code.
+4. `max_candidates=25` default in `run_county_scan` has not been timed
+   against a real full run yet — worth a rough wall-clock check before
+   wiring this into a synchronous web request (see the function's own
+   docstring re: free-tier hosting timeouts).
 
 ## Known gaps (already flagged, still true, not addressed this pass)
 

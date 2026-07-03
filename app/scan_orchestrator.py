@@ -34,7 +34,7 @@ from dataclasses import dataclass, asdict
 from typing import Optional
 
 from county_registry import COUNTIES
-from parcel_fetcher import fetch_candidate_parcels, CandidateParcel
+from parcel_fetcher import fetch_candidate_parcels, CandidateParcel, AREA_SR
 from encirclement import compute_encirclement, determine_pathways, EncirclementResult, get_centroid_lat_lon
 from arcgis_client import query_layer
 import exclusions
@@ -124,6 +124,7 @@ def run_county_scan(
                     geometry=buffered_geom,
                     geometry_type="esriGeometryPolygon",
                     spatial_rel="esriSpatialRelIntersects",
+                    out_sr=AREA_SR,
                 ))
                 encirclement = compute_encirclement(
                     parcel.geometry,
@@ -232,15 +233,50 @@ def _buffer_esri_geometry(geometry: dict, distance_feet: float) -> dict:
     Buffer an ArcGIS-format polygon geometry outward by a fixed
     distance, returning a new ArcGIS-format geometry suitable for use
     as a spatial filter in a subsequent query. Requires Shapely.
+
+    Hardcodes the output spatialReference to AREA_SR (3086, Florida
+    Albers meters) rather than reading `geometry.get("spatialReference")`
+    -- confirmed live that ArcGIS Server does NOT include a
+    spatialReference on each feature's geometry in a /query response
+    (it's only present once, at the FeatureSet root, which
+    arcgis_client.query_layer discards). The old fallback default of
+    wkid 2236 was silently wrong: every candidate geometry passed in
+    here actually comes from parcel_fetcher.fetch_candidate_parcels,
+    which always requests outSR=AREA_SR, so 3086 is the correct SR to
+    assert here, not a guess. Getting this wrong caused every neighbor
+    spatial query to silently return zero results (garbage
+    coordinates interpreted under the wrong CRS), not a real "0%
+    encircled" answer -- confirmed live against a real Pasco parcel.
+
+    distance_feet is converted to meters before being passed to
+    shapely's buffer() -- shapely operates on the polygon's raw
+    coordinate values with no unit awareness, and since the geometry is
+    now correctly asserted to be in AREA_SR (3086, meters, not feet
+    despite the parameter's name/the original State-Plane-era
+    assumption), passing the feet value straight through would silently
+    buffer by that many METERS instead (about 3.3x larger than
+    intended).
     """
     from encirclement import esri_json_to_shapely  # local import to keep the ImportError path isolated
+    from shapely.geometry import MultiPolygon
+
+    FEET_PER_METER = 0.3048
+    distance_meters = distance_feet * FEET_PER_METER
 
     poly = esri_json_to_shapely(geometry)
-    buffered = poly.buffer(distance_feet)
-    exterior_coords = list(buffered.exterior.coords)
+    buffered = poly.buffer(distance_meters)
+    # esri_json_to_shapely can now return a MultiPolygon for genuinely
+    # multipart candidate geometry (see its 2026-07-03 fix) — buffering
+    # that can still yield a MultiPolygon if the parts stay far enough
+    # apart, so build a multi-ring Esri geometry (one ring per part's
+    # exterior) instead of assuming a single `.exterior` always exists.
+    if isinstance(buffered, MultiPolygon):
+        rings = [list(part.exterior.coords) for part in buffered.geoms]
+    else:
+        rings = [list(buffered.exterior.coords)]
     return {
-        "rings": [exterior_coords],
-        "spatialReference": geometry.get("spatialReference", {"wkid": 2236}),
+        "rings": rings,
+        "spatialReference": {"wkid": AREA_SR},
     }
 
 

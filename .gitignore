@@ -1,0 +1,7 @@
+data/*.json
+data/*.xlsx
+data/*.csv
+__pycache__/
+*.pyc
+.DS_Store
+.venv312/

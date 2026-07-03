@@ -28,11 +28,16 @@ ArcGIS REST quirks this code accounts for:
 
 from __future__ import annotations
 
+import functools
 import json
+import os
+import tempfile
 import time
 from dataclasses import dataclass
 from typing import Any, Iterator, Optional
+from urllib.parse import urlparse
 
+import certifi
 import requests
 
 
@@ -40,6 +45,49 @@ DEFAULT_TIMEOUT = 12
 DEFAULT_PAGE_SIZE = 500
 MAX_RETRIES = 1
 RETRY_BACKOFF_SECONDS = 1
+
+# gis.osceola.org sends only its leaf certificate, no intermediate --
+# confirmed via `openssl s_client -showcerts` (1 cert returned, vs. 3 for
+# St. Johns' host and 2 for ArcGIS Online). This is a real misconfiguration
+# on Osceola's end (curl/Windows schannel masks it by auto-fetching the
+# missing intermediate via the cert's AIA extension; Python's requests/
+# certifi has no such fallback). Rather than disabling verification, the
+# missing intermediate ("Entrust DV TLS Issuing RSA CA 2", fetched from the
+# leaf cert's own AIA "CA Issuers" URL) is bundled alongside certifi's
+# normal trust store so full chain validation still happens.
+_CERTS_DIR = os.path.join(os.path.dirname(__file__), "certs")
+_HOST_EXTRA_INTERMEDIATES: dict[str, str] = {
+    "gis.osceola.org": os.path.join(_CERTS_DIR, "entrust_dv_tls_issuing_rsa_ca_2.pem"),
+}
+
+
+@functools.lru_cache(maxsize=None)
+def _combined_ca_bundle(extra_cert_path: str) -> str:
+    """
+    Builds (once per process) a temp CA bundle file containing certifi's
+    default trust store plus one extra intermediate cert, and returns its
+    path for use as `requests`' `verify=` argument.
+    """
+    with open(certifi.where(), "rb") as f:
+        base_bundle = f.read()
+    with open(extra_cert_path, "rb") as f:
+        extra_cert = f.read()
+
+    fd, path = tempfile.mkstemp(prefix="ag_enclave_ca_bundle_", suffix=".pem")
+    with os.fdopen(fd, "wb") as f:
+        f.write(base_bundle)
+        f.write(b"\n")
+        f.write(extra_cert)
+    return path
+
+
+def _verify_for_url(url: str) -> "bool | str":
+    """Returns the `verify=` value requests should use for a given layer URL."""
+    host = urlparse(url).hostname or ""
+    extra_cert_path = _HOST_EXTRA_INTERMEDIATES.get(host)
+    if extra_cert_path is None:
+        return True
+    return _combined_ca_bundle(extra_cert_path)
 
 
 class ArcGISQueryError(RuntimeError):
@@ -83,7 +131,7 @@ def _request_with_retry(url: str, params: dict[str, Any]) -> dict[str, Any]:
     }
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = requests.post(url, data=encoded_params, timeout=DEFAULT_TIMEOUT)
+            resp = requests.post(url, data=encoded_params, timeout=DEFAULT_TIMEOUT, verify=_verify_for_url(url))
             resp.raise_for_status()
             payload = resp.json()
             if "error" in payload:
@@ -166,7 +214,7 @@ def describe_layer(layer_url: str) -> dict[str, Any]:
     metadata endpoints reliably support GET but POST support there
     isn't confirmed the way it is for /query.
     """
-    resp = requests.get(layer_url, params={"f": "json"}, timeout=DEFAULT_TIMEOUT)
+    resp = requests.get(layer_url, params={"f": "json"}, timeout=DEFAULT_TIMEOUT, verify=_verify_for_url(layer_url))
     resp.raise_for_status()
     return resp.json()
 

@@ -276,7 +276,7 @@ def fetch_candidate_parcels(
 
     out_fields_set = {county.parcel_use_code_field, county.parcel_owner_field,
                        county.parcel_owner_field_2, county.parcel_id_field,
-                       county.jurisdiction_field, county.parcel_acreage_field}
+                       county.parcel_jurisdiction_field, county.parcel_acreage_field}
     out_fields = ",".join(f for f in out_fields_set if f)
 
     candidates: list[CandidateParcel] = []
@@ -309,7 +309,7 @@ def fetch_candidate_parcels(
             use_code_field=county.parcel_use_code_field,
             owner_name=attrs.get(county.parcel_owner_field) if county.parcel_owner_field else None,
             owner_name_2=attrs.get(county.parcel_owner_field_2) if county.parcel_owner_field_2 else None,
-            jurisdiction=attrs.get(county.jurisdiction_field) if county.jurisdiction_field else None,
+            jurisdiction=attrs.get(county.parcel_jurisdiction_field) if county.parcel_jurisdiction_field else None,
             geometry=geometry,
         ))
 

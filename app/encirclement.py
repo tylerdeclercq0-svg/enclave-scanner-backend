@@ -72,22 +72,74 @@ def _require_shapely():
         )
 
 
+def _signed_ring_area(ring: list[list[float]]) -> float:
+    """
+    Shoelace formula, signed (not absolute). Same convention as
+    parcel_fetcher.polygon_area_acres/_signed_ring_area (kept as a
+    separate copy here rather than importing across modules for a
+    four-line helper) -- sign encodes winding direction, which is how
+    Esri's REST API actually distinguishes exterior rings from holes,
+    NOT ring order in the array.
+    """
+    total = 0.0
+    n = len(ring)
+    for i in range(n):
+        x1, y1 = ring[i][0], ring[i][1]
+        x2, y2 = ring[(i + 1) % n][0], ring[(i + 1) % n][1]
+        total += x1 * y2 - x2 * y1
+    return total / 2.0
+
+
 def esri_json_to_shapely(esri_geom: dict):
     """
-    Convert an ArcGIS REST 'rings' polygon geometry to a Shapely Polygon.
-    ArcGIS returns rings as lists of [x, y] pairs; the first ring is the
-    exterior, subsequent rings are holes. This does not yet handle
-    multipart polygons with multiple exterior rings (true MultiPolygon
-    parcels) — common enough for parcels split by a road that this
-    should be added before relying on this for a full county run.
+    Convert an ArcGIS REST 'rings' polygon geometry to a Shapely
+    Polygon/MultiPolygon.
+
+    FIXED 2026-07-03: the previous version assumed the first ring is
+    always the sole exterior and every other ring is a hole. Confirmed
+    live against Pasco's FLUM layer that this is false — real FLUM
+    polygons are genuinely multipart (multiple disjoint exterior rings
+    in one geometry, e.g. a land-use designation covering two separate
+    tracts). Naively passing all non-first rings to Shapely's
+    Polygon(exterior, holes=...) produced an INVALID, self-intersecting
+    polygon whose `.intersection()` with the real candidate parcel
+    silently returned nonsense (confirmed live: intersection area came
+    back equal to the candidate's own full area, and boundary-to-
+    boundary intersection length came back 0 despite real overlap) —
+    this was the root cause of every candidate showing 0% qualifying
+    perimeter during the first live end-to-end pipeline run, not a
+    genuine "no qualifying neighbors" result.
+
+    Fix: classify each ring as exterior vs. hole by winding direction
+    (Esri's REST API convention: clockwise = exterior, counter-
+    clockwise = hole — a NEGATIVE signed shoelace sum here means
+    clockwise), then assign each hole to whichever exterior ring
+    actually contains it, rather than assuming a fixed ring order.
     """
     _require_shapely()
     rings = esri_geom.get("rings", [])
     if not rings:
         raise ValueError("Geometry has no rings")
-    exterior = rings[0]
-    holes = rings[1:] if len(rings) > 1 else []
-    return Polygon(exterior, holes)
+
+    exterior_rings = [r for r in rings if _signed_ring_area(r) < 0]
+    hole_rings = [r for r in rings if _signed_ring_area(r) >= 0]
+
+    if not exterior_rings:
+        # Malformed/degenerate data (e.g. a single ring that happens to
+        # wind counter-clockwise) — fall back to treating the first ring
+        # as the sole exterior rather than producing an empty geometry.
+        exterior_rings = [rings[0]]
+        hole_rings = [r for r in rings[1:] if r is not rings[0]]
+
+    parts = []
+    for ext in exterior_rings:
+        ext_poly = Polygon(ext)
+        my_holes = [h for h in hole_rings if ext_poly.contains(Polygon(h).representative_point())]
+        parts.append(Polygon(ext, my_holes) if my_holes else ext_poly)
+
+    if len(parts) == 1:
+        return parts[0]
+    return MultiPolygon(parts)
 
 
 def get_centroid_lat_lon(esri_geom: dict, source_wkid: int = 3086) -> Optional[tuple[float, float]]:
@@ -262,7 +314,25 @@ def compute_encirclement(
         except (ValueError, TypeError):
             continue
 
-        shared = boundary.intersection(neighbor_poly.boundary)
+        # FIXED 2026-07-03: was `boundary.intersection(neighbor_poly.boundary)`
+        # -- a boundary-to-boundary line intersection, which requires the
+        # candidate's edge to exactly coincide with the FLUM polygon's
+        # edge. Confirmed live against a real Pasco parcel that this is
+        # almost never true: FLUM designations are a land-use overlay,
+        # not a parcel-boundary layer, and routinely CONTAIN a candidate
+        # parcel entirely (future land use can already cover ground the
+        # parcel sits on, even though the parcel's current use is still
+        # agricultural) rather than merely bordering it. The old check
+        # returned a real neighbor polygon with a real qualifying FLU
+        # code but 0.0 shared length every time, silently reporting "0%
+        # encircled" for every candidate regardless of its real
+        # surroundings. Measuring how much of the candidate's boundary
+        # LINE falls inside the neighbor's AREA (not its boundary) is
+        # the correct check and handles both cases: a parcel sitting
+        # inside one big qualifying FLUM zone (full perimeter counts),
+        # and a parcel merely bordering a smaller adjacent zone (only
+        # the touching stretch counts).
+        shared = boundary.intersection(neighbor_poly)
         shared_length = shared.length
         if shared_length <= 0:
             continue
@@ -279,6 +349,11 @@ def compute_encirclement(
         if is_qualifying:
             qualifying_perimeter += shared_length
 
+    # Defensive cap: FLUM layers are expected to be a clean planar
+    # partition (no gaps/overlaps), so summed segment lengths should
+    # never exceed the real perimeter, but don't let a real-world data
+    # overlap produce a nonsensical >100% result.
+    qualifying_perimeter = min(qualifying_perimeter, total_perimeter)
     pct_qualifying = (qualifying_perimeter / total_perimeter * 100) if total_perimeter > 0 else 0.0
 
     # Pathway determination is intentionally left to a separate function

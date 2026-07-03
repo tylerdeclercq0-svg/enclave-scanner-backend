@@ -116,6 +116,14 @@ class CountyEndpoint:
     # layer down to just this county (e.g. Nassau's parcel layer also
     # contains Baker County). None if the layer is already single-county.
     parcel_county_filter: Optional[str] = None
+    # Jurisdiction field on the PARCEL layer specifically -- separate from
+    # `jurisdiction_field` above, which is the FLUM layer's field name and
+    # is NOT guaranteed to match (e.g. Osceola's FLUM layer uses
+    # "Jurisdiction" but its parcel layer uses "Jurisdicti" -- confirmed
+    # live: passing the FLUM name in the parcel layer's outFields returns
+    # an ArcGIS 400 "Unable to complete operation" error). None if the
+    # parcel layer has no jurisdiction field at all.
+    parcel_jurisdiction_field: Optional[str] = None
 
 
 COUNTIES: dict[str, CountyEndpoint] = {
@@ -166,20 +174,25 @@ COUNTIES: dict[str, CountyEndpoint] = {
             "https://mapping.pascopa.com/arcgis/rest/services/"
             "Land_Use/MapServer/0"
         ),
-        # flu_field/agricultural_flu_values here are STILL UNCONFIRMED --
-        # only the parcel layer below was describe_layer-tested this
-        # pass. COMP_LAND_ is carried over from the prior pass as a guess;
-        # do not trust it until this FLUM layer's own /query?f=pjson has
-        # been checked the same way the parcel layer was.
-        flu_field="COMP_LAND_",
+        # CONFIRMED live 2026-07-03 via describe_layer (?f=pjson) + a full
+        # distinct-values query (48 combinations, 1476 features) while
+        # running the full scan pipeline end-to-end for the first time.
+        # The prior COMP_LAND_/"Agricultural/Rural" pairing was a guess
+        # that does not exist on this layer at all -- the real field is
+        # FLU_CODE, and the real agricultural codes are 'AG'
+        # ("AGRICULTURAL-.1 du/ga*") and 'AG/R'
+        # ("AGRICULTURAL/RURAL-.2 du/ga*"). This bug meant every
+        # encirclement check for Pasco was silently comparing against a
+        # field that always returned None, before it was ever run live.
+        flu_field="FLU_CODE",
         jurisdiction_field=None,
         acreage_field=None,
-        agricultural_flu_values=("Agricultural/Rural",),
+        agricultural_flu_values=("AG", "AG/R"),
         notes=(
-            "FLUM layer (Land_Use/MapServer/0): confirmed LIVE (root "
-            "service responds), but flu_field/agricultural_flu_values "
-            "below are still an UNCONFIRMED CARRYOVER guess -- not "
-            "describe_layer-tested this pass, unlike the parcel layer. "
+            "FLUM layer (Land_Use/MapServer/0): CONFIRMED via live "
+            "describe_layer + full distinct-values query 2026-07-03 "
+            "(see flu_field/agricultural_flu_values above -- this "
+            "replaces the earlier unconfirmed COMP_LAND_ guess). "
             "PARCEL layer (Parcels/MapServer/3, 'Parcels (Clickable "
             "Info)'): CONFIRMED via live describe_layer 2026-07-03 and "
             "test query. Real field names: DIR_CLASS (3-char DOR-style "
@@ -469,7 +482,11 @@ COUNTIES: dict[str, CountyEndpoint] = {
         parcel_id_field="PARCELNO",
         # jurisdiction_field above (set to "Jurisdiction") is the FLUM
         # layer's field; the parcel layer carries the same concept under
-        # different names -- Jurisdicti (code) / JurisDesc (plain text).
+        # a different name -- Jurisdicti (code, used here) / JurisDesc
+        # (plain text). Confirmed live: using the FLUM field name
+        # ("Jurisdiction") in the parcel layer's outFields fails with an
+        # ArcGIS 400 error, since that field doesn't exist on this layer.
+        parcel_jurisdiction_field="Jurisdicti",
     ),
 }
 

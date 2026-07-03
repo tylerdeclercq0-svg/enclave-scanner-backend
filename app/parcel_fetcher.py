@@ -42,6 +42,20 @@ def fetch_county_boundary_geometry(county_name: str) -> Optional[dict]:
     plain county name (e.g. "HILLSBOROUGH") — exact casing/format not
     yet confirmed against live data; may need adjustment (title case,
     "County" suffix, etc.) once tested.
+
+    BUG FIX: this layer's confirmed spatial reference is WKID 26917
+    (UTM Zone 17N), per its live metadata — but ArcGIS feature query
+    responses do not necessarily embed spatialReference inside each
+    individual feature's geometry object (it's typically only present
+    once at the top level of the response). The caller
+    (query_layer_ids' inSR handling) was relying on
+    geometry["spatialReference"]["wkid"] being present and silently
+    falling back to 4326 (plain lat/lon) when it wasn't — while the
+    coordinates were actually still in 26917. This produced a spatial
+    filter that looked successful (no error) but matched zero real
+    parcels, since the "boundary" was being interpreted as being in
+    the wrong coordinate system entirely. Explicitly attaching the
+    correct, confirmed spatialReference here closes that gap.
     """
     where = f"UPPER(NAME) = '{county_name.upper()}'"
     features = list(query_layer(
@@ -53,7 +67,13 @@ def fetch_county_boundary_geometry(county_name: str) -> Optional[dict]:
     ))
     if not features:
         return None
-    return features[0].get("geometry")
+    geometry = features[0].get("geometry")
+    if geometry is not None and "spatialReference" not in geometry:
+        # Confirmed spatial reference for this specific layer (WKID
+        # 26917 / UTM Zone 17N) — see docstring above for why this
+        # can't be safely assumed to already be present.
+        geometry["spatialReference"] = {"wkid": 26917}
+    return geometry
 
 
 @dataclass

@@ -28,6 +28,7 @@ ArcGIS REST quirks this code accounts for:
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from typing import Any, Iterator, Optional
@@ -58,11 +59,22 @@ def _request_with_retry(url: str, params: dict[str, Any]) -> dict[str, Any]:
     ArcGIS servers commonly return HTTP 200 with an `{"error": {...}}`
     body rather than a 4xx/5xx status, so both layers of failure are
     checked.
+
+    BUG FIX: any dict-valued parameter (e.g. `geometry`) must be sent
+    as a JSON string, not a raw Python dict — `requests` would
+    otherwise serialize it via Python's str()/repr() (single quotes,
+    `None` instead of `null`), which ArcGIS's JSON parser rejects with
+    a generic "'geometry' parameter is invalid" / "Unexpected
+    character encountered" 400 error. Confirmed via live testing.
     """
     last_exc: Optional[Exception] = None
+    encoded_params = {
+        k: (json.dumps(v) if isinstance(v, (dict, list)) else v)
+        for k, v in params.items()
+    }
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = requests.get(url, params=params, timeout=DEFAULT_TIMEOUT)
+            resp = requests.get(url, params=encoded_params, timeout=DEFAULT_TIMEOUT)
             resp.raise_for_status()
             payload = resp.json()
             if "error" in payload:

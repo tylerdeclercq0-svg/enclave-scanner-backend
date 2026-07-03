@@ -253,6 +253,11 @@ def fetch_candidate_parcels(
     if county is None:
         raise ValueError(f"Unknown county id: {county_id}")
 
+    # TEMPORARY: unconditional marker to definitively confirm this
+    # exact code version is what's executing on Render, given repeated
+    # confusion about whether error messages were reflecting this
+    # file's actual current content. Remove once confirmed.
+    raise RuntimeError(">>>MARKER-ENTRY<<< fetch_candidate_parcels reached with this code version")
     # Trimmed to ONLY fields directly confirmed to exist on this exact
     # layer's live metadata response (CO_NO, PARCEL_ID, DOR_UC, OWN_NAME,
     # LND_SQFOOT, JV, LND_UNTS_C). Several other fields used in an
@@ -305,9 +310,9 @@ def fetch_candidate_parcels(
         boundary_geometry = fetch_county_boundary_geometry(county.name)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
-            f"[STEP: fetch boundary] Failed fetching {county.name} "
-            f"County's boundary polygon from the FDOT reference layer: "
-            f"{type(exc).__name__}: {exc}"
+            f">>>MARKER-A<<< [STEP: fetch boundary] Failed fetching "
+            f"{county.name} County's boundary polygon from the FDOT "
+            f"reference layer: {type(exc).__name__}: {exc}"
         )
     if boundary_geometry is None:
         raise RuntimeError(
@@ -339,8 +344,8 @@ def fetch_candidate_parcels(
             spatial_rel="esriSpatialRelIntersects",
         )
         raise RuntimeError(
-            f"[STEP: spatial query] DIAGNOSTIC: spatial filter alone "
-            f"(no DOR_UC) matched "
+            f">>>MARKER-B<<< [STEP: spatial query] DIAGNOSTIC: spatial "
+            f"filter alone (no DOR_UC) matched "
             f"{len(spatial_only_ids)} parcels inside the {county.name} "
             f"County boundary after client-side reprojection to WKID "
             f"3086. If this number is large and reasonable (Hillsborough "
@@ -354,8 +359,8 @@ def fetch_candidate_parcels(
         raise
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
-            f"[STEP: spatial query] Spatial-only query against the "
-            f"statewide cadastral layer failed outright: "
+            f">>>MARKER-C<<< [STEP: spatial query] Spatial-only query "
+            f"against the statewide cadastral layer failed outright: "
             f"{type(exc).__name__}: {exc}"
         )
 

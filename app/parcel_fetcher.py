@@ -107,27 +107,61 @@ def fetch_candidate_parcels(
     if county is None:
         raise ValueError(f"Unknown county id: {county_id}")
 
-    where_clauses = [
-        f"CO_NO = {county.fips}",
-        f"DOR_UC >= '{uc_range[0]:03d}'",
-        f"DOR_UC <= '{uc_range[1]:03d}'",
-    ]
-    where = " AND ".join(where_clauses)
-
     out_fields = ",".join([
         "PARCEL_ID", "CO_NO", "DOR_UC", "LND_SQFOOT", "LND_UNTS_C",
         "OWN_NAME", "OWN_CITY", "OWN_STATE", "JV", "JV_CLASS_U",
         "SALE_YR1", "SALE_PRC1", "SEC", "TWN", "RNG", "S_LEGAL",
     ])
 
+    # DOR_UC's actual stored type (text vs. numeric) isn't confirmed —
+    # ArcGIS servers reject a WHERE clause that quotes a number-typed
+    # field as a string (or vice versa) with a generic "Invalid query
+    # parameters" error rather than a specific type-mismatch message,
+    # so there's no way to distinguish that failure from any other bad
+    # WHERE clause without just trying both forms. Try the unquoted
+    # (numeric) form first since DOR use codes are conventionally
+    # stored as integers in the FDOR NAL extract this layer derives
+    # from; fall back to the quoted (string) form on a 400 error.
+    where_variants = [
+        f"CO_NO = {county.fips} AND DOR_UC >= {uc_range[0]} AND DOR_UC <= {uc_range[1]}",
+        f"CO_NO = {county.fips} AND DOR_UC >= '{uc_range[0]:03d}' AND DOR_UC <= '{uc_range[1]:03d}'",
+    ]
+
+    last_error: Optional[Exception] = None
+    features_iter = None
+    for where in where_variants:
+        try:
+            # Peek at the first page only to validate the WHERE clause
+            # works before committing to the full paginated fetch below —
+            # cheap way to fail fast on a bad query instead of discovering
+            # it partway through pagination.
+            probe = list(query_layer(
+                STATEWIDE_CADASTRAL_URL,
+                where=where,
+                out_fields=out_fields,
+                return_geometry=True,
+                page_size=1,
+            ))
+            features_iter = query_layer(
+                STATEWIDE_CADASTRAL_URL,
+                where=where,
+                out_fields=out_fields,
+                return_geometry=True,
+                page_size=100,
+            )
+            break
+        except Exception as exc:  # noqa: BLE001 — deliberately broad: trying the next WHERE variant regardless of failure reason
+            last_error = exc
+            continue
+
+    if features_iter is None:
+        raise RuntimeError(
+            f"Could not query the statewide cadastral layer with either "
+            f"numeric or string DOR_UC comparison. Last error: {last_error}"
+        )
+
     candidates: list[CandidateParcel] = []
-    for feat in query_layer(
-        STATEWIDE_CADASTRAL_URL,
-        where=where,
-        out_fields=out_fields,
-        return_geometry=True,
-        page_size=100,  # smaller pages = faster individual requests, more of them; trades request count for per-request latency, which matters more against a server that's timing out
-    ):
+    for feat in features_iter:
         attrs = feat.get("attributes", {})
         acreage = _acreage_from_record(attrs)
         if acreage is not None and not (min_acreage <= acreage <= max_acreage):

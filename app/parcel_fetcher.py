@@ -174,37 +174,45 @@ def fetch_candidate_parcels(
     codes_list = ",".join(f"'{c}'" for c in common_ag_codes)
     where = f"CO_NO = {county.fips} AND DOR_UC IN ({codes_list})"
 
-    # DIAGNOSTIC: even returnIdsOnly (the cheapest possible ArcGIS query)
-    # timed out against this WHERE clause, which rules out pagination
-    # strategy as the bottleneck — something about the WHERE clause
-    # itself, or this server's current load/health, is the real issue.
-    # This block establishes a baseline: an unfiltered returnCountOnly
-    # query is about as cheap as an ArcGIS query can get. If THIS also
-    # times out, the server itself is unhealthy right now, not our
-    # query. If it succeeds quickly, the CO_NO/DOR_UC filter combination
-    # specifically is the problem (e.g. an unindexed field), pointing
-    # to a narrower fix. Remove this diagnostic once the real cause is
-    # confirmed either way.
+    # DIAGNOSTIC ROUND 2: baseline confirmed the server is healthy
+    # (10,831,924 total rows, fast response) — so CO_NO and/or DOR_UC
+    # is specifically slow, most likely because one or both fields
+    # aren't indexed on this layer (a very plausible real-world gap:
+    # DOR_UC is a derived/text field, and CO_NO being a Double rather
+    # than an indexed integer key could also matter). Testing CO_NO
+    # alone here to isolate which of the two conditions is the actual
+    # problem before deciding the fix (an index request to the data
+    # owner isn't realistic for a public dataset we don't control —
+    # more likely fix is a fundamentally different query approach,
+    # e.g. spatial filtering by county boundary geometry instead of
+    # the CO_NO attribute, since spatial indexes are far more likely
+    # to exist and be fast on a layer like this).
     try:
         from arcgis_client import query_layer_count
-        baseline_count = query_layer_count(STATEWIDE_CADASTRAL_URL, where="1=1")
+        co_no_only_count = query_layer_count(
+            STATEWIDE_CADASTRAL_URL, where=f"CO_NO = {county.fips}"
+        )
         raise RuntimeError(
-            f"DIAGNOSTIC: baseline unfiltered count succeeded with "
-            f"{baseline_count} total rows in the layer. This means the "
-            f"server is reachable and responsive in general — the "
-            f"CO_NO/DOR_UC filter combination is the specific problem, "
-            f"likely an unindexed field forcing a full scan. Next fix: "
-            f"try filtering by CO_NO alone (no DOR_UC) to isolate which "
-            f"of the two conditions is slow."
+            f"DIAGNOSTIC: CO_NO={county.fips} alone succeeded with "
+            f"{co_no_only_count} matching rows. CO_NO is NOT the slow "
+            f"field — DOR_UC (or the IN(...) list construction) is the "
+            f"actual bottleneck. Next fix: test DOR_UC IN (...) alone "
+            f"(no CO_NO) to confirm, then consider whether a single "
+            f"DOR_UC = 'value' equality check (vs. the IN list) behaves "
+            f"differently."
         )
     except RuntimeError:
         raise
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
-            f"DIAGNOSTIC: even the unfiltered baseline count query "
-            f"failed/timed out: {exc}. This suggests the server itself "
-            f"is currently unhealthy or rate-limiting us, not that our "
-            f"specific WHERE clause is at fault."
+            f"DIAGNOSTIC: CO_NO={county.fips} alone ALSO timed out: "
+            f"{exc}. This means CO_NO itself is the slow/unindexed "
+            f"field — this rules out DOR_UC as the primary problem. "
+            f"Given CO_NO filtering alone doesn't work at any practical "
+            f"speed on this layer, the real fix is likely a SPATIAL "
+            f"filter (query by county boundary polygon instead of the "
+            f"CO_NO attribute) rather than continuing to try attribute-"
+            f"based WHERE clauses on this table."
         )
 
     # STRATEGY CHANGE: previous attempts used resultOffset-based paging

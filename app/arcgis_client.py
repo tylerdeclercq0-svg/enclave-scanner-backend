@@ -151,3 +151,53 @@ def query_layer_count(layer_url: str, where: str = "1=1") -> int:
         {"where": where, "returnCountOnly": "true", "f": "json"},
     )
     return payload.get("count", 0)
+
+
+def query_layer_ids(layer_url: str, where: str = "1=1") -> list[int]:
+    """
+    Fetch only the OBJECTIDs matching a filter, without any attributes
+    or geometry — the cheapest possible query against a large table.
+    Used to size a WHERE clause's real match count before deciding
+    whether standard paging or OBJECTID-range batching is appropriate,
+    and as the basis for OBJECTID-range batching itself (see
+    query_layer_by_id_batches below) to avoid the resultOffset
+    performance cliff documented by Esri's own community support forum
+    for tables in the multi-million-row range — exactly the situation
+    with the Florida statewide cadastral layer (10.8M rows).
+    """
+    payload = _request_with_retry(
+        f"{layer_url}/query",
+        {"where": where, "returnIdsOnly": "true", "f": "json"},
+    )
+    return payload.get("objectIds", []) or []
+
+
+def query_layer_by_id_batches(
+    layer_url: str,
+    object_ids: list[int],
+    out_fields: str = "*",
+    return_geometry: bool = False,
+    batch_size: int = 200,
+) -> Iterator[dict[str, Any]]:
+    """
+    Fetch features by explicit OBJECTID batches instead of resultOffset
+    paging. This avoids the documented ArcGIS performance cliff where
+    deep resultOffset pagination into a multi-million-row table gets
+    progressively slower and eventually times out (confirmed via Esri's
+    own community support forum — search "resultOffset large feature
+    service timeout" for the reference thread). Each batch is a small,
+    targeted "OBJECTID IN (...)" query, which the server can typically
+    answer via an indexed lookup rather than a table scan.
+    """
+    for i in range(0, len(object_ids), batch_size):
+        batch = object_ids[i:i + batch_size]
+        ids_clause = ",".join(str(x) for x in batch)
+        where = f"OBJECTID IN ({ids_clause})"
+        payload = _request_with_retry(f"{layer_url}/query", {
+            "where": where,
+            "outFields": out_fields,
+            "returnGeometry": str(return_geometry).lower(),
+            "f": "json",
+        })
+        for feat in payload.get("features", []):
+            yield feat

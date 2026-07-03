@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from arcgis_client import query_layer
+from arcgis_client import query_layer, query_layer_ids, query_layer_by_id_batches
 from county_registry import COUNTIES, STATEWIDE_CADASTRAL_URL, DOR_AGRICULTURAL_UC_RANGE
 
 
@@ -62,35 +62,19 @@ def _acreage_from_record(attrs: dict) -> Optional[float]:
         return None
 
 
-# County-specific parcel layers, confirmed live via SWFWMD's regional
-# GIS service. These cover a single county each (much smaller than the
-# 10.8M-row statewide layer), which matters because live testing
-# against the statewide layer produced repeated 504 Gateway Timeouts
-# even on attributes-only queries filtered by county — the WHERE
-# clause itself appears too slow against that table's current size.
-# These regional layers should respond far faster since they aren't
-# competing with 66 other counties' worth of rows.
-#
-# Field names confirmed directly from this layer's live metadata:
-# DORUSECODE (Double, NOT the 4-char string DOR_UC used on the
-# statewide layer), OWNERNAME, TOWNSHIP, RANGE, SECTIONNUM,
-# SITUSADD1-3. Acreage field not yet confirmed — check for an ACRES
-# or similar field via describe_layer() before relying on it; may
-# still need the LND_SQFOOT-style derivation used for the statewide
-# layer if no direct acreage field exists here.
-COUNTY_SPECIFIC_PARCEL_LAYERS = {
-    "hillsborough": (
-        "https://www25.swfwmd.state.fl.us/arcgiswmis/rest/services/"
-        "r27/LocationInfo/MapServer/71"
-    ),
-    "sarasota": (
-        "https://www25.swfwmd.state.fl.us/arcgiswmis/rest/services/"
-        "r27/LocationInfo/MapServer/79"
-    ),
-    # Other counties on this same regional service were not confirmed
-    # in this research pass — check r27/LocationInfo/MapServer's layer
-    # list for Manatee, Pasco, etc. before assuming they exist here too.
-}
+# NOTE: county-specific SWFWMD regional parcel layers (previously
+# wired in here for Hillsborough/Sarasota) were found to be
+# unreliable during live testing — sibling layers on the same service
+# (Pinellas County Parcels, WMISViewer) return "Could not access any
+# server machines" errors, and even a WHERE 1=1 query against the
+# Hillsborough layer itself returned zero features despite the layer's
+# metadata looking valid. This points to a retired/partially-migrated
+# backend behind a still-responsive metadata endpoint — not something
+# to build on. Reverted to the statewide layer, fixed properly this
+# time using OBJECTID-batch fetching instead of resultOffset paging
+# (see query_layer_by_id_batches in arcgis_client.py) to avoid the
+# documented ArcGIS performance cliff on multi-million-row tables.
+COUNTY_SPECIFIC_PARCEL_LAYERS: dict[str, str] = {}
 
 
 def fetch_candidate_parcels(
@@ -189,40 +173,52 @@ def fetch_candidate_parcels(
     ]
     codes_list = ",".join(f"'{c}'" for c in common_ag_codes)
     where = f"CO_NO = {county.fips} AND DOR_UC IN ({codes_list})"
-    where_variants = [where]
 
-    last_error: Optional[Exception] = None
-    attrs_only_features = None
-    for where in where_variants:
-        try:
-            # PASS 1: attributes only, NO geometry. This is deliberately
-            # split from the geometry fetch below — a 504 Gateway
-            # Timeout was observed even on a single-record probe WITH
-            # geometry requested, while the exact same WHERE clause
-            # without geometry is expected to be much cheaper for the
-            # server to answer (no polygon assembly/serialization).
-            # If this pass is ALSO slow, the bottleneck is the WHERE
-            # clause / table scan itself, not geometry — that would
-            # point to needing a narrower county-specific query
-            # instead of hitting the 10.8M-row statewide layer directly.
-            attrs_only_features = list(query_layer(
-                STATEWIDE_CADASTRAL_URL,
-                where=where,
-                out_fields=out_fields,
-                return_geometry=False,
-                page_size=200,
-            ))
-            break
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            continue
-
-    if attrs_only_features is None:
+    # STRATEGY CHANGE: previous attempts used resultOffset-based paging
+    # (via query_layer), which Esri's own community support forum
+    # confirms gets progressively slower and can time out against
+    # large tables (documented for an 8.8M-row table; the statewide
+    # cadastral layer here has 10.8M rows) — this matches exactly what
+    # was observed (504 Gateway Timeout even on a single-record probe).
+    # The documented fix is to fetch matching OBJECTIDs first (a cheap,
+    # indexed operation via returnIdsOnly), then fetch actual data in
+    # small OBJECTID-range batches instead of resultOffset — see
+    # query_layer_ids / query_layer_by_id_batches in arcgis_client.py.
+    try:
+        matching_ids = query_layer_ids(STATEWIDE_CADASTRAL_URL, where=where)
+    except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
-            f"Could not query the statewide cadastral layer (attributes-only "
-            f"pass). This suggests the bottleneck is the WHERE clause "
-            f"itself, not geometry fetching. Last error: {last_error}"
+            f"Could not fetch matching OBJECTIDs from the statewide "
+            f"cadastral layer for county {county_id}: {exc}"
         )
+
+    if not matching_ids:
+        return []
+
+    # Only fetch full attribute data for a bounded sample of matching
+    # IDs, not all of them — for a large county the agricultural-code
+    # match set could still be in the thousands, and pulling full
+    # attributes for all of them isn't necessary just to find
+    # max_candidates worth of acreage-qualifying parcels. This is a
+    # real trade-off: parcels beyond this sample size are never
+    # considered, even if they'd otherwise qualify. A production
+    # version should page through matching_ids in batches until
+    # max_candidates survivors are found, not stop after one fixed
+    # sample — not yet implemented here.
+    id_sample = matching_ids[:max(max_candidates * 5, 100)]
+
+    out_fields = ",".join([
+        "OBJECTID", "PARCEL_ID", "CO_NO", "DOR_UC", "LND_SQFOOT",
+        "LND_UNTS_C", "OWN_NAME", "JV",
+    ])
+
+    attrs_only_features = list(query_layer_by_id_batches(
+        STATEWIDE_CADASTRAL_URL,
+        object_ids=id_sample,
+        out_fields=out_fields,
+        return_geometry=False,
+        batch_size=200,
+    ))
 
     # Apply the acreage filter BEFORE fetching any geometry — this is
     # the actual point of the two-pass split: only pull expensive
@@ -240,21 +236,21 @@ def fetch_candidate_parcels(
             break
 
     # PASS 2: fetch geometry only for surviving parcels, one at a time
-    # by PARCEL_ID. This trades more individual requests for much
-    # smaller/cheaper individual responses — appropriate here since
-    # surviving_attrs is capped at max_candidates (small), not the
-    # full agricultural parcel set for the county.
+    # by OBJECTID (cheaper/more reliable than PARCEL_ID string matching
+    # for a single-row lookup). This trades more individual requests
+    # for much smaller/cheaper individual responses — appropriate here
+    # since surviving_attrs is capped at max_candidates (small).
     candidates: list[CandidateParcel] = []
     for attrs, acreage in surviving_attrs:
         parcel_id = attrs.get("PARCEL_ID")
+        object_id = attrs.get("OBJECTID")
         geometry = None
-        if parcel_id:
+        if object_id is not None:
             try:
-                geom_where = f"CO_NO = {county.fips} AND PARCEL_ID = '{parcel_id}'"
                 geom_features = list(query_layer(
                     STATEWIDE_CADASTRAL_URL,
-                    where=geom_where,
-                    out_fields="PARCEL_ID",
+                    where=f"OBJECTID = {object_id}",
+                    out_fields="OBJECTID",
                     return_geometry=True,
                     page_size=1,
                 ))
@@ -284,108 +280,6 @@ def fetch_candidate_parcels(
 
         if len(candidates) >= max_candidates:
             break
-
-    return candidates
-
-
-def _fetch_from_county_specific_layer(
-    county_id: str,
-    min_acreage: float,
-    max_acreage: float,
-    max_candidates: int,
-) -> list[CandidateParcel]:
-    """
-    Fetch candidates from a county-specific parcel layer (e.g. SWFWMD's
-    regional service) instead of the 10.8M-row statewide layer. Field
-    names here are confirmed different from the statewide schema —
-    DORUSECODE is a Double here, not the 4-char string DOR_UC used on
-    the statewide layer.
-
-    IMPORTANT — genuinely unverified pieces:
-      - The exact numeric DORUSECODE values corresponding to
-        agricultural use are assumed to follow the same 5000-6999
-        convention confirmed for the statewide layer's string codes,
-        but this has NOT been separately confirmed for this layer's
-        numeric encoding — it could use a different numbering scheme
-        entirely (e.g. no leading category digit, or a totally
-        different DOR code revision). Verify against a few known-
-        agricultural Hillsborough parcels before trusting results.
-      - No acreage/ACRES field was confirmed in this layer's metadata
-        during research — LND_SQFOOT-style derivation may not apply
-        here at all. This function currently does NOT filter by
-        acreage at the query level; it returns candidates and expects
-        the caller (or a later pass) to check acreage once the correct
-        field name is confirmed. Every returned parcel currently has
-        acreage=None until this is fixed.
-    """
-    layer_url = COUNTY_SPECIFIC_PARCEL_LAYERS[county_id]
-
-    # DIAGNOSTIC WIDENING: the original 5000-6999 guess (mirroring the
-    # statewide layer's string convention) returned zero results against
-    # this layer's real data — meaning that numeric range assumption is
-    # wrong for THIS layer's encoding. Rather than guess a third time,
-    # this pulls a small, unfiltered sample of real Hillsborough parcels
-    # so the actual DORUSECODE values can be READ from a live response
-    # and the correct agricultural range determined from real data
-    # instead of documentation that may not match this specific layer.
-    # TODO: once real DORUSECODE values are visible in a scan response,
-    # replace this with the correct WHERE clause and remove this note.
-    where = "1=1"
-
-    out_fields = "PARCEL_ID,DORUSECODE,OWNERNAME,TOWNSHIP,RANGE,SECTIONNUM"
-
-    try:
-        attrs_only_features = list(query_layer(
-            layer_url,
-            where=where,
-            out_fields=out_fields,
-            return_geometry=False,
-            page_size=200,
-        ))
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(
-            f"Could not query the {county_id} county-specific parcel "
-            f"layer ({layer_url}): {exc}"
-        )
-
-    candidates: list[CandidateParcel] = []
-    for feat in attrs_only_features[:max_candidates]:
-        attrs = feat.get("attributes", {})
-        parcel_id = attrs.get("PARCEL_ID")
-
-        geometry = None
-        if parcel_id:
-            try:
-                geom_features = list(query_layer(
-                    layer_url,
-                    where=f"PARCEL_ID = '{parcel_id}'",
-                    out_fields="PARCEL_ID",
-                    return_geometry=True,
-                    page_size=1,
-                ))
-                if geom_features:
-                    geometry = geom_features[0].get("geometry")
-            except Exception:  # noqa: BLE001
-                geometry = None
-
-        candidates.append(CandidateParcel(
-            parcel_id=parcel_id,
-            county_fips=COUNTIES[county_id].fips,
-            acreage=None,  # NOT YET IMPLEMENTED for this layer — see docstring above
-            dor_use_code=str(attrs.get("DORUSECODE")) if attrs.get("DORUSECODE") is not None else None,
-            owner_name=attrs.get("OWNERNAME"),
-            owner_addr_city=None,
-            owner_addr_state=None,
-            just_value=None,
-            classified_ag_value=None,
-            sale_year=None,
-            sale_price=None,
-            section=attrs.get("SECTIONNUM"),
-            township=attrs.get("TOWNSHIP"),
-            range_=attrs.get("RANGE"),
-            legal_desc=None,
-            geometry=geometry,
-        ))
 
     return candidates
 

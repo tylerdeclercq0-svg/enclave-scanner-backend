@@ -118,6 +118,7 @@ def scan_county(
     county_id: str,
     min_acreage: float = Query(20.0, ge=0),
     max_acreage: float = Query(1280.0, gt=0),
+    max_candidates: int = Query(25, ge=1, le=200, description="Caps how many parcels get the full (slower) encirclement check. Start small (10-25) for testing."),
 ):
     """
     Run a live scan against one county: pulls candidates from the
@@ -140,6 +141,7 @@ def scan_county(
             county_id=county_id,
             min_acreage=min_acreage,
             max_acreage=max_acreage,
+            max_candidates=max_candidates,
         )
     except ImportError as exc:
         # Shapely missing — this is the single most likely first-run

@@ -68,13 +68,29 @@ def fetch_candidate_parcels(
     max_acreage: float = 1280.0,
     uc_range: tuple[int, int] = DOR_AGRICULTURAL_UC_RANGE,
     require_single_owner_signal: bool = True,
+    max_candidates: int = 200,
 ) -> list[CandidateParcel]:
     """
     Query the statewide cadastral layer for parcels in one county that
     plausibly meet the acreage and agricultural-use criteria.
 
+    max_candidates caps how many parcels this pulls WITH geometry. This
+    matters because acreage isn't a stored, queryable field on this
+    layer (it's derived from LND_SQFOOT after the fact), so the acreage
+    filter can't be pushed down into the ArcGIS WHERE clause — every
+    matching DOR_UC parcel in the county has to be fetched and checked
+    client-side. For a large county this can be thousands of parcels;
+    pulling full polygon geometry for all of them in one request is what
+    caused the initial timeout against the live server. Capping at 200
+    keeps a first real-world scan fast; raise this once scan performance
+    has been profiled against real response times, and consider fetching
+    attributes-only first (return_geometry=False) to do the acreage
+    filter, then a second geometry-only fetch for just the survivors —
+    a cheaper two-pass approach not yet implemented here.
+
     Notes on what this filter CAN and CANNOT determine on its own:
-      - Acreage cap and DOR use code: directly filterable.
+      - Acreage cap and DOR use code: directly filterable (acreage is
+        filtered client-side after fetch, as described above).
       - "Single owner/entity": the cadastral layer has no concept of
         multi-parcel ownership clusters. This function can only filter
         on owner name patterns it can not group adjacent parcels under
@@ -110,6 +126,7 @@ def fetch_candidate_parcels(
         where=where,
         out_fields=out_fields,
         return_geometry=True,
+        page_size=100,  # smaller pages = faster individual requests, more of them; trades request count for per-request latency, which matters more against a server that's timing out
     ):
         attrs = feat.get("attributes", {})
         acreage = _acreage_from_record(attrs)
@@ -134,6 +151,9 @@ def fetch_candidate_parcels(
             legal_desc=attrs.get("S_LEGAL"),
             geometry=feat.get("geometry"),
         ))
+
+        if len(candidates) >= max_candidates:
+            break
 
     return candidates
 

@@ -58,10 +58,22 @@ def run_county_scan(
     min_acreage: float = 20.0,
     max_acreage: float = 1280.0,
     fetch_neighbor_buffer_feet: float = 50.0,
+    max_candidates: int = 25,
 ) -> list[ScanResultRow]:
     """
     Run the full pipeline for one county and return scored, ranked
     candidate rows ready for the UI table.
+
+    max_candidates is intentionally small (25) as a first-deploy default.
+    Each candidate parcel triggers a SEPARATE live ArcGIS query against
+    the county's FLUM layer for the encirclement test, on top of the
+    initial cadastral fetch — so scan time scales roughly linearly with
+    candidate count. 25 candidates was chosen to keep a first real-world
+    scan comfortably under common free-tier hosting request timeouts
+    (Render's free tier, for instance). Raise this once real response
+    times have been measured, and consider moving to a background-job
+    pattern (kick off the scan, poll for results) rather than one long
+    synchronous request if you want to scan hundreds of parcels at once.
 
     fetch_neighbor_buffer_feet controls how far past each candidate's
     boundary to query the FLUM layer for neighboring polygons — needs to
@@ -78,6 +90,7 @@ def run_county_scan(
         county_id=county_id,
         min_acreage=min_acreage,
         max_acreage=max_acreage,
+        max_candidates=max_candidates,
     )
 
     rows: list[ScanResultRow] = []

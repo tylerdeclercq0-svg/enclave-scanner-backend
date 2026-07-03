@@ -125,13 +125,26 @@ def fetch_candidate_parcels(
         "OWN_NAME", "JV",
     ])
 
-    # DOR_UC is confirmed esriFieldTypeString (length 4) on this layer
-    # per FDOR's published field metadata — always quote it. Values are
-    # 4-character, zero-padded (e.g. '0000', '0100', '0700'), confirmed
-    # via FDOR's 2025 Assessment Roll Edit Guide. The original 3-digit
-    # padding ('000') used here was the actual cause of the "Invalid
-    # query parameters" error on first live test.
-    where = f"CO_NO = {county.fips} AND DOR_UC >= '{uc_range[0]:04d}' AND DOR_UC <= '{uc_range[1]:04d}'"
+    # CHANGED: the >= / <= range comparison on DOR_UC (a string field)
+    # caused a 504 Gateway Timeout even with resultRecordCount=1 —
+    # string range comparisons force a slow scan rather than an
+    # indexed lookup on this server. Switched to an IN(...) list of
+    # specific common agricultural codes instead, which is typically
+    # much faster since it can use equality matching per value. This
+    # list is NOT exhaustive of the full 5000-6999 agricultural range —
+    # it covers the most common real-world codes (pasture, grove,
+    # cropland, timber per Lee County's published DOR code list) as a
+    # starting point to get a working query, not a complete substitute
+    # for the full range. Expand this list once a query succeeds and
+    # response times are understood.
+    common_ag_codes = [
+        "5100", "5200", "5300", "5400", "5401", "5375", "5380",
+        "6000", "6010", "6011", "6012", "6100", "6110", "6200", "6210",
+        "6300", "6400", "6410", "6500",
+        "6611", "6615", "6620", "6630", "6645", "6650", "6655", "6665", "6675",
+    ]
+    codes_list = ",".join(f"'{c}'" for c in common_ag_codes)
+    where = f"CO_NO = {county.fips} AND DOR_UC IN ({codes_list})"
     where_variants = [where]
 
     last_error: Optional[Exception] = None

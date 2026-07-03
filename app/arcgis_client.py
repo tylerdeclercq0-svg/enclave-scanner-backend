@@ -35,9 +35,9 @@ from typing import Any, Iterator, Optional
 import requests
 
 
-DEFAULT_TIMEOUT = 60
+DEFAULT_TIMEOUT = 45
 DEFAULT_PAGE_SIZE = 500
-MAX_RETRIES = 3
+MAX_RETRIES = 2
 RETRY_BACKOFF_SECONDS = 2
 
 

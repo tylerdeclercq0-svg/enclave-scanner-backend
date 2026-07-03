@@ -19,6 +19,43 @@ from arcgis_client import query_layer, query_layer_ids, query_layer_by_id_batche
 from county_registry import COUNTIES, STATEWIDE_CADASTRAL_URL, DOR_AGRICULTURAL_UC_RANGE
 
 
+# Confirmed live FDOT-maintained statewide county boundary layer, with
+# a NAME field (values like 'HILLSBOROUGH') and only 67 rows total —
+# a trivially fast, small lookup table, unlike the 10.8M-row cadastral
+# layer. Used to fetch a county's boundary polygon for SPATIAL
+# filtering of the cadastral layer, since attribute filtering by CO_NO
+# was confirmed (via live diagnostic testing) to time out no matter
+# how it's queried — CO_NO itself appears unindexed on that layer.
+# Spatial queries typically use a maintained spatial index and are a
+# fundamentally different, usually much faster, query path.
+COUNTY_BOUNDARY_LAYER_URL = (
+    "https://gis.fdot.gov/arcgis/rest/services/Admin_Boundaries/"
+    "FeatureServer/5"
+)
+
+
+def fetch_county_boundary_geometry(county_name: str) -> Optional[dict]:
+    """
+    Fetch a county's boundary polygon from the small (67-row) FDOT
+    county boundary layer, for use as a spatial filter against the
+    much larger statewide cadastral layer. county_name should be the
+    plain county name (e.g. "HILLSBOROUGH") — exact casing/format not
+    yet confirmed against live data; may need adjustment (title case,
+    "County" suffix, etc.) once tested.
+    """
+    where = f"UPPER(NAME) = '{county_name.upper()}'"
+    features = list(query_layer(
+        COUNTY_BOUNDARY_LAYER_URL,
+        where=where,
+        out_fields="NAME,FIPS",
+        return_geometry=True,
+        page_size=1,
+    ))
+    if not features:
+        return None
+    return features[0].get("geometry")
+
+
 @dataclass
 class CandidateParcel:
     parcel_id: str
@@ -122,19 +159,6 @@ def fetch_candidate_parcels(
     if county is None:
         raise ValueError(f"Unknown county id: {county_id}")
 
-    # Prefer a county-specific parcel layer over the statewide one when
-    # available — see COUNTY_SPECIFIC_PARCEL_LAYERS above for why. This
-    # routes to a separate function since the field schema genuinely
-    # differs between the two data sources (DORUSECODE numeric vs.
-    # DOR_UC 4-char string, different owner/location field names).
-    if county_id in COUNTY_SPECIFIC_PARCEL_LAYERS:
-        return _fetch_from_county_specific_layer(
-            county_id=county_id,
-            min_acreage=min_acreage,
-            max_acreage=max_acreage,
-            max_candidates=max_candidates,
-        )
-
     # Trimmed to ONLY fields directly confirmed to exist on this exact
     # layer's live metadata response (CO_NO, PARCEL_ID, DOR_UC, OWN_NAME,
     # LND_SQFOOT, JV, LND_UNTS_C). Several other fields used in an
@@ -172,65 +196,47 @@ def fetch_candidate_parcels(
         "6611", "6615", "6620", "6630", "6645", "6650", "6655", "6665", "6675",
     ]
     codes_list = ",".join(f"'{c}'" for c in common_ag_codes)
-    where = f"CO_NO = {county.fips} AND DOR_UC IN ({codes_list})"
 
-    # DIAGNOSTIC ROUND 2: baseline confirmed the server is healthy
-    # (10,831,924 total rows, fast response) — so CO_NO and/or DOR_UC
-    # is specifically slow, most likely because one or both fields
-    # aren't indexed on this layer (a very plausible real-world gap:
-    # DOR_UC is a derived/text field, and CO_NO being a Double rather
-    # than an indexed integer key could also matter). Testing CO_NO
-    # alone here to isolate which of the two conditions is the actual
-    # problem before deciding the fix (an index request to the data
-    # owner isn't realistic for a public dataset we don't control —
-    # more likely fix is a fundamentally different query approach,
-    # e.g. spatial filtering by county boundary geometry instead of
-    # the CO_NO attribute, since spatial indexes are far more likely
-    # to exist and be fast on a layer like this).
-    try:
-        from arcgis_client import query_layer_count
-        co_no_only_count = query_layer_count(
-            STATEWIDE_CADASTRAL_URL, where=f"CO_NO = {county.fips}"
-        )
+    # FIX (confirmed via live diagnostic testing): CO_NO alone times
+    # out against the statewide cadastral layer — it appears unindexed,
+    # forcing a full scan of 10.8M rows regardless of what else is in
+    # the WHERE clause. Attribute-based county filtering on this layer
+    # is not viable. Switched to a SPATIAL filter instead: fetch the
+    # county's boundary polygon from a small, fast reference layer
+    # (67 rows), then use it as a geometry filter against the
+    # cadastral layer. Spatial queries typically hit a maintained
+    # spatial index and behave very differently, performance-wise,
+    # from attribute filters on this same table.
+    boundary_geometry = fetch_county_boundary_geometry(county.name)
+    if boundary_geometry is None:
         raise RuntimeError(
-            f"DIAGNOSTIC: CO_NO={county.fips} alone succeeded with "
-            f"{co_no_only_count} matching rows. CO_NO is NOT the slow "
-            f"field — DOR_UC (or the IN(...) list construction) is the "
-            f"actual bottleneck. Next fix: test DOR_UC IN (...) alone "
-            f"(no CO_NO) to confirm, then consider whether a single "
-            f"DOR_UC = 'value' equality check (vs. the IN list) behaves "
-            f"differently."
-        )
-    except RuntimeError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(
-            f"DIAGNOSTIC: CO_NO={county.fips} alone ALSO timed out: "
-            f"{exc}. This means CO_NO itself is the slow/unindexed "
-            f"field — this rules out DOR_UC as the primary problem. "
-            f"Given CO_NO filtering alone doesn't work at any practical "
-            f"speed on this layer, the real fix is likely a SPATIAL "
-            f"filter (query by county boundary polygon instead of the "
-            f"CO_NO attribute) rather than continuing to try attribute-"
-            f"based WHERE clauses on this table."
+            f"Could not fetch a boundary polygon for {county.name} "
+            f"County from {COUNTY_BOUNDARY_LAYER_URL} — check the NAME "
+            f"field's exact format on that layer (case, 'County' "
+            f"suffix, etc.) against a live query."
         )
 
-    # STRATEGY CHANGE: previous attempts used resultOffset-based paging
-    # (via query_layer), which Esri's own community support forum
-    # confirms gets progressively slower and can time out against
-    # large tables (documented for an 8.8M-row table; the statewide
-    # cadastral layer here has 10.8M rows) — this matches exactly what
-    # was observed (504 Gateway Timeout even on a single-record probe).
-    # The documented fix is to fetch matching OBJECTIDs first (a cheap,
-    # indexed operation via returnIdsOnly), then fetch actual data in
-    # small OBJECTID-range batches instead of resultOffset — see
-    # query_layer_ids / query_layer_by_id_batches in arcgis_client.py.
+    # DOR_UC filtering still applies as an attribute condition, but now
+    # combined with a spatial constraint rather than being the sole
+    # filter — this may still be slow if DOR_UC itself is unindexed;
+    # not yet confirmed independently of CO_NO. If this still times
+    # out, try the spatial filter with where="1=1" (no DOR_UC at all)
+    # to isolate whether DOR_UC alone is now the bottleneck.
+    where = f"DOR_UC IN ({codes_list})"
+
     try:
-        matching_ids = query_layer_ids(STATEWIDE_CADASTRAL_URL, where=where)
+        matching_ids = query_layer_ids(
+            STATEWIDE_CADASTRAL_URL,
+            where=where,
+            geometry=boundary_geometry,
+            geometry_type="esriGeometryPolygon",
+            spatial_rel="esriSpatialRelIntersects",
+        )
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
             f"Could not fetch matching OBJECTIDs from the statewide "
-            f"cadastral layer for county {county_id}: {exc}"
+            f"cadastral layer for county {county_id} using a spatial "
+            f"filter: {exc}"
         )
 
     if not matching_ids:

@@ -153,7 +153,13 @@ def query_layer_count(layer_url: str, where: str = "1=1") -> int:
     return payload.get("count", 0)
 
 
-def query_layer_ids(layer_url: str, where: str = "1=1") -> list[int]:
+def query_layer_ids(
+    layer_url: str,
+    where: str = "1=1",
+    geometry: Optional[dict[str, Any]] = None,
+    geometry_type: str = "esriGeometryPolygon",
+    spatial_rel: str = "esriSpatialRelIntersects",
+) -> list[int]:
     """
     Fetch only the OBJECTIDs matching a filter, without any attributes
     or geometry — the cheapest possible query against a large table.
@@ -164,11 +170,26 @@ def query_layer_ids(layer_url: str, where: str = "1=1") -> list[int]:
     performance cliff documented by Esri's own community support forum
     for tables in the multi-million-row range — exactly the situation
     with the Florida statewide cadastral layer (10.8M rows).
+
+    Supports an optional spatial filter (geometry) in addition to the
+    attribute where clause — added after live diagnostic testing
+    confirmed that filtering the statewide cadastral layer by the
+    CO_NO attribute alone times out (CO_NO appears unindexed on that
+    layer), while a spatial filter against a boundary polygon is
+    expected to use a maintained spatial index instead and behave very
+    differently, performance-wise.
     """
-    payload = _request_with_retry(
-        f"{layer_url}/query",
-        {"where": where, "returnIdsOnly": "true", "f": "json"},
-    )
+    params: dict[str, Any] = {
+        "where": where,
+        "returnIdsOnly": "true",
+        "f": "json",
+    }
+    if geometry is not None:
+        params["geometry"] = geometry
+        params["geometryType"] = geometry_type
+        params["spatialRel"] = spatial_rel
+        params["inSR"] = geometry.get("spatialReference", {}).get("wkid", 4326)
+    payload = _request_with_retry(f"{layer_url}/query", params)
     return payload.get("objectIds", []) or []
 
 

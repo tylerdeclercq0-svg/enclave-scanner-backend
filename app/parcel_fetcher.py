@@ -113,19 +113,14 @@ def fetch_candidate_parcels(
         "SALE_YR1", "SALE_PRC1", "SEC", "TWN", "RNG", "S_LEGAL",
     ])
 
-    # DOR_UC's actual stored type (text vs. numeric) isn't confirmed —
-    # ArcGIS servers reject a WHERE clause that quotes a number-typed
-    # field as a string (or vice versa) with a generic "Invalid query
-    # parameters" error rather than a specific type-mismatch message,
-    # so there's no way to distinguish that failure from any other bad
-    # WHERE clause without just trying both forms. Try the unquoted
-    # (numeric) form first since DOR use codes are conventionally
-    # stored as integers in the FDOR NAL extract this layer derives
-    # from; fall back to the quoted (string) form on a 400 error.
-    where_variants = [
-        f"CO_NO = {county.fips} AND DOR_UC >= {uc_range[0]} AND DOR_UC <= {uc_range[1]}",
-        f"CO_NO = {county.fips} AND DOR_UC >= '{uc_range[0]:03d}' AND DOR_UC <= '{uc_range[1]:03d}'",
-    ]
+    # DOR_UC is confirmed esriFieldTypeString (length 4) on this layer
+    # per FDOR's published field metadata — always quote it. Values are
+    # 4-character, zero-padded (e.g. '0000', '0100', '0700'), confirmed
+    # via FDOR's 2025 Assessment Roll Edit Guide. The original 3-digit
+    # padding ('000') used here was the actual cause of the "Invalid
+    # query parameters" error on first live test.
+    where = f"CO_NO = {county.fips} AND DOR_UC >= '{uc_range[0]:04d}' AND DOR_UC <= '{uc_range[1]:04d}'"
+    where_variants = [where]
 
     last_error: Optional[Exception] = None
     features_iter = None

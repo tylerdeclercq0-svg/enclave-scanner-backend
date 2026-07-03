@@ -263,8 +263,20 @@ STATEWIDE_CADASTRAL_URL = (
     "Florida_Statewide_Cadastral/FeatureServer/0"
 )
 
-# DOR land use codes in the agricultural range, per the FDOR NAL/SDF/NAP
-# user guide. 000-069 covers cropland, pastureland, timberland, etc.
-# 070-099 covers other vacant/non-ag classifications and should generally
-# be excluded from an agricultural-enclave screen.
-DOR_AGRICULTURAL_UC_RANGE = (0, 69)
+# DOR land use codes in the agricultural range.
+#
+# CORRECTED: the original (0, 69) range here was wrong, confirmed by a
+# live query failure against the real ArcGIS layer. The FDOR reference
+# document describing "000 through 099" as a fixed 3-digit field turns
+# out to describe an OLDER/generic NAL field-format spec, not the
+# codes actually in use — real county property appraiser DOR code
+# lists (e.g. Lee County's official published list) show agricultural
+# use codes running from 5000 to 6999 (pasture, grove, timber, sod,
+# etc. all fall in this range), a 4-digit scheme, not 0-69.
+#
+# This range (5000-6999) should be re-verified against Hillsborough's
+# actual live data once a scan succeeds — pull distinct DOR_UC values
+# for a known-agricultural parcel to confirm this matches what
+# Hillsborough's property appraiser actually populates in this field,
+# since code list conventions can still vary slightly by county.
+DOR_AGRICULTURAL_UC_RANGE = (5000, 6999)

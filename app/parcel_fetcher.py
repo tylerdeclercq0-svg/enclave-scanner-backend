@@ -301,13 +301,20 @@ def fetch_candidate_parcels(
     # cadastral layer. Spatial queries typically hit a maintained
     # spatial index and behave very differently, performance-wise,
     # from attribute filters on this same table.
-    boundary_geometry = fetch_county_boundary_geometry(county.name)
+    try:
+        boundary_geometry = fetch_county_boundary_geometry(county.name)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"[STEP: fetch boundary] Failed fetching {county.name} "
+            f"County's boundary polygon from the FDOT reference layer: "
+            f"{type(exc).__name__}: {exc}"
+        )
     if boundary_geometry is None:
         raise RuntimeError(
-            f"Could not fetch a boundary polygon for {county.name} "
-            f"County from {COUNTY_BOUNDARY_LAYER_URL} — check the NAME "
-            f"field's exact format on that layer (case, 'County' "
-            f"suffix, etc.) against a live query."
+            f"[STEP: fetch boundary] No boundary polygon found for "
+            f"{county.name} County from {COUNTY_BOUNDARY_LAYER_URL} — "
+            f"check the NAME field's exact format on that layer (case, "
+            f"'County' suffix, etc.) against a live query."
         )
 
     # DOR_UC filtering still applies as an attribute condition, but now
@@ -318,12 +325,11 @@ def fetch_candidate_parcels(
     # to isolate whether DOR_UC alone is now the bottleneck.
     where = f"DOR_UC IN ({codes_list})"
 
-    # DIAGNOSTIC (re-run after client-side reprojection fix): confirmed
-    # boundary geometry is real (49 rings, 5013 points) and the
-    # statewide layer's true SR (3086) was confirmed via live metadata
-    # — geometry is now explicitly reprojected to 3086 before being
-    # sent, removing reliance on server-side inSR reprojection. This
-    # tests whether that fix actually produces real matches.
+    # DIAGNOSTIC (re-run after replacing pyproj with hand-written,
+    # verified Albers projection math): confirmed boundary geometry is
+    # real (49 rings, 5013 points) and the reprojection math round-trips
+    # correctly against a known point (Tampa, FL). This tests whether
+    # the actual spatial query against the statewide layer succeeds now.
     try:
         spatial_only_ids = query_layer_ids(
             STATEWIDE_CADASTRAL_URL,
@@ -333,7 +339,8 @@ def fetch_candidate_parcels(
             spatial_rel="esriSpatialRelIntersects",
         )
         raise RuntimeError(
-            f"DIAGNOSTIC: spatial filter alone (no DOR_UC) matched "
+            f"[STEP: spatial query] DIAGNOSTIC: spatial filter alone "
+            f"(no DOR_UC) matched "
             f"{len(spatial_only_ids)} parcels inside the {county.name} "
             f"County boundary after client-side reprojection to WKID "
             f"3086. If this number is large and reasonable (Hillsborough "
@@ -347,7 +354,9 @@ def fetch_candidate_parcels(
         raise
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
-            f"DIAGNOSTIC: spatial-only query failed outright: {exc}"
+            f"[STEP: spatial query] Spatial-only query against the "
+            f"statewide cadastral layer failed outright: "
+            f"{type(exc).__name__}: {exc}"
         )
 
     try:

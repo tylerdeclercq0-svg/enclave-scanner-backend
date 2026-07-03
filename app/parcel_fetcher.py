@@ -236,6 +236,30 @@ def fetch_candidate_parcels(
             f"suffix, etc.) against a live query."
         )
 
+    # DIAGNOSTIC: the spatial reference fix didn't resolve the zero-
+    # match problem, which means the more basic question needs
+    # checking first — did fetch_county_boundary_geometry actually
+    # find Hillsborough's real boundary at all, or did it silently
+    # return a boundary with no/degenerate coordinates because the
+    # NAME field match failed in some way not caught by the None
+    # check above (e.g. matched a feature but with null/empty geometry)?
+    rings = boundary_geometry.get("rings", [])
+    ring_count = len(rings)
+    point_count = sum(len(r) for r in rings) if rings else 0
+    raise RuntimeError(
+        f"DIAGNOSTIC: boundary_geometry for {county.name} has "
+        f"{ring_count} ring(s) and {point_count} total coordinate "
+        f"points, spatialReference={boundary_geometry.get('spatialReference')}. "
+        f"If ring_count is 0 or point_count is suspiciously small "
+        f"(a real county boundary should have hundreds to thousands "
+        f"of points), the NAME match found the wrong feature or an "
+        f"empty one. If these numbers look like a real, detailed "
+        f"polygon, the geometry itself is fine and the problem is "
+        f"elsewhere (e.g. the spatialRel parameter, or the statewide "
+        f"layer's own geometry being in a third, different SR not yet "
+        f"accounted for)."
+    )
+
     # DOR_UC filtering still applies as an attribute condition, but now
     # combined with a spatial constraint rather than being the sole
     # filter — this may still be slow if DOR_UC itself is unindexed;

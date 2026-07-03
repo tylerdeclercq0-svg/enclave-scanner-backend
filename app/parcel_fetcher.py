@@ -253,11 +253,6 @@ def fetch_candidate_parcels(
     if county is None:
         raise ValueError(f"Unknown county id: {county_id}")
 
-    # TEMPORARY: unconditional marker to definitively confirm this
-    # exact code version is what's executing on Render, given repeated
-    # confusion about whether error messages were reflecting this
-    # file's actual current content. Remove once confirmed.
-    raise RuntimeError(">>>MARKER-ENTRY<<< fetch_candidate_parcels reached with this code version")
     # Trimmed to ONLY fields directly confirmed to exist on this exact
     # layer's live metadata response (CO_NO, PARCEL_ID, DOR_UC, OWN_NAME,
     # LND_SQFOOT, JV, LND_UNTS_C). Several other fields used in an
@@ -310,7 +305,7 @@ def fetch_candidate_parcels(
         boundary_geometry = fetch_county_boundary_geometry(county.name)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
-            f">>>MARKER-A<<< [STEP: fetch boundary] Failed fetching "
+            f"[STEP: fetch boundary] Failed fetching "
             f"{county.name} County's boundary polygon from the FDOT "
             f"reference layer: {type(exc).__name__}: {exc}"
         )
@@ -344,7 +339,7 @@ def fetch_candidate_parcels(
             spatial_rel="esriSpatialRelIntersects",
         )
         raise RuntimeError(
-            f">>>MARKER-B<<< [STEP: spatial query] DIAGNOSTIC: spatial "
+            f"[STEP: spatial query] DIAGNOSTIC: spatial "
             f"filter alone (no DOR_UC) matched "
             f"{len(spatial_only_ids)} parcels inside the {county.name} "
             f"County boundary after client-side reprojection to WKID "
@@ -359,7 +354,7 @@ def fetch_candidate_parcels(
         raise
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
-            f">>>MARKER-C<<< [STEP: spatial query] Spatial-only query "
+            f"[STEP: spatial query] Spatial-only query "
             f"against the statewide cadastral layer failed outright: "
             f"{type(exc).__name__}: {exc}"
         )

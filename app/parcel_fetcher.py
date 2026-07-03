@@ -78,7 +78,40 @@ def fetch_county_boundary_geometry(county_name: str) -> Optional[dict]:
     if "spatialReference" not in geometry:
         geometry["spatialReference"] = {"wkid": 4326}
 
-    return _reproject_latlon_geometry_to_florida_albers(geometry)
+    reprojected = _reproject_latlon_geometry_to_florida_albers(geometry)
+
+    # SIMPLIFICATION: the full boundary polygon has 5,013 real coordinate
+    # points (confirmed via live diagnostic), and a spatial query using
+    # that much detail against the 10.8M-row statewide layer still times
+    # out even at 12 seconds, even though the same query structurally
+    # succeeds instantly for other requests. Rather than a precise
+    # county outline, use a simple rectangular bounding envelope
+    # instead — coarser (it will include a thin margin of neighboring
+    # counties along the boundary), but should be dramatically faster
+    # for the server to evaluate. This is an acceptable trade-off for a
+    # SCREENING tool: a few extra out-of-county candidates in the
+    # results are easy for a human to spot and discard, whereas a
+    # non-functional scan is not.
+    return _bounding_envelope(reprojected)
+
+
+def _bounding_envelope(geometry: dict) -> dict:
+    """
+    Reduce a detailed polygon to its rectangular bounding envelope
+    (min/max x and y), trading spatial precision for query speed. See
+    the comment at the call site above for why this trade-off is
+    reasonable for a screening tool.
+    """
+    all_x = [pt[0] for ring in geometry.get("rings", []) for pt in ring]
+    all_y = [pt[1] for ring in geometry.get("rings", []) for pt in ring]
+    xmin, xmax = min(all_x), max(all_x)
+    ymin, ymax = min(all_y), max(all_y)
+    return {
+        "rings": [[
+            [xmin, ymin], [xmax, ymin], [xmax, ymax], [xmin, ymax], [xmin, ymin],
+        ]],
+        "spatialReference": geometry.get("spatialReference", {"wkid": 3086}),
+    }
 
 
 def _reproject_latlon_geometry_to_florida_albers(geometry: dict) -> dict:

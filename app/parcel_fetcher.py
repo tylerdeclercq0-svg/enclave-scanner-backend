@@ -69,11 +69,44 @@ def fetch_county_boundary_geometry(county_name: str) -> Optional[dict]:
         return None
     geometry = features[0].get("geometry")
     if geometry is not None and "spatialReference" not in geometry:
-        # Confirmed spatial reference for this specific layer (WKID
-        # 26917 / UTM Zone 17N) — see docstring above for why this
-        # can't be safely assumed to already be present.
         geometry["spatialReference"] = {"wkid": 26917}
+
+    # FURTHER FIX: rather than rely on ArcGIS's server-side reprojection
+    # via inSR (which was set correctly but still produced zero matches
+    # against the statewide cadastral layer, confirmed to be in WKID
+    # 3086 / Florida Albers meters, vs. this boundary layer's WKID
+    # 26917 / UTM 17N) — reproject the geometry ourselves explicitly
+    # using pyproj before sending it, removing any dependency on
+    # whether the target server actually performs the inSR conversion
+    # correctly for this particular geometry/layer combination.
+    if geometry is not None:
+        geometry = _reproject_esri_geometry(geometry, from_wkid=26917, to_wkid=3086)
     return geometry
+
+
+def _reproject_esri_geometry(geometry: dict, from_wkid: int, to_wkid: int) -> dict:
+    """
+    Reproject an ArcGIS-format polygon geometry's coordinates from one
+    spatial reference to another using pyproj, returning a new
+    geometry dict already tagged with the target spatialReference.
+    Used to sidestep uncertainty about whether a given ArcGIS server
+    correctly performs inSR-based server-side reprojection for a
+    specific geometry/layer combination — doing it client-side removes
+    that variable entirely.
+    """
+    from pyproj import Transformer
+
+    transformer = Transformer.from_crs(
+        f"EPSG:{from_wkid}", f"EPSG:{to_wkid}", always_xy=True
+    )
+    new_rings = []
+    for ring in geometry.get("rings", []):
+        new_ring = [list(transformer.transform(x, y)) for x, y in ring]
+        new_rings.append(new_ring)
+    return {
+        "rings": new_rings,
+        "spatialReference": {"wkid": to_wkid},
+    }
 
 
 @dataclass
@@ -236,30 +269,6 @@ def fetch_candidate_parcels(
             f"suffix, etc.) against a live query."
         )
 
-    # DIAGNOSTIC: the spatial reference fix didn't resolve the zero-
-    # match problem, which means the more basic question needs
-    # checking first — did fetch_county_boundary_geometry actually
-    # find Hillsborough's real boundary at all, or did it silently
-    # return a boundary with no/degenerate coordinates because the
-    # NAME field match failed in some way not caught by the None
-    # check above (e.g. matched a feature but with null/empty geometry)?
-    rings = boundary_geometry.get("rings", [])
-    ring_count = len(rings)
-    point_count = sum(len(r) for r in rings) if rings else 0
-    raise RuntimeError(
-        f"DIAGNOSTIC: boundary_geometry for {county.name} has "
-        f"{ring_count} ring(s) and {point_count} total coordinate "
-        f"points, spatialReference={boundary_geometry.get('spatialReference')}. "
-        f"If ring_count is 0 or point_count is suspiciously small "
-        f"(a real county boundary should have hundreds to thousands "
-        f"of points), the NAME match found the wrong feature or an "
-        f"empty one. If these numbers look like a real, detailed "
-        f"polygon, the geometry itself is fine and the problem is "
-        f"elsewhere (e.g. the spatialRel parameter, or the statewide "
-        f"layer's own geometry being in a third, different SR not yet "
-        f"accounted for)."
-    )
-
     # DOR_UC filtering still applies as an attribute condition, but now
     # combined with a spatial constraint rather than being the sole
     # filter — this may still be slow if DOR_UC itself is unindexed;
@@ -268,14 +277,12 @@ def fetch_candidate_parcels(
     # to isolate whether DOR_UC alone is now the bottleneck.
     where = f"DOR_UC IN ({codes_list})"
 
-    # DIAGNOSTIC: the spatial-filter query succeeded (no error) but
-    # returned zero matching parcels. Before concluding the DOR_UC
-    # code list is simply wrong for this data, first confirm the
-    # spatial filter itself is actually matching real parcels at all —
-    # test with where="1=1" (no DOR_UC condition) to see if Hillsborough
-    # has ANY parcels inside its boundary per this query. If that's
-    # also zero, the boundary geometry itself (or the spatial
-    # relationship/projection) is the real problem, not the use codes.
+    # DIAGNOSTIC (re-run after client-side reprojection fix): confirmed
+    # boundary geometry is real (49 rings, 5013 points) and the
+    # statewide layer's true SR (3086) was confirmed via live metadata
+    # — geometry is now explicitly reprojected to 3086 before being
+    # sent, removing reliance on server-side inSR reprojection. This
+    # tests whether that fix actually produces real matches.
     try:
         spatial_only_ids = query_layer_ids(
             STATEWIDE_CADASTRAL_URL,
@@ -287,18 +294,19 @@ def fetch_candidate_parcels(
         raise RuntimeError(
             f"DIAGNOSTIC: spatial filter alone (no DOR_UC) matched "
             f"{len(spatial_only_ids)} parcels inside the {county.name} "
-            f"County boundary. If this number is large and reasonable, "
-            f"the spatial filter itself works correctly and the "
-            f"DOR_UC IN (...) code list is the actual problem — the "
-            f"real agricultural codes in this county's data don't match "
-            f"the guessed list. If this number is 0, the boundary "
-            f"geometry or spatial relationship/projection is broken."
+            f"County boundary after client-side reprojection to WKID "
+            f"3086. If this number is large and reasonable (Hillsborough "
+            f"has roughly 400,000+ real parcels), the spatial filter "
+            f"finally works and the DOR_UC IN (...) code list is the "
+            f"next thing to verify. If still 0, the reprojection logic "
+            f"itself has a bug, or spatialRel/geometryType needs "
+            f"adjustment."
         )
     except RuntimeError:
         raise
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
-            f"DIAGNOSTIC: spatial-only query also failed: {exc}"
+            f"DIAGNOSTIC: spatial-only query failed outright: {exc}"
         )
 
     try:

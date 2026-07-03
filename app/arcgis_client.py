@@ -60,12 +60,21 @@ def _request_with_retry(url: str, params: dict[str, Any]) -> dict[str, Any]:
     body rather than a 4xx/5xx status, so both layers of failure are
     checked.
 
-    BUG FIX: any dict-valued parameter (e.g. `geometry`) must be sent
+    BUG FIX #1: any dict-valued parameter (e.g. `geometry`) must be sent
     as a JSON string, not a raw Python dict — `requests` would
     otherwise serialize it via Python's str()/repr() (single quotes,
     `None` instead of `null`), which ArcGIS's JSON parser rejects with
     a generic "'geometry' parameter is invalid" / "Unexpected
     character encountered" 400 error. Confirmed via live testing.
+
+    BUG FIX #2: uses POST instead of GET. A real county boundary
+    polygon (e.g. Hillsborough's actual shape) has thousands of
+    coordinate vertices — encoding that as a GET query string produces
+    a URL well beyond the ~8KB length most servers/proxies accept,
+    resulting in "414 Request-URI Too Long" (confirmed via live
+    testing). POST carries the same parameters in the request body,
+    which has no comparable length limit, and every ArcGIS REST /query
+    endpoint accepts POST identically to GET.
     """
     last_exc: Optional[Exception] = None
     encoded_params = {
@@ -74,7 +83,7 @@ def _request_with_retry(url: str, params: dict[str, Any]) -> dict[str, Any]:
     }
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = requests.get(url, params=encoded_params, timeout=DEFAULT_TIMEOUT)
+            resp = requests.post(url, data=encoded_params, timeout=DEFAULT_TIMEOUT)
             resp.raise_for_status()
             payload = resp.json()
             if "error" in payload:
@@ -151,9 +160,15 @@ def describe_layer(layer_url: str) -> dict[str, Any]:
     county endpoint before writing queries against it. This is exactly
     the call that was used during research to confirm each county's
     FLUM service is live and queryable.
+
+    Uses GET directly rather than _request_with_retry's POST, since
+    this hits the layer's base resource (not /query) and ArcGIS Server
+    metadata endpoints reliably support GET but POST support there
+    isn't confirmed the way it is for /query.
     """
-    payload = _request_with_retry(layer_url, {"f": "json"})
-    return payload
+    resp = requests.get(layer_url, params={"f": "json"}, timeout=DEFAULT_TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
 
 
 def query_layer_count(layer_url: str, where: str = "1=1") -> int:

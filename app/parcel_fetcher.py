@@ -62,6 +62,37 @@ def _acreage_from_record(attrs: dict) -> Optional[float]:
         return None
 
 
+# County-specific parcel layers, confirmed live via SWFWMD's regional
+# GIS service. These cover a single county each (much smaller than the
+# 10.8M-row statewide layer), which matters because live testing
+# against the statewide layer produced repeated 504 Gateway Timeouts
+# even on attributes-only queries filtered by county — the WHERE
+# clause itself appears too slow against that table's current size.
+# These regional layers should respond far faster since they aren't
+# competing with 66 other counties' worth of rows.
+#
+# Field names confirmed directly from this layer's live metadata:
+# DORUSECODE (Double, NOT the 4-char string DOR_UC used on the
+# statewide layer), OWNERNAME, TOWNSHIP, RANGE, SECTIONNUM,
+# SITUSADD1-3. Acreage field not yet confirmed — check for an ACRES
+# or similar field via describe_layer() before relying on it; may
+# still need the LND_SQFOOT-style derivation used for the statewide
+# layer if no direct acreage field exists here.
+COUNTY_SPECIFIC_PARCEL_LAYERS = {
+    "hillsborough": (
+        "https://www25.swfwmd.state.fl.us/arcgiswmis/rest/services/"
+        "r27/LocationInfo/MapServer/71"
+    ),
+    "sarasota": (
+        "https://www25.swfwmd.state.fl.us/arcgiswmis/rest/services/"
+        "r27/LocationInfo/MapServer/79"
+    ),
+    # Other counties on this same regional service were not confirmed
+    # in this research pass — check r27/LocationInfo/MapServer's layer
+    # list for Manatee, Pasco, etc. before assuming they exist here too.
+}
+
+
 def fetch_candidate_parcels(
     county_id: str,
     min_acreage: float = 20.0,
@@ -106,6 +137,19 @@ def fetch_candidate_parcels(
     county = COUNTIES.get(county_id)
     if county is None:
         raise ValueError(f"Unknown county id: {county_id}")
+
+    # Prefer a county-specific parcel layer over the statewide one when
+    # available — see COUNTY_SPECIFIC_PARCEL_LAYERS above for why. This
+    # routes to a separate function since the field schema genuinely
+    # differs between the two data sources (DORUSECODE numeric vs.
+    # DOR_UC 4-char string, different owner/location field names).
+    if county_id in COUNTY_SPECIFIC_PARCEL_LAYERS:
+        return _fetch_from_county_specific_layer(
+            county_id=county_id,
+            min_acreage=min_acreage,
+            max_acreage=max_acreage,
+            max_candidates=max_candidates,
+        )
 
     # Trimmed to ONLY fields directly confirmed to exist on this exact
     # layer's live metadata response (CO_NO, PARCEL_ID, DOR_UC, OWN_NAME,
@@ -240,6 +284,101 @@ def fetch_candidate_parcels(
 
         if len(candidates) >= max_candidates:
             break
+
+    return candidates
+
+
+def _fetch_from_county_specific_layer(
+    county_id: str,
+    min_acreage: float,
+    max_acreage: float,
+    max_candidates: int,
+) -> list[CandidateParcel]:
+    """
+    Fetch candidates from a county-specific parcel layer (e.g. SWFWMD's
+    regional service) instead of the 10.8M-row statewide layer. Field
+    names here are confirmed different from the statewide schema —
+    DORUSECODE is a Double here, not the 4-char string DOR_UC used on
+    the statewide layer.
+
+    IMPORTANT — genuinely unverified pieces:
+      - The exact numeric DORUSECODE values corresponding to
+        agricultural use are assumed to follow the same 5000-6999
+        convention confirmed for the statewide layer's string codes,
+        but this has NOT been separately confirmed for this layer's
+        numeric encoding — it could use a different numbering scheme
+        entirely (e.g. no leading category digit, or a totally
+        different DOR code revision). Verify against a few known-
+        agricultural Hillsborough parcels before trusting results.
+      - No acreage/ACRES field was confirmed in this layer's metadata
+        during research — LND_SQFOOT-style derivation may not apply
+        here at all. This function currently does NOT filter by
+        acreage at the query level; it returns candidates and expects
+        the caller (or a later pass) to check acreage once the correct
+        field name is confirmed. Every returned parcel currently has
+        acreage=None until this is fixed.
+    """
+    layer_url = COUNTY_SPECIFIC_PARCEL_LAYERS[county_id]
+
+    # Reasonable starting guess for numeric DOR use code range, mirroring
+    # the confirmed string convention (5000-6999) on the statewide layer.
+    # NOT independently verified against this layer's actual data.
+    where = f"DORUSECODE >= 5000 AND DORUSECODE <= 6999"
+
+    out_fields = "PARCEL_ID,DORUSECODE,OWNERNAME,TOWNSHIP,RANGE,SECTIONNUM"
+
+    try:
+        attrs_only_features = list(query_layer(
+            layer_url,
+            where=where,
+            out_fields=out_fields,
+            return_geometry=False,
+            page_size=200,
+        ))
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"Could not query the {county_id} county-specific parcel "
+            f"layer ({layer_url}): {exc}"
+        )
+
+    candidates: list[CandidateParcel] = []
+    for feat in attrs_only_features[:max_candidates]:
+        attrs = feat.get("attributes", {})
+        parcel_id = attrs.get("PARCEL_ID")
+
+        geometry = None
+        if parcel_id:
+            try:
+                geom_features = list(query_layer(
+                    layer_url,
+                    where=f"PARCEL_ID = '{parcel_id}'",
+                    out_fields="PARCEL_ID",
+                    return_geometry=True,
+                    page_size=1,
+                ))
+                if geom_features:
+                    geometry = geom_features[0].get("geometry")
+            except Exception:  # noqa: BLE001
+                geometry = None
+
+        candidates.append(CandidateParcel(
+            parcel_id=parcel_id,
+            county_fips=COUNTIES[county_id].fips,
+            acreage=None,  # NOT YET IMPLEMENTED for this layer — see docstring above
+            dor_use_code=str(attrs.get("DORUSECODE")) if attrs.get("DORUSECODE") is not None else None,
+            owner_name=attrs.get("OWNERNAME"),
+            owner_addr_city=None,
+            owner_addr_state=None,
+            just_value=None,
+            classified_ag_value=None,
+            sale_year=None,
+            sale_price=None,
+            section=attrs.get("SECTIONNUM"),
+            township=attrs.get("TOWNSHIP"),
+            range_=attrs.get("RANGE"),
+            legal_desc=None,
+            geometry=geometry,
+        ))
 
     return candidates
 

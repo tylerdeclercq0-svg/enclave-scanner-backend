@@ -3,8 +3,9 @@ Scan orchestrator — the pipeline a real backend would run when the UI's
 "Run scan" button is clicked.
 
 Order of operations, matching the actual statutory test:
-  1. Pull candidate parcels from the statewide cadastral layer
-     (parcel_fetcher) filtered by county, acreage, and DOR use code.
+  1. Pull candidate parcels from the county's OWN parcel layer
+     (parcel_fetcher) filtered by acreage and that county's confirmed
+     agricultural use code(s).
   2. For each candidate, run the encirclement test against the county's
      FLUM layer (encirclement) to estimate which of the five pathways
      might apply.
@@ -15,10 +16,16 @@ Order of operations, matching the actual statutory test:
      (scoring) — a business judgment layer on top of legal eligibility,
      not a part of SB 686 itself.
 
-This module is the integration point. None of it has executed against
-live data in this sandbox (no network egress here) — it should be
-treated as the implementation to deploy and test against the real
-endpoints, not as verified output.
+REWRITTEN 2026-07-03 alongside parcel_fetcher.py: step 1 now queries
+each county's own parcel layer instead of the statewide cadastral layer
+filtered by CO_NO (confirmed broken — see county_registry.py's
+"GROUND-TRUTHED" note). ScanResultRow's fields changed to match
+parcel_fetcher.CandidateParcel's new shape (use_code instead of
+dor_use_code; jurisdiction added where a county's parcel layer carries
+one; sale_year/sale_price dropped — not confirmed as present/consistent
+across all four target counties' parcel layers this pass, unlike the
+old statewide-layer fields SALE_YR1/SALE_PRC1 which were never actually
+tested against live data).
 """
 
 from __future__ import annotations
@@ -36,13 +43,14 @@ import scoring
 
 @dataclass
 class ScanResultRow:
-    parcel_id: str
+    parcel_id: Optional[str]
     county_id: str
     acreage: Optional[float]
+    acreage_source: str
     owner_name: Optional[str]
-    dor_use_code: Optional[str]
-    sale_year: Optional[int]
-    sale_price: Optional[float]
+    owner_name_2: Optional[str]
+    use_code: Optional[str]
+    jurisdiction: Optional[str]
     pct_perimeter_qualifying: Optional[float]
     likely_pathways: list[int]
     exclusion_flags: list[str]
@@ -162,6 +170,18 @@ def run_county_scan(
             "statewide GIS layer found during research — search the "
             "county Clerk/Recorder directly."
         )
+        if parcel.jurisdiction is not None:
+            needs_review.append(
+                f"Jurisdiction field present ('{parcel.jurisdiction}') but "
+                f"NOT yet enforced as a hard unincorporated-only filter — "
+                f"confirm this parcel is unincorporated before proceeding."
+            )
+        else:
+            needs_review.append(
+                "This county's parcel layer has no confirmed jurisdiction "
+                "field — unincorporated status cannot be checked from this "
+                "data source at all; confirm manually."
+            )
 
         centroid_lat: Optional[float] = None
         centroid_lon: Optional[float] = None
@@ -188,10 +208,11 @@ def run_county_scan(
             parcel_id=parcel.parcel_id,
             county_id=county_id,
             acreage=parcel.acreage,
+            acreage_source=parcel.acreage_source,
             owner_name=parcel.owner_name,
-            dor_use_code=parcel.dor_use_code,
-            sale_year=parcel.sale_year,
-            sale_price=parcel.sale_price,
+            owner_name_2=parcel.owner_name_2,
+            use_code=parcel.use_code,
+            jurisdiction=parcel.jurisdiction,
             pct_perimeter_qualifying=pct_qualifying,
             likely_pathways=pathways,
             exclusion_flags=exclusion_flags,

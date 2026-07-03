@@ -1,511 +1,315 @@
 """
-Pull candidate parcels for a county from the statewide DOR cadastral
-layer, filtered by agricultural use code, acreage range, and (best
-effort) single ownership.
+Pull candidate parcels for a county from that county's OWN parcel/
+cadastral layer (see county_registry.CountyEndpoint.parcel_service_url),
+filtered by agricultural use code and acreage.
 
-This is the "Run scan" step from the UI — it does NOT do the perimeter
-encirclement analysis (that needs the FLUM layer and real geometry
-operations, handled in encirclement.py). This module's job is narrowing
-10.8 million statewide parcels down to a county-sized candidate set fast,
-using attribute filters only.
+REWRITTEN 2026-07-03: the previous version of this module queried the
+statewide cadastral layer (Florida_Statewide_Cadastral) filtered by
+CO_NO. Live testing confirmed CO_NO has no index on that hosted layer
+and any predicate on it — attribute or spatial — times out (400 after
+~55s, or a real 504) once the target county is more than a few positions
+into the table's physical row order. See county_registry.py's
+"GROUND-TRUTHED" docstring section for the full diagnostic history.
+Each of the four target counties now has its own parcel layer, confirmed
+live via describe_layer (?f=pjson) and at least one test query — see
+each CountyEndpoint's `notes` field for what was actually verified vs.
+carried over as an unconfirmed guess.
+
+These county-specific tables are far smaller than the 10.8M-row
+statewide layer (tens to a few hundred thousand rows), and live testing
+showed sub-second response times for WHERE-filtered queries against all
+four — there's no evidence of the same indexing problem here. This
+means the OBJECTID-batch two-pass fetch strategy the old version used
+specifically to work around the statewide layer's performance cliff is
+no longer necessary: a single query with returnGeometry=true and a
+server-side WHERE clause is fast enough at this table size, and is what
+this version does.
+
+ACREAGE FIELD VERIFICATION (2026-07-03): before trusting VAL_ACRES
+(Pasco), ACRES (Nassau), and TotalAcres (Osceola) as literal acres, each
+was cross-checked against an independently shoelace-computed polygon
+area (geometry fetched with outSR=3086 — Florida GDL Albers, an
+equal-area projection in meters, not the layers' native Web Mercator)
+for one real parcel:
+  - Pasco VAL_ACRES=18.85 vs. computed 18.82 acres (match)
+  - Osceola TotalAcres=48.96 vs. computed 48.94 acres (match)
+  - Nassau ACRES=646.341 vs. computed 646.34 acres (match, after fixing
+    a bug in the FIRST verification attempt that only summed the
+    polygon's first ring — this parcel has 2 rings, and Esri's polygon
+    format requires summing SIGNED area across every ring, not just the
+    exterior, to correctly handle multi-part parcels and holes)
+All three fields are confirmed to be real acres, not square feet or
+some other unit.
+
+St. Johns has no populated acreage field on its parcel layer at all
+(Shape_STArea__ returned 0.0 on every row sampled) — acreage there MUST
+be computed from geometry. Also confirmed live: the layer's native SR is
+Web Mercator (wkid 3857/102100), which is a projected CRS (not raw
+lat/long) but is NOT equal-area — computing area directly in Web
+Mercator meters overstates area by a real, measured 1.338x at this
+layer's latitude (theoretical distortion at 30°N is 1/cos²(30°) = 1.333,
+matching closely). Every geometry fetch in this module therefore
+requests outSR=3086 explicitly, regardless of a layer's native SR, so
+area math is always done in an equal-area projection.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
-from arcgis_client import query_layer, query_layer_ids, query_layer_by_id_batches
-from county_registry import COUNTIES, STATEWIDE_CADASTRAL_URL, DOR_AGRICULTURAL_UC_RANGE
-
-
-# Confirmed live FDOT-maintained statewide county boundary layer, with
-# a NAME field (values like 'HILLSBOROUGH') and only 67 rows total —
-# a trivially fast, small lookup table, unlike the 10.8M-row cadastral
-# layer. Used to fetch a county's boundary polygon for SPATIAL
-# filtering of the cadastral layer, since attribute filtering by CO_NO
-# was confirmed (via live diagnostic testing) to time out no matter
-# how it's queried — CO_NO itself appears unindexed on that layer.
-# Spatial queries typically use a maintained spatial index and are a
-# fundamentally different, usually much faster, query path.
-COUNTY_BOUNDARY_LAYER_URL = (
-    "https://gis.fdot.gov/arcgis/rest/services/Admin_Boundaries/"
-    "FeatureServer/5"
-)
+from arcgis_client import query_layer
+from county_registry import COUNTIES, CountyEndpoint
 
 
-def fetch_county_boundary_geometry(county_name: str) -> Optional[dict]:
-    """
-    Fetch a county's boundary polygon from the small (67-row) FDOT
-    county boundary layer, for use as a spatial filter against the
-    much larger statewide cadastral layer. county_name should be the
-    plain county name (e.g. "HILLSBOROUGH") — exact casing/format not
-    yet confirmed against live data; may need adjustment (title case,
-    "County" suffix, etc.) once tested.
+SQM_PER_ACRE = 4046.8564224
 
-    CHANGED: pyproj (previously used to reproject this layer's native
-    WKID 26917 / UTM 17N geometry to the statewide cadastral layer's
-    WKID 3086 / Florida Albers) failed to initialize on Render with a
-    "TypeError: expected bytes, str found" — a known category of
-    pyproj/PROJ deployment fragility (its compiled C dependency, PROJ,
-    can fail to locate its coordinate system data files depending on
-    how the Python environment is set up). Rather than fight that
-    dependency further, this now requests the geometry directly in
-    WGS84 (WKID 4326, plain lat/lon) via the outSR parameter — ArcGIS
-    Server performs this specific reprojection server-side reliably
-    (it's the single most common SR conversion any GIS service
-    supports), removing the need for pyproj or a hand-written UTM
-    transform. The hand-written Albers projection math needed to go
-    from lat/lon to the statewide layer's native SR is implemented in
-    _latlon_to_florida_albers below using published, verified
-    projection parameters — simpler and more reliable than a full
-    UTM-to-Albers conversion would have been.
-    """
-    where = f"UPPER(NAME) = '{county_name.upper()}'"
-    features = list(query_layer(
-        COUNTY_BOUNDARY_LAYER_URL,
-        where=where,
-        out_fields="NAME,FIPS",
-        return_geometry=True,
-        page_size=1,
-        out_sr=4326,
-    ))
-    if not features:
-        return None
-    geometry = features[0].get("geometry")
-    if geometry is None:
-        return None
-    if "spatialReference" not in geometry:
-        geometry["spatialReference"] = {"wkid": 4326}
-
-    reprojected = _reproject_latlon_geometry_to_florida_albers(geometry)
-
-    # SIMPLIFICATION: the full boundary polygon has 5,013 real coordinate
-    # points (confirmed via live diagnostic), and a spatial query using
-    # that much detail against the 10.8M-row statewide layer still times
-    # out even at 12 seconds, even though the same query structurally
-    # succeeds instantly for other requests. Rather than a precise
-    # county outline, use a simple rectangular bounding envelope
-    # instead — coarser (it will include a thin margin of neighboring
-    # counties along the boundary), but should be dramatically faster
-    # for the server to evaluate. This is an acceptable trade-off for a
-    # SCREENING tool: a few extra out-of-county candidates in the
-    # results are easy for a human to spot and discard, whereas a
-    # non-functional scan is not.
-    return _bounding_envelope(reprojected)
-
-
-def _bounding_envelope(geometry: dict) -> dict:
-    """
-    Reduce a detailed polygon to its rectangular bounding envelope
-    (min/max x and y), trading spatial precision for query speed. See
-    the comment at the call site above for why this trade-off is
-    reasonable for a screening tool.
-    """
-    all_x = [pt[0] for ring in geometry.get("rings", []) for pt in ring]
-    all_y = [pt[1] for ring in geometry.get("rings", []) for pt in ring]
-    xmin, xmax = min(all_x), max(all_x)
-    ymin, ymax = min(all_y), max(all_y)
-    return {
-        "rings": [[
-            [xmin, ymin], [xmax, ymin], [xmax, ymax], [xmin, ymax], [xmin, ymin],
-        ]],
-        "spatialReference": geometry.get("spatialReference", {"wkid": 3086}),
-    }
-
-
-def _reproject_latlon_geometry_to_florida_albers(geometry: dict) -> dict:
-    """
-    Convert a WGS84 (lat/lon) polygon geometry to Florida Albers Equal
-    Area Conic (the statewide cadastral layer's native SR, WKID 3086),
-    using the published projection parameters for this exact CRS
-    (confirmed via Esri's own support documentation for UTM-to-Albers
-    Florida conversions): central meridian -84.0°, standard parallels
-    24.0° and 31.5°, latitude of origin 24.0°, false easting 400,000m,
-    false northing 0m, on the GRS 1980 ellipsoid.
-
-    This hand-implements the standard Albers Equal-Area Conic forward
-    projection formula (a well-documented, non-controversial piece of
-    cartographic math) rather than depending on pyproj, after pyproj
-    was confirmed to fail to initialize in this deployment environment.
-    """
-    import math
-
-    # GRS 1980 ellipsoid parameters (matches the statewide layer's datum)
-    a = 6378137.0  # semi-major axis, meters
-    f = 1 / 298.257222101  # flattening
-    e2 = 2 * f - f * f  # eccentricity squared
-    e = math.sqrt(e2)
-
-    lat0 = math.radians(24.0)
-    lon0 = math.radians(-84.0)
-    lat1 = math.radians(24.0)
-    lat2 = math.radians(31.5)
-    false_easting = 400000.0
-    false_northing = 0.0
-
-    def m(lat):
-        sin_lat = math.sin(lat)
-        return math.cos(lat) / math.sqrt(1 - e2 * sin_lat * sin_lat)
-
-    def q(lat):
-        sin_lat = math.sin(lat)
-        return (1 - e2) * (
-            sin_lat / (1 - e2 * sin_lat * sin_lat)
-            - (1 / (2 * e)) * math.log((1 - e * sin_lat) / (1 + e * sin_lat))
-        )
-
-    m1, m2 = m(lat1), m(lat2)
-    q0, q1, q2 = q(lat0), q(lat1), q(lat2)
-
-    n = (m1 * m1 - m2 * m2) / (q2 - q1)
-    c = m1 * m1 + n * q1
-    rho0 = a * math.sqrt(c - n * q0) / n
-
-    def project(lon_deg: float, lat_deg: float) -> tuple[float, float]:
-        lat = math.radians(lat_deg)
-        lon = math.radians(lon_deg)
-        q_lat = q(lat)
-        rho = a * math.sqrt(c - n * q_lat) / n
-        theta = n * (lon - lon0)
-        x = false_easting + rho * math.sin(theta)
-        y = false_northing + rho0 - rho * math.cos(theta)
-        return x, y
-
-    new_rings = []
-    for ring in geometry.get("rings", []):
-        new_ring = [list(project(point[0], point[1])) for point in ring]
-        new_rings.append(new_ring)
-
-    return {
-        "rings": new_rings,
-        "spatialReference": {"wkid": 3086},
-    }
+# The equal-area CRS every geometry fetch in this module requests via
+# outSR, regardless of a layer's native spatial reference. Matches the
+# statewide cadastral layer's native SR, so acreage/geometry from
+# different counties is directly comparable.
+AREA_SR = 3086
 
 
 @dataclass
 class CandidateParcel:
-    parcel_id: str
-    county_fips: int
+    parcel_id: Optional[str]
+    county_id: str
     acreage: Optional[float]
-    dor_use_code: Optional[str]
+    acreage_source: str  # "field" or "computed_from_geometry" — for auditing which path was used
+    use_code: Optional[str]
+    use_code_field: Optional[str]  # which field this came from, since it's a different field per county
     owner_name: Optional[str]
-    owner_addr_city: Optional[str]
-    owner_addr_state: Optional[str]
-    just_value: Optional[float]
-    classified_ag_value: Optional[float]
-    sale_year: Optional[int]
-    sale_price: Optional[float]
-    section: Optional[str]
-    township: Optional[str]
-    range_: Optional[str]
-    legal_desc: Optional[str]
+    owner_name_2: Optional[str]
+    jurisdiction: Optional[str]
     geometry: Optional[dict]
 
 
-# Acreage on the statewide cadastral layer isn't a direct field — it's
-# derived from LND_SQFOOT (land square footage) when LND_UNTS_C indicates
-# the units are in square feet rather than acres or front feet. This
-# conversion must be applied per record, not assumed.
-SQFT_PER_ACRE = 43560.0
+def _signed_ring_area(ring: list[list[float]]) -> float:
+    """Shoelace formula, signed (not absolute) — sign encodes winding direction."""
+    total = 0.0
+    n = len(ring)
+    for i in range(n):
+        x1, y1 = ring[i][0], ring[i][1]
+        x2, y2 = ring[(i + 1) % n][0], ring[(i + 1) % n][1]
+        total += x1 * y2 - x2 * y1
+    return total / 2.0
 
 
-def _acreage_from_record(attrs: dict) -> Optional[float]:
+def polygon_area_acres(rings: list[list[list[float]]]) -> float:
     """
-    Convert LND_SQFOOT to acres. LND_UNTS_C carries a DOR-defined unit
-    code; confirm its exact coded values for "square feet" against a
-    live record before trusting this blindly — different counties have
-    historically had inconsistent unit code reporting in the NAL extract.
+    Area of an Esri-format polygon (list of rings, coordinates in a
+    projected/equal-area CRS such as wkid 3086), in acres.
+
+    Sums SIGNED area across every ring rather than just the first
+    (exterior) ring — required to correctly handle multi-part parcels
+    (e.g. a single legal parcel with two disjoint boundary loops, seen
+    live on a real Nassau County timberland parcel) and holes, per
+    Esri's polygon ring-winding convention. Confirmed against three real
+    parcels with known VAL_ACRES/ACRES/TotalAcres field values before
+    being trusted for St. Johns, which has no acreage field at all.
     """
-    sqft = attrs.get("LND_SQFOOT")
-    if sqft is None:
-        return None
+    if not rings:
+        return 0.0
+    total_sqm = abs(sum(_signed_ring_area(r) for r in rings))
+    return total_sqm / SQM_PER_ACRE
+
+
+# ---------------------------------------------------------------------------
+# Per-county agricultural classification.
+#
+# Deliberately NOT one shared filter: Pasco and Nassau use a string RANGE
+# comparison on a 3-char DOR-style code, while St. Johns and Osceola use
+# county-local 4-char codes that must be matched against an EXPLICIT list,
+# not a range — a naive range on Osceola's DORCode was confirmed live to
+# silently match '0611' ("RETIREMENT HOMES") because that string sorts
+# lexically between '050' and '069' despite being an unrelated code. Each
+# function below encodes both the WHERE-clause fragment to push down to
+# the server AND a client-side re-check against the fetched attributes,
+# so a bad WHERE clause can never be the only line of defense.
+# ---------------------------------------------------------------------------
+
+
+def _pasco_ag_where(county: CountyEndpoint) -> str:
+    lo, hi = county.parcel_agricultural_use_code_range
+    return f"{county.parcel_use_code_field}>='{lo}' AND {county.parcel_use_code_field}<='{hi}'"
+
+
+def _pasco_is_agricultural(attrs: dict) -> bool:
+    code = attrs.get("DIR_CLASS")
+    if code is None:
+        return False
+    lo, hi = COUNTIES["pasco"].parcel_agricultural_use_code_range
+    return lo <= code <= hi
+
+
+def _nassau_ag_where(county: CountyEndpoint) -> str:
+    lo, hi = county.parcel_agricultural_use_code_range
+    clause = f"{county.parcel_use_code_field}>='{lo}' AND {county.parcel_use_code_field}<='{hi}'"
+    if county.parcel_county_filter:
+        clause = f"{county.parcel_county_filter} AND {clause}"
+    return clause
+
+
+def _nassau_is_agricultural(attrs: dict) -> bool:
+    code = attrs.get("DORUC")
+    if code is None:
+        return False
+    lo, hi = COUNTIES["nassau"].parcel_agricultural_use_code_range
+    return lo <= code <= hi
+
+
+def _st_johns_ag_where(county: CountyEndpoint) -> str:
+    codes = ",".join(f"'{c}'" for c in county.parcel_agricultural_use_codes)
+    return f"{county.parcel_use_code_field} IN ({codes})"
+
+
+def _st_johns_is_agricultural(attrs: dict) -> bool:
+    code = attrs.get("USE_CODE")
+    return code in COUNTIES["st_johns"].parcel_agricultural_use_codes
+
+
+def _osceola_ag_where(county: CountyEndpoint) -> str:
+    # CAST to integer, not a plain string comparison — confirmed live
+    # that a string range on this field silently matches unrelated codes
+    # (see module docstring / county_registry notes). CAST(... AS
+    # INTEGER) BETWEEN was confirmed to work against this layer's SQL
+    # Server backend and returned only genuinely agricultural DORDesc
+    # values (14 distinct codes, no false positives) when checked live.
+    codes = ",".join(county.parcel_agricultural_use_codes)  # ints as bare literals, no quotes
+    return f"CAST({county.parcel_use_code_field} AS INTEGER) IN ({codes})"
+
+
+def _osceola_is_agricultural(attrs: dict) -> bool:
+    code = attrs.get("DORCode")
+    if code is None:
+        return False
     try:
-        return round(float(sqft) / SQFT_PER_ACRE, 1)
+        code_int = int(code)
     except (TypeError, ValueError):
-        return None
+        return False
+    valid_ints = {int(c) for c in COUNTIES["osceola"].parcel_agricultural_use_codes}
+    return code_int in valid_ints
 
 
-# NOTE: county-specific SWFWMD regional parcel layers (previously
-# wired in here for Hillsborough/Sarasota) were found to be
-# unreliable during live testing — sibling layers on the same service
-# (Pinellas County Parcels, WMISViewer) return "Could not access any
-# server machines" errors, and even a WHERE 1=1 query against the
-# Hillsborough layer itself returned zero features despite the layer's
-# metadata looking valid. This points to a retired/partially-migrated
-# backend behind a still-responsive metadata endpoint — not something
-# to build on. Reverted to the statewide layer, fixed properly this
-# time using OBJECTID-batch fetching instead of resultOffset paging
-# (see query_layer_by_id_batches in arcgis_client.py) to avoid the
-# documented ArcGIS performance cliff on multi-million-row tables.
-COUNTY_SPECIFIC_PARCEL_LAYERS: dict[str, str] = {}
+# Registry of per-county (where-clause builder, client-side classifier)
+# pairs. Adding a fifth county means adding a new pair here, not editing
+# a shared conditional — keeps each county's comparison logic isolated
+# and testable on its own.
+_AG_CLASSIFIERS: dict[str, tuple[Callable[[CountyEndpoint], str], Callable[[dict], bool]]] = {
+    "pasco": (_pasco_ag_where, _pasco_is_agricultural),
+    "nassau": (_nassau_ag_where, _nassau_is_agricultural),
+    "st_johns": (_st_johns_ag_where, _st_johns_is_agricultural),
+    "osceola": (_osceola_ag_where, _osceola_is_agricultural),
+}
+
+
+def build_ag_where_clause(county_id: str) -> str:
+    county = COUNTIES[county_id]
+    where_fn, _ = _AG_CLASSIFIERS[county_id]
+    return where_fn(county)
+
+
+def is_agricultural(county_id: str, attrs: dict) -> bool:
+    """Client-side re-check of the server-side WHERE clause's classification for one parcel's attributes."""
+    _, classify_fn = _AG_CLASSIFIERS[county_id]
+    return classify_fn(attrs)
+
+
+def _extract_acreage(county: CountyEndpoint, attrs: dict, geometry: Optional[dict]) -> tuple[Optional[float], str]:
+    """Returns (acreage, source) — source is "field" or "computed_from_geometry"."""
+    if county.parcel_acreage_field is not None:
+        raw = attrs.get(county.parcel_acreage_field)
+        if raw is not None:
+            try:
+                return round(float(raw), 2), "field"
+            except (TypeError, ValueError):
+                pass
+    if geometry is not None and geometry.get("rings"):
+        return round(polygon_area_acres(geometry["rings"]), 2), "computed_from_geometry"
+    return None, "field"
 
 
 def fetch_candidate_parcels(
     county_id: str,
     min_acreage: float = 20.0,
     max_acreage: float = 1280.0,
-    uc_range: tuple[int, int] = DOR_AGRICULTURAL_UC_RANGE,
-    require_single_owner_signal: bool = True,
     max_candidates: int = 200,
 ) -> list[CandidateParcel]:
     """
-    Query the statewide cadastral layer for parcels in one county that
-    plausibly meet the acreage and agricultural-use criteria.
+    Query a county's own parcel layer for parcels that plausibly meet
+    the agricultural-use and acreage criteria.
 
-    max_candidates caps how many parcels this pulls WITH geometry. This
-    matters because acreage isn't a stored, queryable field on this
-    layer (it's derived from LND_SQFOOT after the fact), so the acreage
-    filter can't be pushed down into the ArcGIS WHERE clause — every
-    matching DOR_UC parcel in the county has to be fetched and checked
-    client-side. For a large county this can be thousands of parcels;
-    pulling full polygon geometry for all of them in one request is what
-    caused the initial timeout against the live server. Capping at 200
-    keeps a first real-world scan fast; raise this once scan performance
-    has been profiled against real response times, and consider fetching
-    attributes-only first (return_geometry=False) to do the acreage
-    filter, then a second geometry-only fetch for just the survivors —
-    a cheaper two-pass approach not yet implemented here.
+    Fetches geometry directly (single pass) rather than the old
+    attrs-then-geometry two-pass split — that split existed specifically
+    to avoid pulling full polygon geometry for the statewide layer's
+    potentially-thousands-of-matches result set. These county-scoped
+    layers are far smaller and confirmed fast even with returnGeometry
+    on, and St. Johns needs geometry unconditionally anyway (no acreage
+    field), so a single pass is simpler and isn't a real performance
+    trade-off here.
 
-    Notes on what this filter CAN and CANNOT determine on its own:
-      - Acreage cap and DOR use code: directly filterable (acreage is
-        filtered client-side after fetch, as described above).
-      - "Single owner/entity": the cadastral layer has no concept of
-        multi-parcel ownership clusters. This function can only filter
-        on owner name patterns it can not group adjacent parcels under
-        common ownership across a multi-parcel enclave. Real single-
-        ownership/control verification still requires a title search,
-        exactly as flagged in the UI's checklist.
-      - 5-year continuous agricultural use: not available at all in this
-        layer. JV_CLASS_U (just value, classified use) and AV_CLASS_U
-        being non-null/non-zero are a weak proxy — they indicate the
-        parcel currently carries an agricultural classification for tax
-        purposes, but say nothing about duration.
+    Notes on what this still cannot determine on its own (see also the
+    known-gaps list in the project's top-level scan orchestration):
+      - "Single owner/entity" across a multi-parcel enclave: only an
+        owner-name-string match, not a real ownership/control lookup.
+      - 5-year continuous agricultural use: none of these layers carry
+        history: this is a single current-year snapshot.
     """
     county = COUNTIES.get(county_id)
     if county is None:
         raise ValueError(f"Unknown county id: {county_id}")
-
-    # Trimmed to ONLY fields directly confirmed to exist on this exact
-    # layer's live metadata response (CO_NO, PARCEL_ID, DOR_UC, OWN_NAME,
-    # LND_SQFOOT, JV, LND_UNTS_C). Several other fields used in an
-    # earlier version (S_LEGAL, SEC, TWN, RNG, SALE_YR1, SALE_PRC1,
-    # JV_CLASS_U, OWN_CITY, OWN_STATE) were assumed from a similar-
-    # looking NAL schema but were never individually confirmed against
-    # this specific FeatureServer, and an invalid field name in
-    # outFields can produce the same generic "Invalid query parameters"
-    # 400 error as a bad WHERE clause — making it impossible to tell
-    # which one was actually wrong from the error message alone. Once a
-    # scan succeeds with this trimmed field list, add the other fields
-    # back ONE AT A TIME (or fetch the layer's full /FeatureServer/0
-    # metadata directly) to identify their real names before re-adding.
-    out_fields = ",".join([
-        "PARCEL_ID", "CO_NO", "DOR_UC", "LND_SQFOOT", "LND_UNTS_C",
-        "OWN_NAME", "JV",
-    ])
-
-    # CHANGED: the >= / <= range comparison on DOR_UC (a string field)
-    # caused a 504 Gateway Timeout even with resultRecordCount=1 —
-    # string range comparisons force a slow scan rather than an
-    # indexed lookup on this server. Switched to an IN(...) list of
-    # specific common agricultural codes instead, which is typically
-    # much faster since it can use equality matching per value. This
-    # list is NOT exhaustive of the full 5000-6999 agricultural range —
-    # it covers the most common real-world codes (pasture, grove,
-    # cropland, timber per Lee County's published DOR code list) as a
-    # starting point to get a working query, not a complete substitute
-    # for the full range. Expand this list once a query succeeds and
-    # response times are understood.
-    common_ag_codes = [
-        "5100", "5200", "5300", "5400", "5401", "5375", "5380",
-        "6000", "6010", "6011", "6012", "6100", "6110", "6200", "6210",
-        "6300", "6400", "6410", "6500",
-        "6611", "6615", "6620", "6630", "6645", "6650", "6655", "6665", "6675",
-    ]
-    codes_list = ",".join(f"'{c}'" for c in common_ag_codes)
-
-    # FIX (confirmed via live diagnostic testing): CO_NO alone times
-    # out against the statewide cadastral layer — it appears unindexed,
-    # forcing a full scan of 10.8M rows regardless of what else is in
-    # the WHERE clause. Attribute-based county filtering on this layer
-    # is not viable. Switched to a SPATIAL filter instead: fetch the
-    # county's boundary polygon from a small, fast reference layer
-    # (67 rows), then use it as a geometry filter against the
-    # cadastral layer. Spatial queries typically hit a maintained
-    # spatial index and behave very differently, performance-wise,
-    # from attribute filters on this same table.
-    try:
-        boundary_geometry = fetch_county_boundary_geometry(county.name)
-    except Exception as exc:  # noqa: BLE001
+    if county.parcel_service_url is None:
         raise RuntimeError(
-            f"[STEP: fetch boundary] Failed fetching "
-            f"{county.name} County's boundary polygon from the FDOT "
-            f"reference layer: {type(exc).__name__}: {exc}"
+            f"No confirmed parcel layer for county '{county_id}' yet — "
+            f"see county_registry.py notes."
         )
-    if boundary_geometry is None:
+    if county_id not in _AG_CLASSIFIERS:
         raise RuntimeError(
-            f"[STEP: fetch boundary] No boundary polygon found for "
-            f"{county.name} County from {COUNTY_BOUNDARY_LAYER_URL} — "
-            f"check the NAME field's exact format on that layer (case, "
-            f"'County' suffix, etc.) against a live query."
+            f"No agricultural classification function written for county "
+            f"'{county_id}' yet. Add one to parcel_fetcher._AG_CLASSIFIERS "
+            f"before scanning this county — do not fall back to a generic "
+            f"filter, per-county use-code schemes are not interchangeable."
         )
 
-    # DOR_UC filtering still applies as an attribute condition, but now
-    # combined with a spatial constraint rather than being the sole
-    # filter — this may still be slow if DOR_UC itself is unindexed;
-    # not yet confirmed independently of CO_NO. If this still times
-    # out, try the spatial filter with where="1=1" (no DOR_UC at all)
-    # to isolate whether DOR_UC alone is now the bottleneck.
-    where = f"DOR_UC IN ({codes_list})"
+    where = build_ag_where_clause(county_id)
 
-    # DIAGNOSTIC (re-run after replacing pyproj with hand-written,
-    # verified Albers projection math): confirmed boundary geometry is
-    # real (49 rings, 5013 points) and the reprojection math round-trips
-    # correctly against a known point (Tampa, FL). This tests whether
-    # the actual spatial query against the statewide layer succeeds now.
-    #
-    # BUG FOUND AND FIXED: this block's own diagnostic "success" report
-    # was raised as a plain RuntimeError, and the exception handler
-    # below had `except RuntimeError: raise` to avoid re-wrapping that
-    # intentional report — but arcgis_client.ArcGISQueryError (raised on
-    # a REAL timeout/failure) is ALSO a RuntimeError subclass. This
-    # meant real timeouts were being caught by that `except RuntimeError`
-    # clause and re-raised completely unchanged, silently bypassing the
-    # [STEP: spatial query] label every single time — confirmed via a
-    # full traceback showing the raw ArcGISQueryError reaching main.py
-    # unlabeled. Fixed by checking for a specific sentinel exception
-    # type for the diagnostic's own intentional report, instead of the
-    # overly broad RuntimeError.
-    class _DiagnosticReport(Exception):
-        pass
+    out_fields_set = {county.parcel_use_code_field, county.parcel_owner_field,
+                       county.parcel_owner_field_2, county.parcel_id_field,
+                       county.jurisdiction_field, county.parcel_acreage_field}
+    out_fields = ",".join(f for f in out_fields_set if f)
 
-    try:
-        spatial_only_ids = query_layer_ids(
-            STATEWIDE_CADASTRAL_URL,
-            where="1=1",
-            geometry=boundary_geometry,
-            geometry_type="esriGeometryPolygon",
-            spatial_rel="esriSpatialRelIntersects",
-        )
-        raise _DiagnosticReport(
-            f"[STEP: spatial query] DIAGNOSTIC: spatial "
-            f"filter alone (no DOR_UC) matched "
-            f"{len(spatial_only_ids)} parcels inside the {county.name} "
-            f"County boundary after client-side reprojection to WKID "
-            f"3086. If this number is large and reasonable (Hillsborough "
-            f"has roughly 400,000+ real parcels), the spatial filter "
-            f"finally works and the DOR_UC IN (...) code list is the "
-            f"next thing to verify. If still 0, the reprojection logic "
-            f"itself has a bug, or spatialRel/geometryType needs "
-            f"adjustment."
-        )
-    except _DiagnosticReport as report:
-        raise RuntimeError(str(report))
-    except Exception as exc:  # noqa: BLE001 — this now correctly catches real failures (including ArcGISQueryError) instead of having them slip through an overly broad `except RuntimeError: raise`
-        raise RuntimeError(
-            f"[STEP: spatial query] Spatial-only query "
-            f"against the statewide cadastral layer failed outright: "
-            f"{type(exc).__name__}: {exc}"
-        )
-
-    try:
-        matching_ids = query_layer_ids(
-            STATEWIDE_CADASTRAL_URL,
-            where=where,
-            geometry=boundary_geometry,
-            geometry_type="esriGeometryPolygon",
-            spatial_rel="esriSpatialRelIntersects",
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(
-            f"Could not fetch matching OBJECTIDs from the statewide "
-            f"cadastral layer for county {county_id} using a spatial "
-            f"filter: {exc}"
-        )
-
-    if not matching_ids:
-        return []
-
-    # Only fetch full attribute data for a bounded sample of matching
-    # IDs, not all of them — for a large county the agricultural-code
-    # match set could still be in the thousands, and pulling full
-    # attributes for all of them isn't necessary just to find
-    # max_candidates worth of acreage-qualifying parcels. This is a
-    # real trade-off: parcels beyond this sample size are never
-    # considered, even if they'd otherwise qualify. A production
-    # version should page through matching_ids in batches until
-    # max_candidates survivors are found, not stop after one fixed
-    # sample — not yet implemented here.
-    id_sample = matching_ids[:max(max_candidates * 5, 100)]
-
-    out_fields = ",".join([
-        "OBJECTID", "PARCEL_ID", "CO_NO", "DOR_UC", "LND_SQFOOT",
-        "LND_UNTS_C", "OWN_NAME", "JV",
-    ])
-
-    attrs_only_features = list(query_layer_by_id_batches(
-        STATEWIDE_CADASTRAL_URL,
-        object_ids=id_sample,
+    candidates: list[CandidateParcel] = []
+    for feat in query_layer(
+        county.parcel_service_url,
+        where=where,
         out_fields=out_fields,
-        return_geometry=False,
-        batch_size=200,
-    ))
-
-    # Apply the acreage filter BEFORE fetching any geometry — this is
-    # the actual point of the two-pass split: only pull expensive
-    # polygon geometry for the small number of parcels that survive
-    # the cheap attribute filter, instead of fetching geometry for
-    # every agricultural parcel in the county up front.
-    surviving_attrs = []
-    for feat in attrs_only_features:
+        return_geometry=True,
+        out_sr=AREA_SR,
+    ):
         attrs = feat.get("attributes", {})
-        acreage = _acreage_from_record(attrs)
+        geometry = feat.get("geometry")
+
+        # Defense in depth: re-check the server-side WHERE clause's
+        # classification client-side against the actual fetched
+        # attributes, rather than trusting the WHERE clause alone.
+        if not is_agricultural(county_id, attrs):
+            continue
+
+        acreage, acreage_source = _extract_acreage(county, attrs, geometry)
         if acreage is not None and not (min_acreage <= acreage <= max_acreage):
             continue
-        surviving_attrs.append((attrs, acreage))
-        if len(surviving_attrs) >= max_candidates:
-            break
-
-    # PASS 2: fetch geometry only for surviving parcels, one at a time
-    # by OBJECTID (cheaper/more reliable than PARCEL_ID string matching
-    # for a single-row lookup). This trades more individual requests
-    # for much smaller/cheaper individual responses — appropriate here
-    # since surviving_attrs is capped at max_candidates (small).
-    candidates: list[CandidateParcel] = []
-    for attrs, acreage in surviving_attrs:
-        parcel_id = attrs.get("PARCEL_ID")
-        object_id = attrs.get("OBJECTID")
-        geometry = None
-        if object_id is not None:
-            try:
-                geom_features = list(query_layer(
-                    STATEWIDE_CADASTRAL_URL,
-                    where=f"OBJECTID = {object_id}",
-                    out_fields="OBJECTID",
-                    return_geometry=True,
-                    page_size=1,
-                ))
-                if geom_features:
-                    geometry = geom_features[0].get("geometry")
-            except Exception:  # noqa: BLE001 — a single parcel's geometry failing shouldn't abort the whole scan; it just gets flagged downstream as "no geometry, verify manually" per scan_orchestrator.py's existing handling
-                geometry = None
 
         candidates.append(CandidateParcel(
-            parcel_id=attrs.get("PARCEL_ID"),
-            county_fips=county.fips,
+            parcel_id=attrs.get(county.parcel_id_field) if county.parcel_id_field else None,
+            county_id=county_id,
             acreage=acreage,
-            dor_use_code=attrs.get("DOR_UC"),
-            owner_name=attrs.get("OWN_NAME"),
-            owner_addr_city=attrs.get("OWN_CITY"),
-            owner_addr_state=attrs.get("OWN_STATE"),
-            just_value=attrs.get("JV"),
-            classified_ag_value=attrs.get("JV_CLASS_U"),
-            sale_year=attrs.get("SALE_YR1"),
-            sale_price=attrs.get("SALE_PRC1"),
-            section=attrs.get("SEC"),
-            township=attrs.get("TWN"),
-            range_=attrs.get("RNG"),
-            legal_desc=attrs.get("S_LEGAL"),
+            acreage_source=acreage_source,
+            use_code=attrs.get(county.parcel_use_code_field),
+            use_code_field=county.parcel_use_code_field,
+            owner_name=attrs.get(county.parcel_owner_field) if county.parcel_owner_field else None,
+            owner_name_2=attrs.get(county.parcel_owner_field_2) if county.parcel_owner_field_2 else None,
+            jurisdiction=attrs.get(county.jurisdiction_field) if county.jurisdiction_field else None,
             geometry=geometry,
         ))
 
@@ -517,12 +321,11 @@ def fetch_candidate_parcels(
 
 def group_by_apparent_owner(parcels: list[CandidateParcel]) -> dict[str, list[CandidateParcel]]:
     """
-    Best-effort grouping of adjacent/nearby parcels that share an exact
-    owner name string, as a starting point for identifying multi-parcel
-    enclaves under common control. This is NOT a substitute for a title
-    search: LLCs, trusts, and family entities frequently hold contiguous
-    land under slightly different name variants (e.g. "Smith Family
-    Trust" vs "Smith Family LLC"), which this naive grouping will miss.
+    Best-effort grouping of parcels that share an exact owner name
+    string, as a starting point for identifying multi-parcel enclaves
+    under common control. NOT a substitute for a title search: LLCs,
+    trusts, and family entities frequently hold contiguous land under
+    slightly different name variants, which this naive grouping will miss.
     """
     grouped: dict[str, list[CandidateParcel]] = {}
     for p in parcels:

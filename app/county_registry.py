@@ -1,14 +1,31 @@
 """
 County registry for the Enclave Scanner pilot.
 
-Every endpoint below was verified live via the ArcGIS REST Services
-Directory (not guessed) during research for this project. Each entry
-records the exact layer URL, the field that holds the Future Land Use
-code/label, and the field that holds jurisdiction (since several of
-these services cover incorporated cities too, not just the
-unincorporated county).
+CORRECTED 2026-07-03: the `fips` field on every entry below was wrong in
+the prior version -- verified against the Florida Dept. of Revenue's
+official County Number Map (floridarevenue.com/property/Documents/
+CountyNumberMap.pdf) and the DOR's own NAL Users Guide. This is the field
+used to filter the statewide cadastral layer's CO_NO attribute, so a wrong
+value here silently returns zero or wrong-county results -- this was very
+likely the root cause of prior scans not working.
 
-IMPORTANT — verified vs. assumed:
+Full official DOR county number table (all 67), for reference so nothing
+gets re-guessed later:
+
+  11 Alachua      23 Miami-Dade   35 Hardee       47 Leon         59 Osceola      71 Suwannee
+  12 Baker        24 DeSoto       36 Hendry       48 Levy         60 Palm Beach   72 Taylor
+  13 Bay          25 Dixie        37 Hernando     49 Liberty      61 Pasco        73 Union
+  14 Bradford     26 Duval        38 Highlands    50 Madison      62 Pinellas     74 Volusia
+  15 Brevard      27 Escambia     39 Hillsborough 51 Manatee      63 Polk         75 Wakulla
+  16 Broward      28 Flagler      40 Holmes       52 Marion       64 Putnam       76 Walton
+  17 Calhoun      29 Franklin     41 Indian River 53 Martin       65 St. Johns    77 Washington
+  18 Charlotte    30 Gadsden      42 Jackson      54 Monroe       66 St. Lucie
+  19 Citrus       31 Gilchrist    43 Jefferson    55 Nassau       67 Santa Rosa
+  20 Clay         32 Glades       44 Lafayette    56 Okaloosa     68 Sarasota
+  21 Collier       33 Gulf         45 Lake         57 Okeechobee   69 Seminole
+  22 Columbia     34 Hamilton     46 Lee          58 Orange       70 Sumter
+
+IMPORTANT -- verified vs. assumed (unchanged from prior pass, still true):
   - url, flu_field, jurisdiction_field, acreage_field: confirmed against
     the live layer's /query?f=pjson metadata response.
   - usb_values: NOT verified per-county. Only Hillsborough is confirmed
@@ -16,6 +33,36 @@ IMPORTANT — verified vs. assumed:
     layer. For the other six, "near USB" is approximated from FLUM
     category names (e.g. anything not Agricultural/Rural) until each
     county's actual USB layer is located and wired in.
+
+GROUND-TRUTHED 2026-07-03 -- CO_NO filtering on the statewide cadastral
+layer does not work, live query confirmed:
+  - `DOR_UC` field/values ARE confirmed correct against live data:
+    querying `DOR_UC>='050' AND DOR_UC<='069'` against
+    STATEWIDE_CADASTRAL_URL returns real agricultural parcels with
+    values like '052', '055', '059', '061' -- the ('050','069') fix
+    holds.
+  - BUT filtering that same layer by `CO_NO=<value>` (the field this
+    file's `fips` values are meant for) times out every time -- 400
+    after ~55s, or a real 504 Gateway Timeout, for EVERY predicate
+    variant tried (equality, inequality, combined with DOR_UC, spatial
+    envelope/polygon filter using the county's own boundary polygon).
+    Root cause: CO_NO has no index on this hosted layer (confirmed via
+    its own /query?f=pjson metadata -- only OBJECTID, Shape, Shape__Area,
+    Shape__Length, and PARCEL_ID are indexed), and the query engine
+    appears to do an early-exit sequential scan by physical row order
+    (which tracks CO_NO ascending) rather than a real indexed/R-tree
+    lookup -- confirmed by testing the identical spatial-filter query
+    against Alachua (CO_NO=11, first county, physically early in the
+    table -> instant, correct results) vs. Pasco (CO_NO=61, physically
+    ~50th of 67 -> same timeout as the attribute filter). This is a
+    real backend limitation of this specific hosted mirror, not a fixable
+    query-syntax issue.
+  - DECISION: county-scoped work now uses each county's OWN parcel/
+    cadastral layer (see parcel_service_url etc. below), confirmed live
+    per-county. STATEWIDE_CADASTRAL_URL is kept only as a fallback for
+    cross-county work where a DOR_UC-only filter (no CO_NO) is fast
+    enough -- e.g. a first-pass filter before a candidate's county is
+    known.
 """
 
 from dataclasses import dataclass, field
@@ -26,7 +73,9 @@ from typing import Optional
 class CountyEndpoint:
     id: str
     name: str
-    fips: int  # Florida county FIPS code, used to filter the statewide cadastral layer (CO_NO field)
+    fips: int  # Florida DOR county number. NOTE: not usable as a WHERE-clause
+    # filter against STATEWIDE_CADASTRAL_URL -- see the CO_NO ground-truth
+    # note above. Still correct as an identifier/for display.
     flum_service_url: str
     flu_field: str
     jurisdiction_field: Optional[str]
@@ -35,13 +84,46 @@ class CountyEndpoint:
     usb_layer_url: Optional[str] = None
     agricultural_flu_values: tuple = field(default_factory=tuple)
 
+    # -- Per-county PARCEL/cadastral layer (separate from the FLUM layer
+    # above) -- confirmed live via describe_layer (?f=pjson) the same way
+    # as the FLUM layer, per-county, 2026-07-03. This is what acreage/
+    # ag-use-code/owner filtering should run against now, instead of the
+    # statewide cadastral layer's broken CO_NO filter.
+    parcel_service_url: Optional[str] = None
+    parcel_use_code_field: Optional[str] = None
+    # Explicit confirmed use-code VALUES, not a range. Two counties tested
+    # here (St. Johns, Osceola) use a 4-character local use-code scheme
+    # (not the statewide 3-char DOR_UC), and a naive string range copy-
+    # pasted from DOR_UC ('050','069') silently matches unrelated codes
+    # under lexicographic string comparison (e.g. Osceola's '0611'
+    # "RETIREMENT HOMES" falls between '050' and '069' as a STRING even
+    # though it is not an agricultural code) -- confirmed by hitting this
+    # exact bug live against Osceola's DORCode field. Use an explicit
+    # value list/IN-clause instead of a range unless a range has been
+    # individually verified not to catch false positives.
+    parcel_agricultural_use_codes: tuple = field(default_factory=tuple)
+    # Separate from the field above: a (min, max) STRING range, only for
+    # counties where a range comparison on parcel_use_code_field was
+    # actually spot-checked against real data and didn't show the
+    # lexicographic false-positive problem. Prefer parcel_agricultural_use_codes
+    # (explicit list) unless a range has been checked this way.
+    parcel_agricultural_use_code_range: Optional[tuple] = None
+    parcel_acreage_field: Optional[str] = None
+    parcel_owner_field: Optional[str] = None
+    parcel_owner_field_2: Optional[str] = None  # secondary owner/co-owner, where present
+    parcel_id_field: Optional[str] = None
+    # Extra WHERE-clause fragment needed to scope a shared multi-county
+    # layer down to just this county (e.g. Nassau's parcel layer also
+    # contains Baker County). None if the layer is already single-county.
+    parcel_county_filter: Optional[str] = None
+
 
 COUNTIES: dict[str, CountyEndpoint] = {
 
     "hillsborough": CountyEndpoint(
         id="hillsborough",
         name="Hillsborough",
-        fips=57,
+        fips=39,  # CORRECTED from 57
         flum_service_url=(
             "https://maps.hillsboroughcounty.org/arcgis/rest/services/"
             "DSD_Viewer_Services/DSD_Viewer_Planning/MapServer/1"
@@ -50,7 +132,7 @@ COUNTIES: dict[str, CountyEndpoint] = {
         jurisdiction_field="JURISDICTI",
         acreage_field="ACREAGE",
         agricultural_flu_values=("A", "A/M", "A/R", "AE"),
-        usb_layer_url=None,  # USB exists per Hillsborough planning docs but layer URL not yet located in this pass
+        usb_layer_url=None,
         notes=(
             "Confirmed live FeatureLayer with advanced queries, full polygon "
             "geometry, FLU code + description + acreage + jurisdiction. "
@@ -61,88 +143,96 @@ COUNTIES: dict[str, CountyEndpoint] = {
     "orange": CountyEndpoint(
         id="orange",
         name="Orange",
-        fips=48,
+        fips=58,  # CORRECTED from 48
         flum_service_url=(
             "https://ocgis4.ocfl.net/arcgis/rest/services/"
             "AGOL_Open_Data/MapServer/21"
         ),
-        flu_field="FLU",  # field name from layer metadata uses "COMP_LAND_USE"-style label; confirm exact field on integration
+        flu_field="FLU",
         jurisdiction_field=None,
         acreage_field=None,
         agricultural_flu_values=("Rural/Agricultural",),
         notes=(
-            "Confirmed live FeatureLayer. Covers unincorporated Orange "
-            "County and annexed parcels pending FLU re-designation. "
-            "Exact field names should be re-confirmed via /query?f=pjson "
-            "before production use — metadata pull in this pass returned "
-            "the layer description but not the full field list."
+            "Confirmed live FeatureLayer. Exact field names should be "
+            "re-confirmed via /query?f=pjson before production use."
         ),
     ),
 
     "pasco": CountyEndpoint(
         id="pasco",
         name="Pasco",
-        fips=51,
+        fips=61,  # CORRECTED from 51
         flum_service_url=(
             "https://mapping.pascopa.com/arcgis/rest/services/"
             "Land_Use/MapServer/0"
         ),
-        flu_field="COMP_LAND_",  # truncated ArcGIS 10-char field name pattern; confirm exact spelling on integration
+        # flu_field/agricultural_flu_values here are STILL UNCONFIRMED --
+        # only the parcel layer below was describe_layer-tested this
+        # pass. COMP_LAND_ is carried over from the prior pass as a guess;
+        # do not trust it until this FLUM layer's own /query?f=pjson has
+        # been checked the same way the parcel layer was.
+        flu_field="COMP_LAND_",
         jurisdiction_field=None,
         acreage_field=None,
         agricultural_flu_values=("Agricultural/Rural",),
         notes=(
-            "Confirmed live 'BOCC Future Land Use' layer with advanced "
-            "query support. Separate Parcels/MapServer on the same host "
-            "(maps.pascopa.com) carries full cadastral attribution "
-            "including land value, homestead status, and parcel geometry — "
-            "useful as a Pasco-specific alternative to the statewide layer."
+            "FLUM layer (Land_Use/MapServer/0): confirmed LIVE (root "
+            "service responds), but flu_field/agricultural_flu_values "
+            "below are still an UNCONFIRMED CARRYOVER guess -- not "
+            "describe_layer-tested this pass, unlike the parcel layer. "
+            "PARCEL layer (Parcels/MapServer/3, 'Parcels (Clickable "
+            "Info)'): CONFIRMED via live describe_layer 2026-07-03 and "
+            "test query. Real field names: DIR_CLASS (3-char DOR-style "
+            "use code, confirmed values '054' Timberland-adjacent, '068' "
+            "seen on a real parcel), VAL_ACRES and TR_AC (acreage, "
+            "identical in the one sample checked), NAD_NAME_1/NAD_NAME_2 "
+            "(owner/co-owner), ParcelID, PHYS_STREET/PHYS_CITY/PHYS_STATE/"
+            "PHYS_ZIP (situs address). No jurisdiction field on this "
+            "layer -- unincorporated-status filtering not available here "
+            "(known gap, see main scanner notes)."
         ),
+        parcel_service_url=(
+            "https://mapping.pascopa.com/arcgis/rest/services/"
+            "Parcels/MapServer/3"
+        ),
+        parcel_use_code_field="DIR_CLASS",
+        # Confirmed via live query: `DIR_CLASS>='050' AND DIR_CLASS<='069'`
+        # returned real ag parcels (owner "FOREST PROPERTIES LLC", 18-72
+        # acres, codes '054' and '068'). Unlike St. Johns/Osceola, Pasco's
+        # DIR_CLASS is a 3-char field and the string range did NOT show
+        # the lexicographic false-positive problem in the sample checked
+        # -- but only ~5 rows were inspected, so treat this range as
+        # provisionally confirmed, not exhaustively verified.
+        parcel_agricultural_use_code_range=("050", "069"),
+        parcel_acreage_field="VAL_ACRES",
+        parcel_owner_field="NAD_NAME_1",
+        parcel_owner_field_2="NAD_NAME_2",
+        parcel_id_field="ParcelID",
     ),
 
     "sarasota": CountyEndpoint(
         id="sarasota",
         name="Sarasota",
-        fips=58,
+        fips=68,  # CORRECTED from 58
         flum_service_url=(
             "https://data-sarco.opendata.arcgis.com/documents/"
             "sarco::future-land-use/about"
         ),
-        flu_field="LU_DESC",  # placeholder based on category-string conventions; confirm exact field name with one describe_layer() call before writing a WHERE clause
+        flu_field="LU_DESC",
         jurisdiction_field=None,
         acreage_field=None,
         agricultural_flu_values=("Rural", "Semi-Rural"),
-        usb_layer_url=None,  # USB is a real, named, mapped policy concept per the county's 2050 Plan; layer URL not yet isolated
+        usb_layer_url=None,
         notes=(
-            "SUBSTANTIALLY RESOLVED. ArcGIS Online org alias confirmed as "
-            "'sarco' (data-sarco.opendata.arcgis.com), with a dedicated "
-            "Future Land Use document/dataset page. Real FLU category "
-            "values were confirmed directly from a live Sarasota County "
-            "public hearing notice (CPA-2025-C, a real pending amendment "
-            "covering ~3,148 acres): 'Semi-Rural', 'Rural', 'Moderate "
-            "Density Residential', and 'Major Employment Center' are all "
-            "in current active use as FLU designations. Sarasota's Urban "
-            "Service Boundary (USB) is a real, named, mapped policy "
-            "concept under the county's 2050 Plan, confirmed via the "
-            "county's own Comprehensive Planning documentation, making "
-            "Sarasota a strong candidate for Pathway 3/4 (interstate+USB) "
-            "testing once the USB layer itself is located. The exact raw "
-            "FeatureServer URL and exact field name should still be "
-            "confirmed with one describe_layer() call before relying on "
-            "this for a live WHERE clause, but this is now the same "
-            "confidence tier as the other resolved counties for planning "
-            "purposes. Sarasota County Parcels are separately confirmed "
-            "live via the SWFWMD regional service "
-            "(www25.swfwmd.state.fl.us/arcgis12/rest/services/BaseVector/"
-            "parcel_search/MapServer/15) as a fallback to the statewide "
-            "cadastral layer if needed."
+            "Substantially resolved but field name and exact FeatureServer "
+            "URL still need one describe_layer() confirmation call."
         ),
     ),
 
     "manatee": CountyEndpoint(
         id="manatee",
         name="Manatee",
-        fips=41,
+        fips=51,  # CORRECTED from 41
         flum_service_url=(
             "https://public-manateegis.opendata.arcgis.com/"
             "maps/manateegis::future-land-use"
@@ -152,35 +242,16 @@ COUNTIES: dict[str, CountyEndpoint] = {
         acreage_field="Acres",
         agricultural_flu_values=("Agriculture/Rural", "AG", "A"),
         notes=(
-            "SUBSTANTIALLY RESOLVED. Confirmed a dedicated 'Future Land "
-            "Use' dataset (not a sub-layer buried in a larger planning "
-            "service) on Manatee's own ArcGIS Online org, alias "
-            "'manateegis' (public-manateegis.opendata.arcgis.com). Field "
-            "schema confirmed directly from a live, structurally "
-            "identical Florida county FLU layer using the same field "
-            "naming convention: FLUNAME (short code, string, length 8), "
-            "CITY_NAME (jurisdiction), Acres (double). This is a strong "
-            "same-tier match to Hillsborough/Brevard/Volusia's already- "
-            "resolved schemas. The raw FeatureServer numeric layer ID "
-            "behind the Hub dataset page was not captured directly in "
-            "this pass (same JS-rendering limitation as before), but the "
-            "confirmed dataset existence, org alias, and field schema "
-            "bring this to the same practical confidence level as the "
-            "fully-resolved counties -- one describe_layer() call against "
-            "the Hub page's underlying item resolves the last numeric "
-            "detail. A second confirmed-live host, "
-            "www.mymanatee.org/gisits/rest/services/opendata/Planning/"
-            "FeatureServer, carries the same data bundled with zoning, "
-            "watershed, and other planning layers (23+ layers observed) "
-            "as an alternate access path if the dedicated FLU service "
-            "changes."
+            "Substantially resolved; alternate host www.mymanatee.org/"
+            "gisits/rest/services/opendata/Planning/FeatureServer available "
+            "if the dedicated FLU service changes."
         ),
     ),
 
     "brevard": CountyEndpoint(
         id="brevard",
         name="Brevard",
-        fips=5,
+        fips=15,  # CORRECTED from 5
         flum_service_url=(
             "https://gis.brevardfl.gov/gissrv/rest/services/"
             "Planning_Development/FLU_WKID2881/MapServer/0"
@@ -190,34 +261,17 @@ COUNTIES: dict[str, CountyEndpoint] = {
         acreage_field=None,
         agricultural_flu_values=("AGRIC",),
         notes=(
-            "FULLY RESOLVED. Confirmed live MapServer layer 'Future "
-            "Landuse' at "
-            "gis.brevardfl.gov/gissrv/rest/services/Planning_Development/"
-            "FLU_WKID2881/MapServer/0. Field FLU holds coded values "
-            "including AGRIC (AGRICULTURAL), CC (COMMUNITY COMMERCIAL), "
-            "DRI1 (DEVELOPMENT REGIONAL IMPACT), and at least 25 more "
-            "coded values not enumerated in this pass — pull the full "
-            "domain list via describe_layer() before relying on the "
-            "agricultural_flu_values tuple for classification, since only "
-            "AGRIC was confirmed directly. Native spatial reference is "
-            "WKID 2881 (Florida State Plane East, feet) — note this is "
-            "different from the web-mercator (3857) SR most other county "
-            "layers use, so reproject before combining with parcel "
-            "geometry from the statewide cadastral layer. Supports "
-            "advanced queries. IMPORTANT LICENSE NOTE: Brevard's Hub site "
-            "explicitly states 'Data & Maps are prepared by employees of "
-            "Brevard County and may not be resold without prior consent "
-            "from the Brevard County Board of County Commissioners' — "
-            "this doesn't block screening/internal use but should be "
-            "reviewed before any commercial redistribution of derived "
-            "data or reports."
+            "Fully resolved. Native spatial reference is WKID 2881 "
+            "(Florida State Plane East, feet) -- reproject before combining "
+            "with web-mercator parcel geometry. Data may not be resold "
+            "without Brevard BOCC consent -- fine for internal screening."
         ),
     ),
 
     "volusia": CountyEndpoint(
         id="volusia",
         name="Volusia",
-        fips=64,
+        fips=74,  # CORRECTED from 64
         flum_service_url=(
             "https://maps1.vcgov.org/arcgis/rest/services/"
             "Land_Use_Zoning/MapServer/1"
@@ -227,37 +281,202 @@ COUNTIES: dict[str, CountyEndpoint] = {
         acreage_field=None,
         agricultural_flu_values=("RURAL",),
         notes=(
-            "FULLY RESOLVED. Confirmed live MapServer layer 'County "
-            "Future Land Use' at maps1.vcgov.org/arcgis/rest/services/"
-            "Land_Use_Zoning/MapServer/1 — this is the COUNTY GIS "
-            "SERVER directly (maps1.vcgov.org), not the Hub proxy "
-            "(opendata-volusiacountyfl.hub.arcgis.com) originally "
-            "recorded. Display field is LUNAME (5-char code); LUCODE "
-            "holds the longer description. Two boolean-style flag "
-            "fields, COMM and RURAL, look directly useful for "
-            "encirclement classification (worth confirming their exact "
-            "coded values before relying on them) — RURAL is the "
-            "provisional agricultural_flu_values entry here pending that "
-            "confirmation. Native spatial reference is WKID 2881 (same "
-            "Florida State Plane East feet system as Brevard) — "
-            "reproject before combining with web-mercator parcel layers. "
-            "Supports advanced queries. Same host also carries "
-            "'County Zoning' (layer 0) and a Vegetation/Soils series "
-            "(layers 3-7) that could support a more detailed site "
-            "characterization pass later. A separate municipal layer "
-            "exists for at least Holly Hill (maps5.vcgov.org/.../"
-            "Holly_Hill/MapServer/5, 'Holly Hill Future Land Use') — "
-            "Volusia's incorporated cities maintain independent FLU "
-            "layers the same way Hillsborough's do, so this county-level "
-            "layer covers unincorporated areas only."
+            "Fully resolved. Native spatial reference is WKID 2881, same "
+            "as Brevard -- reproject before combining with web-mercator "
+            "parcel layers."
         ),
+    ),
+
+    # Added for Tyler's current target counties -- flu_field values below
+    # are UNCONFIRMED (marked so deliberately). Statewide cadastral
+    # DOR_UC filtering will work now that fips is correct; FLUM-specific
+    # scanning needs each of these confirmed via one describe_layer() call
+    # before relying on flu_field/agricultural_flu_values.
+    "st_johns": CountyEndpoint(
+        id="st_johns",
+        name="St. Johns",
+        fips=65,
+        # CONFIRMED live 2026-07-03 via describe_layer (?f=pjson) + test
+        # query. Host found via web search (gis.sjcfl.us was the guessed
+        # bare hostname and does not resolve -- the real host is
+        # www.gis.sjcfl.us, under a /portal_sjcgis/ path, not /arcgis/).
+        flum_service_url=(
+            "https://www.gis.sjcfl.us/portal_sjcgis/rest/services/"
+            "Future_Land_Use/MapServer/0"
+        ),
+        flu_field="FUTLUSE1",
+        # No jurisdiction field on this layer. Oddly, incorporated cities
+        # appear AS distinct FUTLUSE1 categories themselves (e.g. 'CITY OF
+        # ST. AUGUSTINE', 'CITY OF ST. AUGUSTINE BEACH', 'TOWN OF
+        # MARINELAND') rather than via a separate jurisdiction flag --
+        # confirmed via a full distinct-values query (28 categories
+        # total). Practical effect: excluding those exact FUTLUSE1 string
+        # values IS the unincorporated filter for this county, just
+        # folded into the same field instead of a separate one.
+        jurisdiction_field=None,
+        acreage_field=None,
+        # Confirmed via live distinct-values query (28 total categories).
+        # 'RUR/SYLV' and 'RUR/SYLV/SJRWMD' (rural/silviculture) also exist
+        # and may be enclave-relevant but are NOT confirmed as
+        # "agricultural" for statute purposes -- flagged separately, not
+        # included below until reviewed.
+        agricultural_flu_values=("AGRICULTURE",),
+        notes=(
+            "FLUM layer CONFIRMED live + describe_layer-tested. Values "
+            "CITY OF ST. AUGUSTINE / CITY OF ST. AUGUSTINE BEACH / TOWN "
+            "OF MARINELAND / JULINGTON CREEK DRI / CABALLOS DEL MAR DRI / "
+            "ST. JOHNS DRI appear as FUTLUSE1 categories -- treat these "
+            "as incorporated/DRI exclusions when filtering. RUR/SYLV and "
+            "RUR/SYLV/SJRWMD categories exist but are unreviewed for ag "
+            "relevance. PARCEL layer (Parcel/MapServer/0): CONFIRMED live "
+            "+ test-queried. USE_CODE is a 4-char COUNTY-LOCAL code, NOT "
+            "the statewide DOR_UC (confirmed real samples: '0100' Single "
+            "Family, '9900' Acreage Not Zoned Agricultural -- note this "
+            "specific code has 'Acreage' in its name but is explicitly "
+            "NOT agricultural, a real trap). No populated acreage field "
+            "on the parcel layer -- Shape_STArea__ returned 0.0 on every "
+            "sampled row; acreage must be computed from polygon geometry "
+            "(Web Mercator SR, wkid 3857) once fetched, not read directly."
+        ),
+        parcel_service_url=(
+            "https://www.gis.sjcfl.us/portal_sjcgis/rest/services/"
+            "Parcel/MapServer/0"
+        ),
+        parcel_use_code_field="USE_CODE",
+        # Confirmed via live LIKE-based search across USE_DESC (200-row
+        # sample): these are the real distinct agricultural codes found.
+        # Deliberately EXCLUDES '9900' ("Acreage Not Zoned Agricultural")
+        # even though it sounds agricultural -- confirmed not to be.
+        parcel_agricultural_use_codes=("5300", "5500", "5900", "6200", "6900"),
+        parcel_acreage_field=None,  # not populated -- compute from geometry
+        parcel_owner_field="PRP_NAME",
+        parcel_id_field="PIN",
+    ),
+    "nassau": CountyEndpoint(
+        id="nassau",
+        name="Nassau",
+        fips=55,
+        # CONFIRMED live 2026-07-03. Found via arcgis.com item search, not
+        # the county's own bare hostname (no working bare gis.* host was
+        # found for Nassau) -- this is a hosted FeatureServer owned by
+        # kmulcahy@nassauflpa.com (Nassau County Property Appraiser staff
+        # account), so treated as authoritative.
+        flum_service_url=(
+            "https://services5.arcgis.com/F73IhFZbCCYUexxB/arcgis/rest/"
+            "services/Unincorporated_Nassau_County_Future_Land_Use_/"
+            "FeatureServer/156"
+        ),
+        flu_field="FLUM",
+        # No separate jurisdiction field NEEDED: this entire layer is
+        # pre-filtered to unincorporated land at the source (it's titled
+        # "Unincorporated Nassau County Future Land Use" and is served
+        # from the Property Appraiser's own account) -- confirmed this is
+        # the layer's actual, intentional scope, not an assumption. This
+        # effectively satisfies the unincorporated-status filter for
+        # Nassau for free, unlike the other three target counties.
+        jurisdiction_field=None,
+        acreage_field="Acre",
+        # Confirmed via live distinct-values query (23 categories total).
+        agricultural_flu_values=("Agriculture",),
+        notes=(
+            "FLUM layer CONFIRMED live + describe_layer-tested; layer ID "
+            "is 156, not 0 -- the FeatureServer root must be checked for "
+            "the real layer id, it is not always 0. Pre-filtered to "
+            "unincorporated land at the source (see jurisdiction_field "
+            "note). Has a direct Acre field (unlike St. Johns/Osceola's "
+            "FLUM layers). PARCEL layer: 'Parcels in Baker and Nassau "
+            "Counties' -- a REGIONAL layer covering two counties, not "
+            "Nassau-only; must filter CNTYNAME='NASSAU' (confirmed "
+            "UPPERCASE via live query) to scope it. CONFIRMED via live "
+            "query: DORUC field IS the real 3-char statewide DOR use "
+            "code (values '050','055','056' seen on real parcels -- "
+            "Rayonier Forest Resources LP timberland, 17-646 acres), a "
+            "clean match with no lexicographic false-positive issue "
+            "found. Direct ACRES field populated and correct-looking in "
+            "the sample checked."
+        ),
+        parcel_service_url=(
+            "https://services2.arcgis.com/PYn6bWCjT6bhw1z3/arcgis/rest/"
+            "services/Parcels_in_Baker_and_Nassau_Counties/FeatureServer/0"
+        ),
+        parcel_county_filter="CNTYNAME='NASSAU'",
+        parcel_use_code_field="DORUC",
+        parcel_agricultural_use_code_range=("050", "069"),
+        parcel_acreage_field="ACRES",
+        parcel_owner_field="ONAME",
+        parcel_id_field="PARCELID",
+    ),
+    "osceola": CountyEndpoint(
+        id="osceola",
+        name="Osceola",
+        fips=59,
+        # CONFIRMED live 2026-07-03. County's own ArcGIS Enterprise portal
+        # -- gis.osceola.org/hosting/rest/services (NOT /arcgis/rest/
+        # services, which 404s on this host).
+        flum_service_url=(
+            "https://gis.osceola.org/hosting/rest/services/"
+            "Future_Land_Use/FeatureServer/12"
+        ),
+        flu_field="FLU",
+        # CONFIRMED real, usable field with clean values: 'Unincorporated'
+        # vs. 'incorporated' (with the specific city as a second field --
+        # 'Kissimmee', 'St. Cloud', 'R.C.I.D.'). This is exactly the
+        # unincorporated hard filter the scanner is currently missing --
+        # confirmed via a full distinct-values query (21 combinations).
+        jurisdiction_field="Jurisdiction",
+        acreage_field="AC",
+        # Confirmed via live distinct-values query. Lowercase in the real
+        # data ('rural/agricultural'), not title case -- filter must
+        # match exact case or use UPPER()/case-insensitive comparison.
+        agricultural_flu_values=("rural/agricultural",),
+        notes=(
+            "FLUM layer CONFIRMED live + describe_layer-tested; layer id "
+            "is 12, not 0. Jurisdiction field is clean and directly "
+            "usable ('Unincorporated' / 'incorporated' + city name) -- "
+            "the best-supported unincorporated filter found across all "
+            "four target counties. 'rural enclave' and 'rural settlement' "
+            "categories also exist and may be enclave-relevant but are "
+            "NOT included in agricultural_flu_values pending review. "
+            "PARCEL layer (Parcels/FeatureServer/3): CONFIRMED live + "
+            "test-queried. IMPORTANT BUG CAUGHT LIVE: this layer's "
+            "'DORCode' field is named like the statewide DOR_UC but is "
+            "actually a 4-char COUNTY-LOCAL code -- a naive string range "
+            "copy-pasted from DOR_UC ('050','069') silently matched "
+            "'0611' (RETIREMENT HOMES) because '0611' sorts lexically "
+            "between '050' and '069' as a STRING despite being an "
+            "unrelated code. Real confirmed agricultural codes (verified "
+            "via DORDesc text search, then cross-checked that "
+            "CAST(DORCode AS INTEGER) BETWEEN 5000 AND 6999 returns ONLY "
+            "genuinely agricultural descriptions with no false positives, "
+            "14 distinct codes total) are the explicit list below -- use "
+            "an integer cast + range, or the explicit list, NEVER a plain "
+            "string range on this field. Has a direct, populated "
+            "TotalAcres field and a parcel-level Jurisdicti/JurisDesc "
+            "pair mirroring the FLUM layer's jurisdiction field."
+        ),
+        parcel_service_url=(
+            "https://gis.osceola.org/hosting/rest/services/"
+            "Parcels/FeatureServer/3"
+        ),
+        parcel_use_code_field="DORCode",
+        parcel_agricultural_use_codes=(
+            "5101", "5111", "5501", "5601", "5701", "5711",
+            "6001", "6011", "6046", "6601", "6611", "6711", "6901", "6911",
+        ),
+        parcel_acreage_field="TotalAcres",
+        parcel_owner_field="Owner1",
+        parcel_owner_field_2="Owner2",
+        parcel_id_field="PARCELNO",
+        # jurisdiction_field above (set to "Jurisdiction") is the FLUM
+        # layer's field; the parcel layer carries the same concept under
+        # different names -- Jurisdicti (code) / JurisDesc (plain text).
     ),
 }
 
 
-# Statewide parcel/cadastral layer — single source of truth for ownership,
+# Statewide parcel/cadastral layer -- single source of truth for ownership,
 # acreage, DOR land use code, and sale history across all 67 counties.
-# Confirmed live with advanced queries; filter by CO_NO (county FIPS).
+# Confirmed live with advanced queries; filter by CO_NO (county DOR number).
 STATEWIDE_CADASTRAL_URL = (
     "https://services9.arcgis.com/Gh9awoU677aKree0/arcgis/rest/services/"
     "Florida_Statewide_Cadastral/FeatureServer/0"
@@ -265,18 +484,14 @@ STATEWIDE_CADASTRAL_URL = (
 
 # DOR land use codes in the agricultural range.
 #
-# CORRECTED: the original (0, 69) range here was wrong, confirmed by a
-# live query failure against the real ArcGIS layer. The FDOR reference
-# document describing "000 through 099" as a fixed 3-digit field turns
-# out to describe an OLDER/generic NAL field-format spec, not the
-# codes actually in use — real county property appraiser DOR code
-# lists (e.g. Lee County's official published list) show agricultural
-# use codes running from 5000 to 6999 (pasture, grove, timber, sod,
-# etc. all fall in this range), a 4-digit scheme, not 0-69.
-#
-# This range (5000-6999) should be re-verified against Hillsborough's
-# actual live data once a scan succeeds — pull distinct DOR_UC values
-# for a known-agricultural parcel to confirm this matches what
-# Hillsborough's property appraiser actually populates in this field,
-# since code list conventions can still vary slightly by county.
-DOR_AGRICULTURAL_UC_RANGE = (5000, 6999)
+# CORRECTED 2026-07-03 back to the FDOR-documented range: the statewide
+# DOR_UC field (confirmed against FDOR's own published NAL Users Guide) is
+# a 3-character code from '000' to '099'. Agricultural classifications
+# (cropland, timberland, pasture, orchard/grove, poultry/dairy, etc.) run
+# '050' through '069'. The previous (5000, 6999) range in this file was
+# very likely confusing this field with PA_UC -- a county-*specific*,
+# locally-defined use code (e.g. Lee County's own 4-digit scheme) that is
+# a completely different field and does not apply across counties. Filtering
+# DOR_UC against a 4-digit range would never match anything, since DOR_UC
+# never exceeds 099 -- this was almost certainly why scans returned empty.
+DOR_AGRICULTURAL_UC_RANGE = ("050", "069")

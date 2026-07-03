@@ -330,6 +330,22 @@ def fetch_candidate_parcels(
     # real (49 rings, 5013 points) and the reprojection math round-trips
     # correctly against a known point (Tampa, FL). This tests whether
     # the actual spatial query against the statewide layer succeeds now.
+    #
+    # BUG FOUND AND FIXED: this block's own diagnostic "success" report
+    # was raised as a plain RuntimeError, and the exception handler
+    # below had `except RuntimeError: raise` to avoid re-wrapping that
+    # intentional report — but arcgis_client.ArcGISQueryError (raised on
+    # a REAL timeout/failure) is ALSO a RuntimeError subclass. This
+    # meant real timeouts were being caught by that `except RuntimeError`
+    # clause and re-raised completely unchanged, silently bypassing the
+    # [STEP: spatial query] label every single time — confirmed via a
+    # full traceback showing the raw ArcGISQueryError reaching main.py
+    # unlabeled. Fixed by checking for a specific sentinel exception
+    # type for the diagnostic's own intentional report, instead of the
+    # overly broad RuntimeError.
+    class _DiagnosticReport(Exception):
+        pass
+
     try:
         spatial_only_ids = query_layer_ids(
             STATEWIDE_CADASTRAL_URL,
@@ -338,7 +354,7 @@ def fetch_candidate_parcels(
             geometry_type="esriGeometryPolygon",
             spatial_rel="esriSpatialRelIntersects",
         )
-        raise RuntimeError(
+        raise _DiagnosticReport(
             f"[STEP: spatial query] DIAGNOSTIC: spatial "
             f"filter alone (no DOR_UC) matched "
             f"{len(spatial_only_ids)} parcels inside the {county.name} "
@@ -350,9 +366,9 @@ def fetch_candidate_parcels(
             f"itself has a bug, or spatialRel/geometryType needs "
             f"adjustment."
         )
-    except RuntimeError:
-        raise
-    except Exception as exc:  # noqa: BLE001
+    except _DiagnosticReport as report:
+        raise RuntimeError(str(report))
+    except Exception as exc:  # noqa: BLE001 — this now correctly catches real failures (including ArcGISQueryError) instead of having them slip through an overly broad `except RuntimeError: raise`
         raise RuntimeError(
             f"[STEP: spatial query] Spatial-only query "
             f"against the statewide cadastral layer failed outright: "

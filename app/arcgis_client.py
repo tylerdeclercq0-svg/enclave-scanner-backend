@@ -36,10 +36,10 @@ from typing import Any, Iterator, Optional
 import requests
 
 
-DEFAULT_TIMEOUT = 45
+DEFAULT_TIMEOUT = 12
 DEFAULT_PAGE_SIZE = 500
-MAX_RETRIES = 2
-RETRY_BACKOFF_SECONDS = 2
+MAX_RETRIES = 1
+RETRY_BACKOFF_SECONDS = 1
 
 
 class ArcGISQueryError(RuntimeError):

@@ -284,7 +284,7 @@ async function loadCounties(){
 
 document.getElementById('apiBase').addEventListener('change', loadCounties);
 (function initApiBase(){
-  const saved = localStorage.getItem(API_BASE_KEY) || 'http://localhost:8000';
+  const saved = localStorage.getItem(API_BASE_KEY) || 'https://enclave-scanner-backend.onrender.com';
   document.getElementById('apiBase').value = saved;
   loadCounties();
 })();

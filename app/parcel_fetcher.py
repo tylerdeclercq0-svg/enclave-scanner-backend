@@ -174,6 +174,39 @@ def fetch_candidate_parcels(
     codes_list = ",".join(f"'{c}'" for c in common_ag_codes)
     where = f"CO_NO = {county.fips} AND DOR_UC IN ({codes_list})"
 
+    # DIAGNOSTIC: even returnIdsOnly (the cheapest possible ArcGIS query)
+    # timed out against this WHERE clause, which rules out pagination
+    # strategy as the bottleneck — something about the WHERE clause
+    # itself, or this server's current load/health, is the real issue.
+    # This block establishes a baseline: an unfiltered returnCountOnly
+    # query is about as cheap as an ArcGIS query can get. If THIS also
+    # times out, the server itself is unhealthy right now, not our
+    # query. If it succeeds quickly, the CO_NO/DOR_UC filter combination
+    # specifically is the problem (e.g. an unindexed field), pointing
+    # to a narrower fix. Remove this diagnostic once the real cause is
+    # confirmed either way.
+    try:
+        from arcgis_client import query_layer_count
+        baseline_count = query_layer_count(STATEWIDE_CADASTRAL_URL, where="1=1")
+        raise RuntimeError(
+            f"DIAGNOSTIC: baseline unfiltered count succeeded with "
+            f"{baseline_count} total rows in the layer. This means the "
+            f"server is reachable and responsive in general — the "
+            f"CO_NO/DOR_UC filter combination is the specific problem, "
+            f"likely an unindexed field forcing a full scan. Next fix: "
+            f"try filtering by CO_NO alone (no DOR_UC) to isolate which "
+            f"of the two conditions is slow."
+        )
+    except RuntimeError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"DIAGNOSTIC: even the unfiltered baseline count query "
+            f"failed/timed out: {exc}. This suggests the server itself "
+            f"is currently unhealthy or rate-limiting us, not that our "
+            f"specific WHERE clause is at fault."
+        )
+
     # STRATEGY CHANGE: previous attempts used resultOffset-based paging
     # (via query_layer), which Esri's own community support forum
     # confirms gets progressively slower and can time out against

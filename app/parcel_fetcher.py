@@ -107,10 +107,22 @@ def fetch_candidate_parcels(
     if county is None:
         raise ValueError(f"Unknown county id: {county_id}")
 
+    # Trimmed to ONLY fields directly confirmed to exist on this exact
+    # layer's live metadata response (CO_NO, PARCEL_ID, DOR_UC, OWN_NAME,
+    # LND_SQFOOT, JV, LND_UNTS_C). Several other fields used in an
+    # earlier version (S_LEGAL, SEC, TWN, RNG, SALE_YR1, SALE_PRC1,
+    # JV_CLASS_U, OWN_CITY, OWN_STATE) were assumed from a similar-
+    # looking NAL schema but were never individually confirmed against
+    # this specific FeatureServer, and an invalid field name in
+    # outFields can produce the same generic "Invalid query parameters"
+    # 400 error as a bad WHERE clause — making it impossible to tell
+    # which one was actually wrong from the error message alone. Once a
+    # scan succeeds with this trimmed field list, add the other fields
+    # back ONE AT A TIME (or fetch the layer's full /FeatureServer/0
+    # metadata directly) to identify their real names before re-adding.
     out_fields = ",".join([
         "PARCEL_ID", "CO_NO", "DOR_UC", "LND_SQFOOT", "LND_UNTS_C",
-        "OWN_NAME", "OWN_CITY", "OWN_STATE", "JV", "JV_CLASS_U",
-        "SALE_YR1", "SALE_PRC1", "SEC", "TWN", "RNG", "S_LEGAL",
+        "OWN_NAME", "JV",
     ])
 
     # DOR_UC is confirmed esriFieldTypeString (length 4) on this layer

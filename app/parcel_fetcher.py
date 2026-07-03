@@ -320,10 +320,17 @@ def _fetch_from_county_specific_layer(
     """
     layer_url = COUNTY_SPECIFIC_PARCEL_LAYERS[county_id]
 
-    # Reasonable starting guess for numeric DOR use code range, mirroring
-    # the confirmed string convention (5000-6999) on the statewide layer.
-    # NOT independently verified against this layer's actual data.
-    where = f"DORUSECODE >= 5000 AND DORUSECODE <= 6999"
+    # DIAGNOSTIC WIDENING: the original 5000-6999 guess (mirroring the
+    # statewide layer's string convention) returned zero results against
+    # this layer's real data — meaning that numeric range assumption is
+    # wrong for THIS layer's encoding. Rather than guess a third time,
+    # this pulls a small, unfiltered sample of real Hillsborough parcels
+    # so the actual DORUSECODE values can be READ from a live response
+    # and the correct agricultural range determined from real data
+    # instead of documentation that may not match this specific layer.
+    # TODO: once real DORUSECODE values are visible in a scan response,
+    # replace this with the correct WHERE clause and remove this note.
+    where = "1=1"
 
     out_fields = "PARCEL_ID,DORUSECODE,OWNERNAME,TOWNSHIP,RANGE,SECTIONNUM"
 

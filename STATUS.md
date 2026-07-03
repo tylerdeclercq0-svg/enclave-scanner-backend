@@ -249,21 +249,58 @@ Python with no live-data assumptions, and produced sensible output
 (manual-review flags, 0–100 scores with visible breakdowns) on the
 first try.
 
+## Step 5 — dashboard wired to real backend, 2026-07-03
+
+`web/index.html` previously ran its own client-side scan directly against
+the statewide cadastral layer with Turf.js — completely bypassing every
+fix above, including all five encirclement bugs and the Pasco `flu_field`
+correction. Rewrote it to call the existing FastAPI backend
+(`app/main.py`) instead: `/api/counties` populates the county list live
+(no more hardcoded `CO_NO` list), `/api/counties/{id}/scan` runs the real
+pipeline. API base URL is a configurable field (persisted to
+localStorage), defaulting to `http://localhost:8000` for local dev.
+County cards now show "confirmed live end-to-end" only for
+pasco/nassau/st_johns/osceola (hardcoded `CONFIRMED_LIVE` set in the
+frontend, since `/api/counties`'s own `live` flag is a rough heuristic
+that also marks hillsborough/orange/brevard/volusia true despite those
+never having been ground-truthed this pass — see that endpoint's own
+docstring). Table columns and CSV export now match the real
+`ScanResultRow` field names (`pct_perimeter_qualifying`,
+`likely_pathways`, `attractiveness_score`, `exclusion_flags`,
+`needs_manual_review`) instead of the old mock shape.
+
+Confirmed working end-to-end locally: started `uvicorn app.main:app` via
+`.venv312`, loaded `web/index.html` in a browser, ran a live scan against
+Pasco through the UI — returned the same real result already documented
+above (parcel `35-24-16-0000-00100-0011`, 100% qualifying perimeter,
+pathway 1), this time via the actual HTTP path the deployed frontend will
+use, not a direct Python call.
+
+Not done as part of this pass: deploying the backend anywhere with real
+internet access (`DEPLOYMENT.md` Step 1) or the frontend to Netlify
+(`DEPLOYMENT.md` Step 4) — this was tested against localhost only. The
+demographics endpoint (`/api/parcels/{id}/demographics`) is also still
+unwired in the dashboard — no UI element calls it yet.
+
 ## Exact next step
 
-1. Step 5 (wire the `web/` dashboard to real endpoints) is still fully
-   unstarted — this is now unblocked, since `run_county_scan()` is
-   confirmed working end-to-end for real data in all four counties.
-2. Revisit the unincorporated-status hard filter given the Osceola
+1. Deploy the backend somewhere with real internet access (Render, per
+   `DEPLOYMENT.md`) and re-point the dashboard's API base URL at it —
+   local-only was sufficient to confirm the wiring is correct, but the
+   real deployment target has never been tried.
+2. Wire the demographics endpoint into the dashboard (e.g. a per-row
+   "pull area demographics" action), including getting a real
+   `CENSUS_API_KEY`.
+3. Revisit the unincorporated-status hard filter given the Osceola
    parcel-layer jurisdiction data gap found earlier in this file —
    likely needs a spatial join against the FLUM layer's `Jurisdiction`
    field instead of the parcel layer's own (NULL) jurisdiction fields.
-3. Consider re-running the same live `describe_layer` + distinct-values
+4. Consider re-running the same live `describe_layer` + distinct-values
    spot-check that caught Pasco's wrong `flu_field` against the other
    three counties' FLUM layers, now that there's a concrete example of
    how an "UNCONFIRMED CARRYOVER guess" note in this file turned out to
    be silently wrong in production-relevant code.
-4. `max_candidates=25` default in `run_county_scan` has not been timed
+5. `max_candidates=25` default in `run_county_scan` has not been timed
    against a real full run yet — worth a rough wall-clock check before
    wiring this into a synchronous web request (see the function's own
    docstring re: free-tier hosting timeouts).

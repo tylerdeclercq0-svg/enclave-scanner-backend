@@ -1036,3 +1036,48 @@ matching dataset, rather than searching from this project's own paraphrase.
 
 Not yet done: #1 (deploy to Render/Netlify — pending Tyler's go-ahead since
 it's a live-system push).
+
+## Deployed and confirmed live — 2026-07-06
+
+Tyler gave the go-ahead to deploy once the feasible high-priority punch-list
+items above were done. Committed as `ffd24f7` (on top of `1be635c`, which was
+still unpushed from the prior session) and pushed to GitHub.
+
+**Confirmed live via real requests, not just the deploy log:**
+- **Render backend** (`enclave-scanner-backend.onrender.com`): ran a real
+  live scan against Pasco (`/api/counties/pasco/scan?max_candidates=2`) — the
+  reference parcel (`35-24-16-0000-00100-0011`) now returns
+  `likely_pathways: [1, 4]` (Option D newly reachable, not just Option A as
+  before this session), the new "Urban-service-area adjacency... approximated
+  from this county's own Rural Area boundary..." manual-review note is
+  present verbatim, and `access_score` (70) reflects the real USB signal.
+  This confirms the new `roads_client.py` module, the ACSC exclusion check,
+  and the Pasco city-limits/USB-approximation logic are all genuinely live
+  and running against real ArcGIS data from Render's network, not just
+  present in the repo.
+- **Netlify frontend** (`enclave-scanner-backend.netlify.app`): fetched the
+  live page HTML directly and confirmed it contains this session's specific
+  new copy — the "A 15-minute read" / "A 5-minute walkthrough" overlay
+  subtitles, and the newer "Reachable for Pasco only" / "city-limits layer
+  instead of" language added partway through this session (i.e. not a stale
+  cached build from before the Pasco USB/city-limits follow-up work).
+
+As before, `/health`'s `code_version` field is a stale hardcoded marker from
+an earlier commit — do not use it to verify which commit is live; this
+confirmation used real functional behavior instead (matches the same
+verification philosophy used for the `32c88b3` deploy earlier in this file).
+
+## Open items after this session
+
+Everything from the punch list is resolved or deliberately deferred with a
+documented reason, except:
+
+- **Option E (rural study area) is the one open item**, and it's blocked on
+  a real input, not on more research time: the actual enrolled bill/
+  session-law text for s. 163.3164(4)(c)5's exact wording. Every term this
+  project has used for it so far ("rural study area") is this project's own
+  paraphrase, never verified against the bill itself — the public Florida
+  Legislature statute page didn't help (see above). Do not wire in any
+  dataset for this (RLSA or otherwise) until the real statutory language is
+  in hand; get it from Tyler directly before spending more research time
+  guessing at it.

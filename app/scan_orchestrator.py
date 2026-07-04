@@ -346,7 +346,19 @@ def run_county_scan(
         # silently dropping them (the pre-2026-07-06 behavior) or silently
         # counting them (which would over-include).
         if parcel.acreage is not None and parcel.acreage > 1280.0:
-            if (pct_qualifying or 0) >= 75:
+            if pct_qualifying is None:
+                # Corrected 2026-07-06 per Tyler's "unknown != bad" audit:
+                # if we haven't measured the perimeter, don't exclude a
+                # >1,280-ac parcel on the basis of an unmeasured value.
+                # Absence of measurement is not evidence the parcel fails
+                # the 75% test -- surface it as a manual-review task.
+                needs_review.append(
+                    f"Parcel exceeds the 1,280-acre general cap ({parcel.acreage:.0f} ac) "
+                    "and encirclement could not be measured -- cannot confirm whether the "
+                    "urban/dense exception (s. 163.3164(4)(e), F.S., 4,480-ac cap) applies. "
+                    "Confirm with the county Planning Department."
+                )
+            elif pct_qualifying >= 75:
                 needs_review.append(
                     f"Parcel exceeds the 1,280-acre general cap ({parcel.acreage:.0f} ac) "
                     "and passes the 75% perimeter test — it may qualify for the "
@@ -418,6 +430,11 @@ def run_county_scan(
             adjacent_to_usb=adjacent_to_usb,
             single_owner_signal=parcel.single_owner_signal,
             sold_since_2025=parcel.sold_since_2025,
+            # Whether this county has any USB proxy at all -- if not,
+            # Option 3's USB gate and Option 4's USB perimeter test are
+            # data gaps, not findings. See scoring._driving_pathway_
+            # potentials.
+            county_has_usb_layer=county.rural_area_layer_url is not None,
         )
 
         rows.append(ScanResultRow(

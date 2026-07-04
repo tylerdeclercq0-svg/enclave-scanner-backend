@@ -242,11 +242,23 @@ def _has_fail_items(
 ) -> bool:
     """
     Server-side equivalent of the frontend's buildVerificationChecklist
-    "fail" detection. A checklist item ranked 'fail' means a real
-    automated signal is inconsistent with qualifying -- for the two
-    fields the backend has full authority over: co-owner recorded, or
-    post-1/1/2025 sale. Exclusion-type fails are handled separately
-    (they land the parcel in the excluded tier).
+    "fail" detection. A checklist item ranked 'fail' means the data we
+    have shows a real problem -- NOT that the data is missing.
+
+    Per the 2026-07-06 audit (Tyler's "unknown != bad" correction):
+    - single_owner_signal is False -> REAL FINDING: county has a co-
+      owner field AND this parcel has a co-owner name populated.
+      -> genuine fail.
+    - single_owner_signal is None -> NO DATA: county's parcel layer has
+      no co-owner field at all. NOT a fail. Verify manually via title
+      search but do not demote the tier.
+    - sold_since_2025 is True -> REAL FINDING: post-1/1/2025 sale
+      recorded in the county's own sale-date field(s). -> genuine fail.
+    - sold_since_2025 is None -> NO DATA: sale-date encoding not
+      configured for this county, or the specific parcel's date fields
+      were unparseable. NOT a fail.
+    - sold_since_2025 is False -> real finding: last recorded sale was
+      pre-2025. Not a fail.
     """
     if single_owner_signal is False:
         return True
@@ -262,18 +274,23 @@ def _driving_pathway_potentials(
     acreage: Optional[float],
     adjacent_to_interstate: bool,
     adjacent_to_usb: bool,
+    county_has_usb_layer: bool = True,
 ) -> list[dict]:
     """
     For each currently-implemented pathway, compute a "readiness"
     percentage: the actual live-computed value against that pathway's
     real statutory threshold. Returns a list of per-pathway dicts:
         {option: int, value: float, target: int, at_threshold: bool,
-         gated_by: str or None, label: str}
-    Used both for the watch-list detail readout ("Option 4 driving,
-    currently 42% vs. needed 50%") and for the excluded-tier's
-    can't-fire-anyway diagnostic.
+         gated_by: str or None, unmeasurable: bool, label: str}
+
+    `unmeasurable=True` means we can't run this pathway's check for
+    reasons that are DATA GAPS, not findings (e.g. St. Johns has no
+    rural-area-layer proxy for USB adjacency). Callers use this to
+    include the pathway in the driving list with a clear "not
+    measurable" label rather than fabricating a zero-percent reading.
     """
-    pct = pct_perimeter_qualifying or 0.0
+    pct_measured = pct_perimeter_qualifying is not None
+    pct = pct_perimeter_qualifying if pct_measured else 0.0
     intr = interstate_frontage_pct or 0.0
     usb = usb_perimeter_pct or 0.0
     ac = acreage or 0.0
@@ -281,49 +298,111 @@ def _driving_pathway_potentials(
     out: list[dict] = []
 
     # Option 1 (c)1.a: raw pct vs 75.
+    if pct_measured:
+        opt1_label = f"Option 1: {pct:.0f}% qualifying perimeter (needs 75%)"
+    else:
+        opt1_label = "Option 1: encirclement not measured (needs 75% qualifying perimeter)"
     out.append({
         "option": 1,
         "value": pct,
         "target": _PATHWAY_THRESHOLDS[1],
-        "at_threshold": pct >= _PATHWAY_THRESHOLDS[1],
+        "at_threshold": pct_measured and pct >= _PATHWAY_THRESHOLDS[1],
         "gated_by": None,
-        "label": f"Option 1: {pct:.0f}% qualifying perimeter (needs 75%)",
+        "unmeasurable": not pct_measured,
+        "label": opt1_label,
     })
 
     # Option 3 (c)1.c: combined perimeter vs 75, gated on both adjacencies.
     combined = min(100.0, pct + intr)
     gated_3 = None
-    if not adjacent_to_interstate: gated_3 = "no interstate adjacency"
-    elif not adjacent_to_usb:      gated_3 = "no USB adjacency"
+    # "unmeasurable" only when we ACTUALLY can't rule the pathway out
+    # from findings. If the FDOT interstate check ran and returned False,
+    # that's a real finding -- Option 3 is ruled out regardless of any
+    # USB data gap. Only when interstate adjacency is True (a real
+    # finding, meaningful gate) AND USB is a county-wide data gap does
+    # the USB gap become the reason Option 3 can't be evaluated.
+    option3_unmeasurable = False
+    if not pct_measured:
+        gated_3 = "encirclement not measured"
+        option3_unmeasurable = True
+    elif not adjacent_to_interstate:
+        # Real FDOT finding -- Option 3 is really out.
+        gated_3 = "no interstate adjacency"
+    elif not adjacent_to_usb:
+        # Interstate side is a real yes, USB side is the reason we can't
+        # finish evaluating. If USB layer exists, "no USB adjacency" is a
+        # real finding too; if it doesn't, it's a data gap.
+        if county_has_usb_layer:
+            gated_3 = "no USB adjacency"
+        else:
+            gated_3 = "USB adjacency not measurable for this county"
+            option3_unmeasurable = True
     out.append({
         "option": 3,
-        "value": combined,
+        "value": combined if pct_measured else 0.0,
         "target": _PATHWAY_THRESHOLDS[3],
         "at_threshold": combined >= _PATHWAY_THRESHOLDS[3] and gated_3 is None,
         "gated_by": gated_3,
+        "unmeasurable": option3_unmeasurable,
         "label": (
             f"Option 3: {combined:.0f}% combined interstate+FLUM perimeter "
             f"(needs 75%{'; ' + gated_3 if gated_3 else ''})"
+            if pct_measured
+            else f"Option 3: encirclement not measured (needs 75% combined interstate+FLUM)"
         ),
     })
 
     # Option 4 (c)2: two >=50% tests, gated on acreage <=700.
     gated_4 = None
-    if ac > 700: gated_4 = f"{ac:.0f} ac exceeds 700-ac cap"
-    limiting = min(pct, usb)
+    if not pct_measured:
+        gated_4 = "encirclement not measured"
+    elif ac > 700:
+        gated_4 = f"{ac:.0f} ac exceeds 700-ac cap"
+    limiting = min(pct, usb) if pct_measured else 0.0
+    # Same finding-vs-gap logic as Option 3. Option 4 is only truly
+    # "unmeasurable" when the FLUM half meets its 50% threshold AND
+    # acreage is within the 700-ac cap AND the USB side is a real
+    # county-wide data gap. Otherwise a real finding (FLUM half fails,
+    # or acreage > 700, or pct not measured) already rules it out.
+    option4_unmeasurable = (
+        pct_measured
+        and pct >= 50
+        and ac <= 700
+        and not county_has_usb_layer
+    )
+    if not county_has_usb_layer and option4_unmeasurable:
+        # Report the FLUM half honestly, flag the USB half as a data gap.
+        opt4_label = (
+            f"Option 4: {pct:.0f}% designated-dev perimeter (needs 50%) / "
+            f"USB perimeter not measurable for this county"
+        )
+    elif not pct_measured:
+        opt4_label = "Option 4: encirclement not measured (needs 50% + 50% USB)"
+        option4_unmeasurable = True
+    elif not county_has_usb_layer:
+        # FLUM half already fails or acreage gates -> real finding
+        opt4_label = (
+            f"Option 4: {pct:.0f}% designated-dev perimeter (needs 50%) / "
+            f"USB not measurable, but FLUM half already rules Option 4 out"
+            f"{'; ' + gated_4 if gated_4 else ''}"
+        )
+    else:
+        opt4_label = (
+            f"Option 4: {pct:.0f}% designated-dev perimeter / "
+            f"{usb:.0f}% USB perimeter (both need 50%"
+            f"{'; ' + gated_4 if gated_4 else ''})"
+        )
     out.append({
         "option": 4,
         "value": limiting,
         "target": _PATHWAY_THRESHOLDS[4],
         "at_threshold": (
-            pct >= 50 and usb >= 50 and gated_4 is None
+            pct_measured and pct >= 50 and usb >= 50 and gated_4 is None
+            and county_has_usb_layer
         ),
         "gated_by": gated_4,
-        "label": (
-            f"Option 4: {pct:.0f}% designated-dev perimeter / "
-            f"{usb:.0f}% USB perimeter (both need 50%"
-            f"{'; ' + gated_4 if gated_4 else ''})"
-        ),
+        "unmeasurable": option4_unmeasurable,
+        "label": opt4_label,
     })
 
     return out
@@ -341,6 +420,7 @@ def assign_master_tier(
     adjacent_to_usb: bool,
     single_owner_signal: Optional[bool],
     sold_since_2025: Optional[bool],
+    county_has_usb_layer: bool = True,
 ) -> tuple[str, list[str]]:
     """
     Returns (tier, driving_pathway_labels). Called from scan_orchestrator
@@ -366,6 +446,7 @@ def assign_master_tier(
         acreage=acreage,
         adjacent_to_interstate=adjacent_to_interstate,
         adjacent_to_usb=adjacent_to_usb,
+        county_has_usb_layer=county_has_usb_layer,
     )
     has_fails = _has_fail_items(single_owner_signal, sold_since_2025)
 
@@ -391,12 +472,34 @@ def assign_master_tier(
     # qualifies as "driving," not just the highest -- knowing Options 1
     # AND 4 both show potential is more actionable than knowing only the
     # top one.
+    # Only pathways where we ACTUALLY MEASURED the readiness count for
+    # driving the tier -- an unmeasurable pathway (e.g. Option 4 for a
+    # county with no rural-area layer) can't be evidence FOR watch, nor
+    # can it be evidence AGAINST it.
     watch_drivers = [
         p["label"] for p in potentials
-        if MASTER_WATCH_MIN_PCT <= p["value"] <= MASTER_WATCH_MAX_PCT
+        if not p.get("unmeasurable")
+        and MASTER_WATCH_MIN_PCT <= p["value"] <= MASTER_WATCH_MAX_PCT
     ]
     if watch_drivers:
-        return "watch_list", watch_drivers
+        # Also mention any pathways we couldn't fully evaluate, so the
+        # user knows they weren't ruled out, they just weren't checkable.
+        unmeasurable_notes = [
+            p["label"] for p in potentials if p.get("unmeasurable")
+        ]
+        return "watch_list", watch_drivers + [
+            f"[data gap] {n}" for n in unmeasurable_notes
+        ]
 
-    # 5. Unlikely: nothing meets threshold, nothing in watch band.
+    # 5. Unlikely: nothing meets threshold, nothing measurable in watch
+    # band. But if pathway checks were partially unmeasurable, say so --
+    # this parcel wasn't demonstrably ruled out on every dimension.
+    unmeasurable = [p["label"] for p in potentials if p.get("unmeasurable")]
+    if unmeasurable and pct_perimeter_qualifying is None:
+        # Encirclement itself couldn't run -- we haven't measured any
+        # pathway, so "unlikely" isn't a finding, it's a data gap.
+        return "unlikely", [
+            "Encirclement measurement missing -- pathway eligibility "
+            "could not be evaluated from available data; verify manually.",
+        ] + [f"[data gap] {n}" for n in unmeasurable]
     return "unlikely", []

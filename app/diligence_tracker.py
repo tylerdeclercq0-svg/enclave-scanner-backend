@@ -48,15 +48,57 @@ _HEADER_FONT = Font(bold=True, color="FFFFFF")
 _HEADER_FILL = PatternFill("solid", fgColor="1E2A24")  # --ink from the app palette
 _STATUS_FONT = Font(bold=True)
 
+# One canonical export as of 2026-07-06 -- previously the CSV export and
+# diligence tracker were two separate downloads; merged into a single
+# workbook so an analyst has ONE living tracker file per selection with
+# every raw field, every checklist status, watch-list tier, and blank
+# confirm/date columns per checklist item.
+#
+# Column groups, ordered left-to-right so the most decision-relevant
+# info is visible without scrolling. Freeze panes below covers this
+# left set:
+#   1. IDENTIFIERS (frozen columns) -- parcel_id, county, acres, owner
+#   2. PATHWAY & SCORING -- qual %, pathways, confidence tier, score
+#   3. PROPERTY/SITE data -- use code, owner_2, jurisdiction, water/sewer,
+#      FLUM character, surrounding density, ownership signals, centroid
+#   4. ZIP SECTION -- zcta5 (from the coverage_ledger flow)
+#   5. VERIFICATION CHECKLIST -- see checklist_labels; three columns per
+#      item (Status color-coded / Confirmed by / Date confirmed)
+#   6. NOTES -- free-text (blank)
 _CORE_COLUMNS = [
+    # ---- 1. IDENTIFIERS (frozen) ----
     ("parcel_id", "Parcel ID", 22),
     ("county_id", "County", 12),
     ("acreage", "Acres", 8),
     ("owner_name", "Owner", 30),
-    ("site_address", "Site address", 30),
+    # ---- 2. PATHWAY & SCORING (decision-relevant, visible on load) ----
     ("pct_perimeter_qualifying", "Qual. perimeter %", 12),
     ("pathways_str", "Pathways matched", 18),
+    ("confidence_tier", "Confidence tier", 14),
+    ("attractiveness_score", "Score /100", 10),
+    # ---- 3. PROPERTY / SITE data ----
+    ("owner_name_2", "Co-owner", 24),
+    ("use_code", "Use code", 10),
+    ("jurisdiction", "Jurisdiction", 16),
+    ("sold_since_2025", "Sold since 1/1/2025", 14),
+    ("single_owner_signal", "Single owner signal", 14),
+    ("water_source", "Water source (est.)", 22),
+    ("wastewater_method", "Wastewater (est.)", 22),
+    ("water_sewer_confidence", "Water/sewer conf.", 14),
+    ("flum_character", "Own FLUM character", 20),
+    ("surrounding_density", "Surrounding density", 16),
+    ("site_address", "Site address", 30),
+    ("centroid_lat", "Centroid lat", 12),
+    ("centroid_lon", "Centroid lon", 12),
+    ("acreage_source", "Acreage source", 18),
+    # ---- 4. ZIP SECTION ----
+    ("zcta5", "ZCTA / ZIP section", 12),
 ]
+
+# Number of leftmost columns to freeze (in addition to row 1). Set so
+# the identifier group stays visible while scrolling through the
+# checklist columns to the right.
+_FROZEN_COLUMN_COUNT = 4
 
 
 def _normalize_checklist_columns(payload_rows: list[dict[str, Any]]) -> list[str]:
@@ -118,18 +160,63 @@ def build_diligence_tracker_xlsx(payload_rows: list[dict[str, Any]]) -> bytes:
     ws.row_dimensions[1].height = 32
 
     # ---- data rows ----
+    # Fills for the confidence_tier cell so the primary result column
+    # is immediately readable at a glance. brass-dim for confident/possible,
+    # yellow for the new watch tier, gray for unlikely.
+    tier_fills = {
+        "confident": PatternFill("solid", fgColor="C6EFCE"),
+        "possible":  PatternFill("solid", fgColor="EEE3C2"),
+        "watch":     PatternFill("solid", fgColor="FFEB9C"),
+        "unlikely":  PatternFill("solid", fgColor="D9D9D9"),
+    }
+
     for row_idx, row in enumerate(payload_rows, start=2):
         core_values = {
+            # 1. Identifiers
             "parcel_id": row.get("parcel_id"),
             "county_id": row.get("county_id"),
             "acreage": row.get("acreage"),
             "owner_name": row.get("owner_name"),
-            "site_address": row.get("site_address"),
+            # 2. Pathway & scoring
             "pct_perimeter_qualifying": row.get("pct_perimeter_qualifying"),
             "pathways_str": ", ".join(f"Option {p}" for p in (row.get("likely_pathways") or [])) or "(none)",
+            "confidence_tier": (row.get("confidence_tier") or "").capitalize() or "-",
+            "attractiveness_score": row.get("attractiveness_score"),
+            # 3. Property / site
+            "owner_name_2": row.get("owner_name_2"),
+            "use_code": row.get("use_code"),
+            "jurisdiction": row.get("jurisdiction"),
+            "sold_since_2025": (
+                "Yes" if row.get("sold_since_2025") is True
+                else "No" if row.get("sold_since_2025") is False
+                else "Unknown"
+            ),
+            "single_owner_signal": (
+                "No co-owner on record" if row.get("single_owner_signal") is True
+                else "Co-owner recorded" if row.get("single_owner_signal") is False
+                else "Unknown"
+            ),
+            "water_source": row.get("water_source"),
+            "wastewater_method": row.get("wastewater_method"),
+            "water_sewer_confidence": row.get("water_sewer_confidence"),
+            "flum_character": row.get("flum_character"),
+            "surrounding_density": row.get("surrounding_density"),
+            "site_address": row.get("site_address"),
+            "centroid_lat": row.get("centroid_lat"),
+            "centroid_lon": row.get("centroid_lon"),
+            "acreage_source": row.get("acreage_source"),
+            # 4. ZIP section
+            "zcta5": row.get("zcta5"),
         }
         for col_idx, (key, _, _) in enumerate(_CORE_COLUMNS, start=1):
-            ws.cell(row=row_idx, column=col_idx, value=core_values[key])
+            cell = ws.cell(row=row_idx, column=col_idx, value=core_values.get(key))
+            # Color-fill the confidence_tier cell to mirror the in-app tier
+            # badges, so the tracker matches the UI at a glance.
+            if key == "confidence_tier":
+                tier_key = (row.get("confidence_tier") or "").lower()
+                if tier_key in tier_fills:
+                    cell.fill = tier_fills[tier_key]
+                    cell.font = _STATUS_FONT
 
         # Index this row's checklist by label so we can look up per column.
         checklist_by_label = {
@@ -159,9 +246,11 @@ def build_diligence_tracker_xlsx(payload_rows: list[dict[str, Any]]) -> bytes:
         # Notes column also left blank.
 
     # ---- freeze panes ----
-    # Freeze row 1 AND column A: cursor at B2 tells Excel to freeze
-    # everything above and to the left.
-    ws.freeze_panes = "B2"
+    # Freeze row 1 AND the leftmost _FROZEN_COLUMN_COUNT identifier columns
+    # so parcel_id/county/acres/owner stay visible while scrolling through
+    # the pathway + checklist columns to the right. Cursor at "<letter>2"
+    # tells Excel to freeze everything above + to the left of that cell.
+    ws.freeze_panes = f"{get_column_letter(_FROZEN_COLUMN_COUNT + 1)}2"
 
     buffer = BytesIO()
     wb.save(buffer)
@@ -181,4 +270,4 @@ def build_filename(payload_rows: list[dict[str, Any]]) -> str:
         county_slug = "_".join(counties) if counties else "no_county"
     else:
         county_slug = f"{'_'.join(counties[:4])}_plus{len(counties) - 4}"
-    return f"diligence_tracker_{county_slug}_{date.today().isoformat()}.xlsx"
+    return f"enclave_candidates_{county_slug}_{date.today().isoformat()}.xlsx"

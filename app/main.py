@@ -39,6 +39,8 @@ from county_registry import COUNTIES, POPULATION_CAP  # noqa: E402
 import scan_orchestrator  # noqa: E402
 import ring_demographics  # noqa: E402
 import diligence_tracker  # noqa: E402
+import coverage_ledger  # noqa: E402
+import zcta_client  # noqa: E402
 from fastapi.responses import Response  # noqa: E402
 
 
@@ -341,3 +343,196 @@ def export_diligence_tracker(payload: DiligenceExportPayload):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# =====================================================================
+# ZCTA-sectioned coverage tracking (added 2026-07-06 for the v1.5 pass)
+# =====================================================================
+
+@app.get("/api/coverage/{county_id}/status")
+def coverage_status(county_id: str):
+    """
+    Return per-ZCTA and county-wide coverage state for the given county.
+    Also enumerates every ZCTA that intersects the county boundary so the
+    frontend can render a full progress list even before any scans have
+    run.
+
+    The county-boundary + ZCTA queries hit Census TIGERweb -- cheap for
+    subsequent calls thanks to zcta_client.get_county_zctas's @lru_cache.
+    """
+    if county_id not in COUNTIES:
+        raise HTTPException(status_code=404, detail=f"Unknown county: {county_id}")
+
+    try:
+        zctas = zcta_client.get_county_zctas(county_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not enumerate ZCTAs for {county_id}: {exc}",
+        )
+
+    zcta_codes = [z["zcta5"] for z in zctas]
+    ledger_state = coverage_ledger.get_county_state(county_id)
+    summary = coverage_ledger.county_summary(county_id, zcta_codes)
+    next_zcta = coverage_ledger.next_incomplete_zcta(county_id, zcta_codes)
+
+    per_zcta = []
+    for z in zctas:
+        entry = ledger_state.get("zctas", {}).get(z["zcta5"], {})
+        per_zcta.append({
+            "zcta5": z["zcta5"],
+            "geoid": z["geoid"],
+            "centroid_lat": z["centroid_lat"],
+            "centroid_lon": z["centroid_lon"],
+            "total_candidates": entry.get("total_candidates"),
+            "processed_count": len(entry.get("processed_parcel_ids", [])),
+            "complete": bool(entry.get("complete")),
+            "last_run_at": entry.get("last_run_at"),
+        })
+
+    return {
+        "county_id": county_id,
+        "summary": summary,
+        "next_incomplete_zcta": next_zcta,
+        "zctas": per_zcta,
+    }
+
+
+class CoverageAdvancePayload(BaseModel):
+    """
+    Optional filters -- the same ones the /scan endpoint accepts. The
+    coverage flow doesn't need max_candidates (that's max_parcels_per_run
+    here) or a county id (that's in the URL path).
+    """
+    max_parcels_per_run: int = 25
+    min_acreage: float = 20.0
+    max_acreage: float = 4480.0
+    require_single_owner: bool = False
+    min_encirclement_pct: Optional[float] = None
+    flum_character_filter: Optional[str] = None
+    surrounding_density_filter: Optional[str] = None
+    # Explicit ZCTA5 to advance -- if omitted, backend picks the next
+    # incomplete ZCTA (ascending by ZCTA5).
+    zcta5: Optional[str] = None
+
+
+@app.post("/api/coverage/{county_id}/advance")
+def coverage_advance(county_id: str, payload: CoverageAdvancePayload):
+    """
+    Advance coverage by up to `max_parcels_per_run` parcels within one
+    ZCTA of the given county. If `zcta5` is omitted the backend picks
+    the next incomplete ZCTA (ascending by ZCTA5 code).
+
+    Idempotent from the client's perspective: parcel_ids already recorded
+    in the ledger are skipped, so re-triggering an advance for a ZCTA
+    with (say) 400 parcels in 25-parcel batches will visit each parcel
+    exactly once across 16 calls, never processing the same one twice.
+    """
+    if county_id not in COUNTIES:
+        raise HTTPException(status_code=404, detail=f"Unknown county: {county_id}")
+
+    county_entry = COUNTIES[county_id]
+    if county_entry.population is not None and county_entry.population > POPULATION_CAP:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{county_entry.name} County exceeds the 1.75M population cap in s. 163.3164(4)(f), F.S.",
+        )
+
+    try:
+        zctas = zcta_client.get_county_zctas(county_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"ZCTA enumeration failed: {exc}")
+    zcta_codes = [z["zcta5"] for z in zctas]
+
+    target_zcta5 = payload.zcta5 or coverage_ledger.next_incomplete_zcta(county_id, zcta_codes)
+    if target_zcta5 is None:
+        return {
+            "county_id": county_id,
+            "message": "County coverage complete -- every ZCTA has been fully processed.",
+            "county_complete": True,
+            "processed_this_run": 0,
+            "zcta5": None,
+            "candidates": [],
+            "summary": coverage_ledger.county_summary(county_id, zcta_codes),
+        }
+
+    target_zcta = next((z for z in zctas if z["zcta5"] == target_zcta5), None)
+    if target_zcta is None:
+        raise HTTPException(status_code=400, detail=f"Unknown ZCTA {target_zcta5} for county {county_id}")
+
+    # Establish the total candidate count for this ZCTA (once per ZCTA
+    # per process lifetime -- ledger caches it so future advances don't
+    # requery). Uses the same ag-use WHERE clause as the fetcher.
+    zcta_ledger = coverage_ledger.get_zcta_state(county_id, target_zcta5)
+    if zcta_ledger.get("total_candidates") is None:
+        from parcel_fetcher import build_ag_where_clause
+        try:
+            total = zcta_client.count_parcels_in_zcta(
+                county_entry.parcel_service_url,
+                build_ag_where_clause(county_id),
+                target_zcta["geometry"],
+            )
+            coverage_ledger.set_zcta_total(county_id, target_zcta5, total)
+        except Exception as exc:  # noqa: BLE001
+            # Non-fatal -- we can still run the pipeline, just without a
+            # denominator until the next call.
+            pass
+
+    already_processed = set(
+        coverage_ledger.get_zcta_state(county_id, target_zcta5).get("processed_parcel_ids", [])
+    )
+
+    try:
+        rows = scan_orchestrator.run_county_scan(
+            county_id=county_id,
+            min_acreage=payload.min_acreage,
+            max_acreage=payload.max_acreage,
+            max_candidates=payload.max_parcels_per_run,
+            require_single_owner=payload.require_single_owner,
+            min_encirclement_pct=payload.min_encirclement_pct,
+            flum_character_filter=payload.flum_character_filter,
+            surrounding_density_filter=payload.surrounding_density_filter,
+            zcta_geometry=target_zcta["geometry"],
+            zcta5=target_zcta5,
+            skip_parcel_ids=already_processed,
+        )
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=f"Missing dependency: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+        raise HTTPException(status_code=502, detail={
+            "message": "Coverage advance failed",
+            "exception_type": type(exc).__name__,
+            "exception_str": str(exc),
+            "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        })
+
+    processed_ids = [r.parcel_id for r in rows if r.parcel_id]
+    coverage_ledger.mark_processed(county_id, target_zcta5, processed_ids)
+
+    summary = coverage_ledger.county_summary(county_id, zcta_codes)
+    zcta_state = coverage_ledger.get_zcta_state(county_id, target_zcta5)
+
+    return {
+        "county_id": county_id,
+        "zcta5": target_zcta5,
+        "processed_this_run": len(processed_ids),
+        "candidates": scan_orchestrator.rows_to_dicts(rows),
+        "zcta_state": {
+            "total_candidates": zcta_state.get("total_candidates"),
+            "processed_count": len(zcta_state.get("processed_parcel_ids", [])),
+            "complete": bool(zcta_state.get("complete")),
+        },
+        "summary": summary,
+        "county_complete": summary["county_complete"],
+        "next_incomplete_zcta": coverage_ledger.next_incomplete_zcta(county_id, zcta_codes),
+    }
+
+
+@app.post("/api/coverage/{county_id}/reset")
+def coverage_reset(county_id: str):
+    """Wipe the coverage ledger for one county (start fresh)."""
+    if county_id not in COUNTIES:
+        raise HTTPException(status_code=404, detail=f"Unknown county: {county_id}")
+    coverage_ledger.reset_county(county_id)
+    return {"county_id": county_id, "reset": True}

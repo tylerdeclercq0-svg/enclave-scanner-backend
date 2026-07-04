@@ -158,6 +158,7 @@
     font-family:'IBM Plex Mono',monospace;font-size:11px;padding:2px 8px;border-radius:3px;background:var(--line);color:var(--ink-faint);
   }
   .tier-confident .tier-badge{background:var(--brass-dim);color:var(--brass-800);}
+  .tier-watch .tier-badge{background:#FFEB9C;color:var(--brass-800);}
   .tier-hint{font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--ink-faint);font-style:italic;margin-left:auto;}
   .tier-toggle{
     font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:var(--brass);background:none;border:none;cursor:pointer;
@@ -375,8 +376,8 @@
           </select>
         </div>
         <div class="field">
-          <label>Max candidates / county</label>
-          <input type="number" id="maxCandidates" value="25">
+          <label>Max parcels per run</label>
+          <input type="number" id="maxCandidates" value="25" title="Soft cap per Advance Coverage click. Each click hits Render synchronously; 25 keeps the run comfortably under the free-tier ~30s timeout. Raise to 50 if response times allow.">
         </div>
       </div>
     </div>
@@ -410,11 +411,13 @@
           </select>
         </div>
       </div>
-      <div style="margin-top:18px;">
-        <button class="btn-primary" id="runBtn">Run scan</button>
+      <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap;">
+        <button class="btn-primary" id="runBtn">Advance coverage (next ZIP section)</button>
+        <button class="export" id="resetCoverageBtn" title="Wipe this county's coverage ledger (start fresh).">Reset coverage</button>
       </div>
       <div class="status" id="status"></div>
       <div class="bar-outer"><div class="bar-inner" id="progressBar"></div></div>
+      <div id="coveragePanel" style="margin-top:16px;"></div>
     </div>
   </div>
 
@@ -450,15 +453,15 @@
     <div class="panel">
       <h3 class="section-label">Export</h3>
       <div style="display:flex;gap:10px;flex-wrap:wrap;">
-        <button class="export" id="exportBtn">Export CSV</button>
-        <button class="export" id="exportChecklistBtn">Export Manual Review Checklist</button>
-        <button class="export" id="exportDiligenceBtn" title="Select one or more parcels in Step 3 first — this export requires an explicit selection to avoid dumping the whole result set into a tracker.">Export diligence tracker (.xlsx)</button>
+        <button class="export" id="exportDiligenceBtn" title="Select one or more parcels in Step 3 first. This is the one canonical export -- every raw field, every checklist item, watch-list tier, ZIP section, and blank confirm/date columns for tracking diligence over time.">Export enclave candidates (.xlsx)</button>
+        <button class="export" id="exportChecklistBtn">Export Manual Review Checklist (.txt)</button>
       </div>
       <div id="diligenceHelp" class="empty-note" style="margin-top:10px;font-size:12.5px;">
-        The diligence tracker is a working spreadsheet, not a snapshot — every verification-checklist item
-        for each selected parcel gets its own row with a color-coded status cell and blank <em>Confirmed
-        by</em> / <em>Date confirmed</em> columns for you to fill in as diligence progresses. Requires an
-        explicit selection in Step 3.
+        The <strong>enclave candidates workbook</strong> is one merged export -- every raw data field (owner,
+        use code, water/sewer, sold-since flag, etc.), the full verification checklist with color-coded
+        pass/fail/estimated/manual status per item, the watch-list tier, the ZIP section, and blank
+        <em>Confirmed by</em> / <em>Date confirmed</em> columns per checklist item so it stays useful as a
+        living tracker. Requires an explicit selection in Step 3.
       </div>
     </div>
     <div class="caveats">
@@ -561,7 +564,7 @@ function renderCounties(){
     card.className = 'county-card' + (selectedCounties.has(c.id) ? ' active' : '') + (c.live ? '' : ' disabled');
     const servicePath = (c.flum_service_url || '').split('/').slice(-3).join('/');
     card.innerHTML = `
-      <input type="checkbox" ${selectedCounties.has(c.id) ? 'checked' : ''} ${c.live ? '' : 'disabled'} data-id="${c.id}">
+      <input type="radio" name="countyPick" ${selectedCounties.has(c.id) ? 'checked' : ''} ${c.live ? '' : 'disabled'} data-id="${c.id}">
       <div>
         <div class="county-name">${c.name}</div>
         <div class="county-meta">Pop. ${fmtPop(c.population)}</div>
@@ -571,8 +574,19 @@ function renderCounties(){
     if(c.live){
       const cb = card.querySelector('input');
       cb.addEventListener('change', () => {
-        if(cb.checked){ selectedCounties.add(c.id); card.classList.add('active'); }
-        else{ selectedCounties.delete(c.id); card.classList.remove('active'); }
+        // Single-county scan lock: only one county at a time. Radio inputs
+        // handle the visual mutual-exclusion automatically; we mirror that
+        // in the selectedCounties Set by clearing every other entry.
+        if(cb.checked){
+          selectedCounties.clear();
+          selectedCounties.add(c.id);
+          document.querySelectorAll('.county-card.active').forEach(el => el.classList.remove('active'));
+          card.classList.add('active');
+          // Reset per-scan state when the county changes.
+          results = []; selectedParcels.clear(); renderResults();
+          const base = getApiBase();
+          if(base) refreshCoveragePanel(base, c.id);
+        }
         showStep(currentStep); // refresh Continue-button enabled state
       });
     }
@@ -595,12 +609,20 @@ async function loadCounties(){
     const res = await fetch(`${base}/api/counties`);
     if(!res.ok) throw new Error(`HTTP ${res.status}`);
     counties = await res.json();
+    // Single-county scan lock (2026-07-06): only one county selected at
+    // a time. On first load pick the first live one so the flow still
+    // works without an extra click, but let the user switch.
+    let firstLive = null;
     counties.forEach(c => {
-      if(c.live) selectedCounties.add(c.id);
-      // Cache each county's population and metadata for the per-parcel
-      // verification checklist (the (f) 1.75M cap check specifically).
       COUNTY_INFO[c.id] = {population: c.population, name: c.name, live: c.live};
+      if(c.live && firstLive === null) firstLive = c.id;
     });
+    selectedCounties.clear();
+    if(firstLive !== null){
+      selectedCounties.add(firstLive);
+      // Prime the coverage panel for the auto-selected county on load.
+      refreshCoveragePanel(base, firstLive);
+    }
     renderCounties();
     const liveCount = counties.filter(c => c.live).length;
     statusEl.textContent = `Connected. ${counties.length} counties available (${liveCount} live).`;
@@ -639,13 +661,55 @@ async function scanCounty(base, countyId, params){
   return data.candidates || [];
 }
 
+// ---- Coverage flow (single-county, ZCTA-sectioned, ledger-backed) ----
+
+async function refreshCoveragePanel(base, countyId){
+  const panel = document.getElementById('coveragePanel');
+  try{
+    const res = await fetch(`${base}/api/coverage/${countyId}/status`);
+    if(!res.ok){
+      panel.innerHTML = `<div class="empty-note">Could not load coverage status: HTTP ${res.status}</div>`;
+      return null;
+    }
+    const state = await res.json();
+    const s = state.summary;
+    const nextZ = state.next_incomplete_zcta;
+    const rows = state.zctas.map(z => {
+      const status = z.complete
+        ? '<span style="color:var(--brass-800);">Complete</span>'
+        : z.processed_count > 0
+          ? `<span style="color:var(--brass);">${z.processed_count}${z.total_candidates != null ? ' / ' + z.total_candidates : ''} processed</span>`
+          : (z.total_candidates != null
+              ? `<span class="empty-note">0 / ${z.total_candidates} processed</span>`
+              : '<span class="empty-note">Not yet run</span>');
+      const highlight = (z.zcta5 === nextZ) ? 'style="background:var(--brass-dim);"' : '';
+      return `<tr ${highlight}><td class="mono">${z.zcta5}</td><td>${status}</td></tr>`;
+    }).join('');
+    const countyLabel = COUNTY_INFO[countyId]?.name || countyId;
+    panel.innerHTML = `
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--ink-faint);letter-spacing:.04em;text-transform:uppercase;margin-bottom:8px;">
+        <strong style="color:var(--ink);">${countyLabel} coverage</strong>
+        &middot; ${s.zctas_complete} of ${s.zcta_count} ZIP sections complete
+        &middot; ${s.total_processed_parcels} parcels processed
+        ${s.total_candidate_parcels != null ? ' of ~' + s.total_candidate_parcels : ''}
+        ${s.county_complete ? '&middot; <strong style="color:var(--brass-800);">COUNTY SCAN COMPLETE</strong>' : ''}
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px;">
+        <thead><tr style="border-bottom:1px solid var(--line-strong);"><th style="text-align:left;padding:4px 8px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-faint);">ZCTA</th><th style="text-align:left;padding:4px 8px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-faint);">Status</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    return state;
+  }catch(err){
+    panel.innerHTML = `<div class="empty-note">Could not load coverage status: ${err.message}</div>`;
+    return null;
+  }
+}
+
 async function runScan(){
   const base = getApiBase();
   if(!base){ setStatus('Set the API base URL in Step 1 first.', true); return; }
   const btn = document.getElementById('runBtn');
   btn.disabled = true;
-  results = [];
-  selectedParcels.clear();
 
   const minAcres = parseFloat(document.getElementById('minAcres').value) || 0;
   const maxAcres = parseFloat(document.getElementById('maxAcres').value) || 4480;
@@ -655,26 +719,45 @@ async function runScan(){
   const minEncirclement = document.getElementById('minEncirclementFilter').value;
 
   const activeCounties = counties.filter(c => selectedCounties.has(c.id));
-  if(activeCounties.length === 0){ setStatus('Select at least one county in Step 1.', true); btn.disabled = false; return; }
+  if(activeCounties.length !== 1){ setStatus('Pick exactly one county in Step 1 (single-county scan lock).', true); btn.disabled = false; return; }
+  const county = activeCounties[0];
 
   try{
-    for(let ci=0; ci<activeCounties.length; ci++){
-      const county = activeCounties[ci];
-      setStatus(`Scanning ${county.name} County via backend (real ArcGIS calls, can take tens of seconds)...`);
-      setProgress((ci/activeCounties.length)*100);
-      const params = new URLSearchParams({
-        min_acreage: minAcres, max_acreage: maxAcres, max_candidates: maxCandidates,
-        require_single_owner: requireSingleOwner,
-      });
-      if(density) params.set('surrounding_density', density);
-      if(minEncirclement) params.set('min_encirclement_pct', minEncirclement);
-      const rows = await scanCounty(base, county.id, params);
-      results = results.concat(rows);
-      setStatus(`${county.name}: ${rows.length} candidates returned.`);
+    setStatus(`Advancing ${county.name} County coverage by up to ${maxCandidates} parcels in the next ZIP section...`);
+    setProgress(20);
+    const payload = {
+      max_parcels_per_run: maxCandidates,
+      min_acreage: minAcres, max_acreage: maxAcres,
+      require_single_owner: requireSingleOwner,
+      min_encirclement_pct: minEncirclement ? parseFloat(minEncirclement) : null,
+      surrounding_density_filter: density || null,
+    };
+    const res = await fetch(`${base}/api/coverage/${county.id}/advance`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+    });
+    if(!res.ok){
+      const text = await res.text();
+      throw new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`);
     }
+    const data = await res.json();
+    setProgress(90);
+    if(data.county_complete){
+      results = results.concat(data.candidates || []);
+      renderResults();
+      setStatus(`${county.name}: county scan complete. Total parcels across all runs shown in Step 3.`);
+    } else {
+      const newRows = data.candidates || [];
+      // Append incoming rows without duplicating any parcel_id already
+      // in the accumulated results (ledger-backed, safe to re-request).
+      const seen = new Set(results.map(r => rowKey(r)));
+      newRows.forEach(r => { if(!seen.has(rowKey(r))) results.push(r); });
+      renderResults();
+      setStatus(`${county.name}: advanced ZCTA ${data.zcta5} by ${data.processed_this_run} parcel${data.processed_this_run===1?'':'s'}. Coverage: ${data.summary.zctas_complete}/${data.summary.zcta_count} ZIP sections complete.`);
+    }
+    await refreshCoveragePanel(base, county.id);
     setProgress(100);
-    renderResults();
-    setStatus(`Done. ${results.length} candidate parcels across ${activeCounties.length} counties.`);
     showStep(3);
   }catch(err){
     setStatus('Error: ' + err.message, true);
@@ -683,6 +766,21 @@ async function runScan(){
   setProgress(0);
 }
 document.getElementById('runBtn').addEventListener('click', runScan);
+
+document.getElementById('resetCoverageBtn').addEventListener('click', async () => {
+  const base = getApiBase();
+  const activeCounties = counties.filter(c => selectedCounties.has(c.id));
+  if(activeCounties.length !== 1){ setStatus('Pick exactly one county.', true); return; }
+  if(!confirm(`Reset coverage ledger for ${activeCounties[0].name}? Every parcel will need to be reprocessed.`)) return;
+  try{
+    const res = await fetch(`${base}/api/coverage/${activeCounties[0].id}/reset`, {method:'POST'});
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    results = [];
+    renderResults();
+    setStatus(`${activeCounties[0].name} coverage reset.`);
+    await refreshCoveragePanel(base, activeCounties[0].id);
+  }catch(err){ setStatus('Reset failed: ' + err.message, true); }
+});
 
 // ---------------------------------------------------------------------
 // Step 3 — review candidates (tiered)
@@ -735,11 +833,11 @@ function renderResults(){
   }
 
   const sorted = sortResults(results);
-  const tiers = { confident: [], possible: [], unlikely: [] };
+  const tiers = { confident: [], possible: [], watch: [], unlikely: [] };
   sorted.forEach(r => (tiers[r.confidence_tier] || tiers.unlikely).push(r));
 
   const countyNames = [...new Set(results.map(r => r.county_id))].join(', ');
-  summary.innerHTML = `<strong>${tiers.confident.length}</strong> confident · <strong>${tiers.possible.length}</strong> possible · <strong>${tiers.unlikely.length}</strong> unlikely (hidden by default) in ${countyNames}`;
+  summary.innerHTML = `<strong>${tiers.confident.length}</strong> confident · <strong>${tiers.possible.length}</strong> possible · <strong>${tiers.watch.length}</strong> watch list · <strong>${tiers.unlikely.length}</strong> unlikely (hidden) in ${countyNames}`;
 
   const headerRow = `
     <tr>
@@ -770,6 +868,7 @@ function renderResults(){
   let html = '';
   html += renderTier('confident', 'Confident — ready to move forward', 'Every automated signal checks out', tiers.confident);
   html += renderTier('possible', 'Possible — conditions apply', 'A pathway matches, but see each parcel\'s detail view for what still needs to be true', tiers.possible);
+  html += renderTier('watch', 'Watch list — near miss, revisit later', 'No pathway matches YET, but qualifying perimeter is 30–74%. Worth revisiting as surrounding development changes.', tiers.watch);
 
   if(tiers.unlikely.length > 0){
     if(unlikelyCollapsed){
@@ -901,8 +1000,11 @@ function ownershipLine(r){
   return '<span class="empty-note">Unknown — this county has no co-owner field</span>';
 }
 function tierBadgeHtml(tier){
-  const labels = {confident: 'Confident', possible: 'Possible', unlikely: 'Unlikely'};
-  return `<span class="tier-badge" style="${tier==='confident' ? 'background:var(--brass-dim);color:var(--brass-800);' : ''}">${labels[tier] || tier}</span>`;
+  const labels = {confident: 'Confident', possible: 'Possible', watch: 'Watch list', unlikely: 'Unlikely'};
+  let style = '';
+  if(tier === 'confident') style = 'background:var(--brass-dim);color:var(--brass-800);';
+  else if(tier === 'watch') style = 'background:#FFEB9C;color:var(--brass-800);';
+  return `<span class="tier-badge" style="${style}">${labels[tier] || tier}</span>`;
 }
 
 // Per-parcel verification checklist -- maps every statutory requirement and
@@ -1507,23 +1609,6 @@ function renderNextSteps(){
     </li>`).join('');
 }
 
-document.getElementById('exportBtn').addEventListener('click', () => {
-  const headers = ['county_id','parcel_id','acreage','use_code','owner_name','owner_name_2','pct_perimeter_qualifying','likely_pathways','sold_since_2025','single_owner_signal','water_source','wastewater_method','water_sewer_confidence','flum_character','surrounding_density','confidence_tier','attractiveness_score','exclusion_flags','needs_manual_review','centroid_lat','centroid_lon'];
-  const rows = targetRows();
-  const csv = [headers.join(',')].concat(
-    rows.map(r => headers.map(h => {
-      let v = r[h];
-      if(Array.isArray(v)) v = v.join('; ');
-      return `"${(v??'').toString().replace(/"/g,'""')}"`;
-    }).join(','))
-  ).join('\n');
-  const blob = new Blob([csv], {type:'text/csv'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'ag_enclave_candidates.csv';
-  a.click();
-});
-
 document.getElementById('exportChecklistBtn').addEventListener('click', () => {
   const rows = targetRows();
   const lines = [];
@@ -1615,15 +1700,34 @@ async function exportDiligenceTracker(){
   helpEl.textContent = `Building diligence tracker for ${selected.length} selected parcel${selected.length===1?'':'s'}...`;
   btn.disabled = true;
   try{
+    // Send every raw field the backend workbook uses, plus the
+    // pre-computed verification checklist. Merged export (single
+    // canonical .xlsx) as of 2026-07-06 -- no separate CSV.
     const payload = {
       rows: selected.map(r => ({
-        county_id: r.county_id,
         parcel_id: r.parcel_id,
+        county_id: r.county_id,
         acreage: r.acreage,
-        owner_name: [r.owner_name, r.owner_name_2].filter(Boolean).join(' / ') || null,
-        site_address: r.site_address || null,
+        acreage_source: r.acreage_source,
+        owner_name: r.owner_name,
+        owner_name_2: r.owner_name_2,
+        use_code: r.use_code,
+        jurisdiction: r.jurisdiction,
         pct_perimeter_qualifying: r.pct_perimeter_qualifying,
         likely_pathways: r.likely_pathways || [],
+        confidence_tier: r.confidence_tier,
+        attractiveness_score: r.attractiveness_score,
+        sold_since_2025: r.sold_since_2025,
+        single_owner_signal: r.single_owner_signal,
+        water_source: r.water_source,
+        wastewater_method: r.wastewater_method,
+        water_sewer_confidence: r.water_sewer_confidence,
+        flum_character: r.flum_character,
+        surrounding_density: r.surrounding_density,
+        centroid_lat: r.centroid_lat,
+        centroid_lon: r.centroid_lon,
+        zcta5: r.zcta5,
+        site_address: r.site_address || null,
         checklist: buildVerificationChecklist(r)
           .filter(it => !it.group)
           .map(it => ({label: it.label, status: it.status, detail: it.detail})),
@@ -1644,7 +1748,7 @@ async function exportDiligenceTracker(){
     const cd = res.headers.get('Content-Disposition') || '';
     const m = cd.match(/filename="([^"]+)"/);
     const counties = [...new Set(selected.map(r => r.county_id))].sort().join('_');
-    const filename = m ? m[1] : `diligence_tracker_${counties}_${new Date().toISOString().slice(0,10)}.xlsx`;
+    const filename = m ? m[1] : `enclave_candidates_${counties}_${new Date().toISOString().slice(0,10)}.xlsx`;
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');

@@ -250,6 +250,8 @@ def fetch_candidate_parcels(
     max_acreage: float = 4480.0,
     max_candidates: int = 200,
     require_single_owner: bool = False,
+    zcta_geometry: Optional[dict] = None,
+    skip_parcel_ids: Optional[set[str]] = None,
 ) -> list[CandidateParcel]:
     """
     Query a county's own parcel layer for parcels that plausibly meet
@@ -296,16 +298,39 @@ def fetch_candidate_parcels(
                        county.sale_day_field, county.sale_date_field}
     out_fields = ",".join(f for f in out_fields_set if f)
 
-    candidates: list[CandidateParcel] = []
-    for feat in query_layer(
-        county.parcel_service_url,
+    query_kwargs: dict = dict(
         where=where,
         out_fields=out_fields,
         return_geometry=True,
         out_sr=AREA_SR,
+    )
+    # ZCTA-scoped fetch: server-side spatial filter cuts the returned set
+    # to just parcels intersecting one ZIP-code polygon. Used by the
+    # coverage_ledger-driven "advance one ZCTA at a time" flow. The ZCTA
+    # geometry is expected to carry its own spatialReference (AREA_SR
+    # per zcta_client.get_county_zctas), which query_layer reads to set inSR.
+    if zcta_geometry is not None:
+        if "spatialReference" not in zcta_geometry:
+            zcta_geometry = dict(zcta_geometry, spatialReference={"wkid": AREA_SR})
+        query_kwargs["geometry"] = zcta_geometry
+        query_kwargs["geometry_type"] = "esriGeometryPolygon"
+        query_kwargs["spatial_rel"] = "esriSpatialRelIntersects"
+
+    skip_set: set[str] = skip_parcel_ids or set()
+
+    candidates: list[CandidateParcel] = []
+    for feat in query_layer(
+        county.parcel_service_url,
+        **query_kwargs,
     ):
         attrs = feat.get("attributes", {})
         geometry = feat.get("geometry")
+
+        # Coverage-ledger skip: parcels already fully processed for this
+        # county/ZCTA don't need to run through the pipeline again.
+        parcel_id_val = attrs.get(county.parcel_id_field) if county.parcel_id_field else None
+        if parcel_id_val and parcel_id_val in skip_set:
+            continue
 
         # Defense in depth: re-check the server-side WHERE clause's
         # classification client-side against the actual fetched

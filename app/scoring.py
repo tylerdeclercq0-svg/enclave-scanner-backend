@@ -133,41 +133,60 @@ def score_candidate(
     return round(total), breakdown
 
 
+# Watch-list bounds -- parcels below the qualifying threshold today but
+# potentially close enough that additional surrounding development could
+# push them over. Per Tyler 2026-07-06.
+WATCH_LIST_MIN_PCT = 30.0
+WATCH_LIST_MAX_PCT = 74.0  # up to but excluding the 75% Option 1 threshold
+
+
 def classify_confidence(
     likely_pathways: list[int],
     exclusion_flags: list[str],
     single_owner_signal: Optional[bool],
     water_sewer_confidence: str,
+    pct_perimeter_qualifying: Optional[float] = None,
 ) -> str:
     """
-    Bucket a scanned candidate into "confident" / "possible" / "unlikely"
-    for the review-candidates UI, per Tyler's "Falcone Group v3" mockup.
+    Bucket a scanned candidate into "confident" / "possible" / "watch" /
+    "unlikely" for the review-candidates UI.
 
     This is a classification of what's ALREADY been computed elsewhere
     in the pipeline (pathways, exclusions, ownership signal, water/sewer
-    estimate) — it adds no new data source of its own. Deliberately
-    conservative: "confident" requires every automatable signal to be
-    both present AND favorable, not just "no bad news."
+    estimate, qualifying-perimeter percentage) — no new data source of
+    its own. Deliberately conservative: "confident" requires every
+    automatable signal to be both present AND favorable, not just "no
+    bad news."
 
-    - "unlikely": no pathway matched at all — the core legal test fails
-      with today's data, regardless of anything else.
+    - "unlikely": no pathway matched AND pct_qualifying below the
+      watch-list floor (30%). The core legal test fails with today's
+      data and the near-perimeter isn't developed enough for a
+      surrounding-development change to plausibly flip it.
+    - "watch": no pathway matched YET, but pct_qualifying is between
+      30% and 74% -- close enough that additional adjacent development
+      (or a corrected FLUM designation) could push it over the Option 1
+      threshold. Surfaced as a secondary tier so Tyler can revisit
+      periodically as surrounding development changes, without mixing
+      these in with confirmed qualifiers.
     - "confident": a pathway matched, no real hard-exclusion hit
-      (exclusion_flags is empty — meaningful now that
-      exclusions.check_exclusions() only returns genuine hits, not the
-      permanent manual-review boilerplate), the parcel's own record
-      shows no co-owner, and the water/sewer estimate has at least
-      "Likely" confidence (not "Somewhat Likely" or "Unknown").
+      (exclusion_flags is empty), the parcel's own record shows no
+      co-owner, and the water/sewer estimate has at least "Likely"
+      confidence.
     - "possible": a pathway matched but at least one of the above isn't
-      confirmed — still worth reviewing, just not a slam dunk.
+      confirmed.
     """
-    if not likely_pathways:
-        return "unlikely"
+    if likely_pathways:
+        if (
+            not exclusion_flags
+            and single_owner_signal is True
+            and water_sewer_confidence in ("Known", "Likely")
+        ):
+            return "confident"
+        return "possible"
 
-    if (
-        not exclusion_flags
-        and single_owner_signal is True
-        and water_sewer_confidence in ("Known", "Likely")
+    # No pathway. Check the watch-list threshold before giving up.
+    if pct_perimeter_qualifying is not None and (
+        WATCH_LIST_MIN_PCT <= pct_perimeter_qualifying <= WATCH_LIST_MAX_PCT
     ):
-        return "confident"
-
-    return "possible"
+        return "watch"
+    return "unlikely"

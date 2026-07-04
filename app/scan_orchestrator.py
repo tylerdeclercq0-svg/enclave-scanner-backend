@@ -71,6 +71,7 @@ class ScanResultRow:
     flum_character: Optional[str] = None
     surrounding_density: str = "unknown"
     confidence_tier: str = "unlikely"
+    zcta5: Optional[str] = None
 
 
 def run_county_scan(
@@ -83,6 +84,9 @@ def run_county_scan(
     min_encirclement_pct: Optional[float] = None,
     flum_character_filter: Optional[str] = None,
     surrounding_density_filter: Optional[str] = None,
+    zcta_geometry: Optional[dict] = None,
+    zcta5: Optional[str] = None,
+    skip_parcel_ids: Optional[set] = None,
 ) -> list[ScanResultRow]:
     """
     Run the full pipeline for one county and return scored, ranked
@@ -116,6 +120,8 @@ def run_county_scan(
         max_acreage=max_acreage,
         max_candidates=max_candidates,
         require_single_owner=require_single_owner,
+        zcta_geometry=zcta_geometry,
+        skip_parcel_ids=skip_parcel_ids,
     )
 
     rows: list[ScanResultRow] = []
@@ -387,6 +393,7 @@ def run_county_scan(
             exclusion_flags=exclusion_flags,
             single_owner_signal=parcel.single_owner_signal,
             water_sewer_confidence=water_sewer.confidence,
+            pct_perimeter_qualifying=pct_qualifying,
         )
 
         rows.append(ScanResultRow(
@@ -414,6 +421,7 @@ def run_county_scan(
             centroid_lat=centroid_lat,
             centroid_lon=centroid_lon,
             sold_since_2025=parcel.sold_since_2025,
+            zcta5=zcta5,
         ))
 
     rows.sort(key=lambda r: (r.attractiveness_score or 0), reverse=True)

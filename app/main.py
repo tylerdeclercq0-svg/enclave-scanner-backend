@@ -70,10 +70,43 @@ class CountyInfo(BaseModel):
     notes: str
 
 
+_CODE_VERSION_CACHE: Optional[str] = None
+
+
+def _resolve_code_version() -> str:
+    """
+    Return the short git commit hash for the deployed build, so /health
+    reflects the ACTUAL deployed commit instead of a hardcoded string that
+    goes stale on every deploy. Render's build environment sets
+    RENDER_GIT_COMMIT; local dev falls back to reading .git/HEAD.
+    Cached at import time so a subsequent `.git` removal doesn't break it.
+    """
+    global _CODE_VERSION_CACHE
+    if _CODE_VERSION_CACHE is not None:
+        return _CODE_VERSION_CACHE
+    version = os.environ.get("RENDER_GIT_COMMIT") or os.environ.get("GIT_COMMIT")
+    if version:
+        _CODE_VERSION_CACHE = version[:7]
+        return _CODE_VERSION_CACHE
+    try:
+        git_head_path = os.path.join(os.path.dirname(__file__), "..", ".git", "HEAD")
+        with open(git_head_path) as f:
+            head = f.read().strip()
+        if head.startswith("ref: "):
+            ref_path = os.path.join(os.path.dirname(__file__), "..", ".git", head[5:])
+            with open(ref_path) as f:
+                _CODE_VERSION_CACHE = f.read().strip()[:7]
+        else:
+            _CODE_VERSION_CACHE = head[:7]
+    except (OSError, IOError):
+        _CODE_VERSION_CACHE = "unknown"
+    return _CODE_VERSION_CACHE
+
+
 @app.get("/health")
 def health():
     """Liveness check — Render/Railway ping this to confirm the service is up."""
-    return {"status": "ok", "code_version": "step-labels-v3-2026-07-03"}
+    return {"status": "ok", "code_version": _resolve_code_version()}
 
 
 @app.get("/api/counties", response_model=list[CountyInfo])

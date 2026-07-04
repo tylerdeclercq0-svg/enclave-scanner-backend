@@ -228,6 +228,32 @@
   .flag-list{margin:0;padding-left:18px;font-size:13px;line-height:1.6;}
   .flag-list.exclusion li{color:var(--clay);}
   .flag-list.review li{color:var(--ink-faint);}
+
+  /* Per-parcel verification checklist -- see buildOverlayContent. */
+  .checklist-table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px;}
+  .checklist-table th{
+    text-align:left;font-family:'IBM Plex Mono',monospace;font-size:10.5px;
+    letter-spacing:.06em;text-transform:uppercase;color:var(--ink-faint);
+    border-bottom:1px solid var(--line-strong);padding:6px 8px 4px;font-weight:500;
+  }
+  .checklist-table td{padding:8px;border-bottom:1px solid var(--line);vertical-align:top;line-height:1.4;}
+  .checklist-table tr.group-head td{
+    font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--ink-faint);background:var(--paper);padding-top:14px;
+    border-bottom:none;
+  }
+  .check-status{font-family:'IBM Plex Mono',monospace;font-size:11.5px;white-space:nowrap;}
+  .check-status.pass{color:var(--brass-800);}
+  .check-status.fail{color:var(--clay);font-weight:600;}
+  .check-status.est{color:var(--brass-800);}
+  .check-status.manual{color:var(--ink-faint);}
+  .check-detail{color:var(--ink-faint);font-size:12.5px;}
+  .check-detail strong{color:var(--ink);}
+  .checklist-summary{
+    margin:0 0 10px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--ink-faint);
+    letter-spacing:.03em;text-transform:uppercase;
+  }
+  .checklist-summary .count{color:var(--ink);font-weight:600;}
   .empty-note{color:var(--ink-faint);font-style:italic;font-size:13px;}
   .info-copy h3{font-family:'Source Serif 4',serif;font-size:17px;margin:20px 0 8px;}
   .info-copy h3:first-child{margin-top:0;}
@@ -562,7 +588,12 @@ async function loadCounties(){
     const res = await fetch(`${base}/api/counties`);
     if(!res.ok) throw new Error(`HTTP ${res.status}`);
     counties = await res.json();
-    counties.forEach(c => { if(c.live) selectedCounties.add(c.id); });
+    counties.forEach(c => {
+      if(c.live) selectedCounties.add(c.id);
+      // Cache each county's population and metadata for the per-parcel
+      // verification checklist (the (f) 1.75M cap check specifically).
+      COUNTY_INFO[c.id] = {population: c.population, name: c.name, live: c.live};
+    });
     renderCounties();
     const liveCount = counties.filter(c => c.live).length;
     statusEl.textContent = `Connected. ${counties.length} counties available (${liveCount} live).`;
@@ -867,6 +898,145 @@ function tierBadgeHtml(tier){
   return `<span class="tier-badge" style="${tier==='confident' ? 'background:var(--brass-dim);color:var(--brass-800);' : ''}">${labels[tier] || tier}</span>`;
 }
 
+// Per-parcel verification checklist -- maps every statutory requirement and
+// exclusion from s. 163.3164(4) and s. 163.3162(4)(i) to its automation
+// status for THIS parcel. The point is that a user can look at one screen
+// and immediately see (a) what's confirmed by the tool, (b) what's an
+// approximation or estimate they should verify, and (c) what they have to
+// go check by hand -- rather than having those three categories collapsed
+// into a single "manual review notes" bullet list buried below the
+// exclusions.
+function buildVerificationChecklist(r){
+  const items = [];
+  const isPasco = r.county_id === 'pasco';
+  const isOsceola = r.county_id === 'osceola';
+  const hasUsbLayer = isPasco; // only Pasco has a rural-area approximation
+
+  // ---- STATUTORY REQUIREMENTS (all six must be TRUE for eligibility) ----
+  items.push({group: 'Statutory requirements (must be TRUE for eligibility) — s. 163.3164(4), F.S.'});
+
+  // (a) Single owner/entity as of 1/1/2025
+  let ownerStatus, ownerDetail;
+  if(r.single_owner_signal === true && r.sold_since_2025 === false){
+    ownerStatus = 'est'; ownerDetail = 'No co-owner on record AND no post-1/1/2025 sale on record. Reasonable proxy, not definitive — a non-sale transfer (inheritance, LLC restructure) after 1/1/2025 would slip through. Confirm with a title search.';
+  } else if(r.single_owner_signal === false){
+    ownerStatus = 'fail'; ownerDetail = 'Co-owner recorded on the parcel — the "single person or entity" requirement is likely NOT met. Confirm with a title search.';
+  } else if(r.sold_since_2025 === true){
+    ownerStatus = 'fail'; ownerDetail = 'Most recent recorded sale is on/after 1/1/2025 — ownership may not have been continuous since the statutory date. Confirm with a title search.';
+  } else if(r.single_owner_signal === null){
+    ownerStatus = 'manual'; ownerDetail = 'This county has no co-owner field on its parcel layer — ownership can only be confirmed by title search.';
+  } else {
+    ownerStatus = 'manual'; ownerDetail = 'Ownership continuity as of 1/1/2025 could not be confirmed automatically — confirm with a title search.';
+  }
+  items.push({label: '(a) Single owner or entity as of 1/1/2025', status: ownerStatus, detail: ownerDetail});
+
+  // (b) 5-year continuous agricultural use
+  items.push({
+    label: '(b) 5-year continuous agricultural use',
+    status: 'manual',
+    detail: 'No data source carries agricultural-use history — the parcel layers only show current-year use. Confirm with the county Property Appraiser (5 years of agricultural exemption records).',
+  });
+
+  // (c) Encirclement pathway matched
+  const pathways = r.likely_pathways || [];
+  if(pathways.length){
+    items.push({
+      label: '(c) Encirclement — a qualifying pathway matched',
+      status: 'pass',
+      detail: `Pathway${pathways.length>1?'s':''} matched: ${pathways.map(p => '#' + p).join(', ')} at ${r.pct_perimeter_qualifying != null ? r.pct_perimeter_qualifying.toFixed(1) + '% qualifying perimeter' : 'unknown %'}.`,
+    });
+  } else {
+    items.push({
+      label: '(c) Encirclement — a qualifying pathway matched',
+      status: 'fail',
+      detail: `No pathway matched. ${r.pct_perimeter_qualifying != null ? 'Qualifying perimeter: ' + r.pct_perimeter_qualifying.toFixed(1) + '%.' : ''} Doesn't automatically disqualify — Option 3 (interstate + USB, only Pasco has USB data) and Option 5 (rural study area) have limits documented in the methodology panel.`,
+    });
+  }
+
+  // (d) Public services
+  const confidenceLabel = r.water_sewer_confidence || 'Unknown';
+  const waterSewerDetail = (r.water_source || r.wastewater_method)
+    ? `${r.water_source || 'water: unknown'} / ${r.wastewater_method || 'wastewater: unknown'} (${confidenceLabel}). Estimate from FDOH's Florida Water Management Inventory; confirm with the county utility.`
+    : `No FDOH record joined for this parcel. Confirm water and wastewater service directly with the county utility.`;
+  items.push({
+    label: '(d) Public services — water & wastewater',
+    status: confidenceLabel === 'Known' ? 'pass' : 'est',
+    detail: waterSewerDetail,
+  });
+  items.push({
+    label: '(d) Public services — transportation, schools, recreation',
+    status: 'manual',
+    detail: 'No parcel-level GIS source found. Confirm with the county Planning Department: nearest school capacity, road level-of-service, and recreation-facility inventory per the Comprehensive Plan.',
+  });
+
+  // (e) Acreage cap
+  const ac = r.acreage;
+  if(ac == null){
+    items.push({label: '(e) Acreage cap', status: 'manual', detail: 'Acreage could not be determined for this parcel. Confirm with the county Property Appraiser.'});
+  } else if(ac <= 1280){
+    items.push({label: '(e) Acreage cap (base 1,280 ac)', status: 'pass', detail: `${ac.toFixed(1)} acres — within the general statutory cap.`});
+  } else if(ac <= 4480){
+    items.push({label: '(e) Acreage cap (dense-urban exception, 4,480 ac)', status: 'est', detail: `${ac.toFixed(1)} acres — exceeds the general 1,280-ac cap but may qualify under the exception in s. 163.3164(4)(e). Exception requires the surrounding 75% to be RESIDENTIAL development at ≥1,000 residents/sq mi buildout density. Neither the residential-only breakdown nor buildout density is automated here — confirm with the county Planning Department.`});
+  } else {
+    items.push({label: '(e) Acreage cap', status: 'fail', detail: `${ac.toFixed(1)} acres exceeds even the 4,480-ac exception ceiling — statutorily ineligible.`});
+  }
+
+  // (f) County population cap
+  const countyPop = COUNTY_INFO[r.county_id]?.population;
+  if(countyPop != null){
+    items.push({
+      label: '(f) County population ≤ 1.75M',
+      status: countyPop <= 1750000 ? 'pass' : 'fail',
+      detail: `${r.county_id} County ~${countyPop.toLocaleString()} residents (BEBR 2024 estimate). ${countyPop <= 1750000 ? 'Well within the statutory cap.' : 'Exceeds the statutory cap — the scan endpoint should have refused this county.'}`,
+    });
+  }
+
+  // ---- EXCLUSIONS (all must be FALSE for eligibility) ----
+  items.push({group: 'Exclusions (must be FALSE for eligibility) — s. 163.3162(4)(i) + related'});
+
+  const exclusions = r.exclusion_flags || [];
+  const excText = exclusions.join(' | ').toLowerCase();
+  const wekivaHit = excText.includes('wekiva');
+  const evergladesHit = excText.includes('everglades');
+  const acscHit = excText.includes('acsc') || excText.includes('critical state concern');
+  const unincHit = excText.includes('unincorporated');
+  const acreageExcHit = excText.includes('exceeds the 1,280-acre');
+
+  items.push({label: 'Wekiva Study Area (s. 369.316)', status: wekivaHit ? 'fail' : 'pass', detail: wekivaHit ? 'Parcel intersects the Wekiva Study Area — hard exclusion.' : 'Automated check against the real Wekiva Protection Areas layer (Seminole County-hosted, WSA=yes). Clear.'});
+  items.push({label: 'Everglades Protection Area (s. 373.4592(2))', status: evergladesHit ? 'fail' : 'pass', detail: evergladesHit ? 'Parcel intersects the Everglades Protection Area — hard exclusion.' : 'Automated check against the real SFWMD-hosted Everglades Protection Area FeatureServer. Clear.'});
+  items.push({label: 'Area of Critical State Concern (s. 380.055 et al.)', status: acscHit ? 'fail' : 'pass', detail: acscHit ? 'Parcel intersects an ACSC — hard exclusion.' : 'Automated check against the FDEP MapDirect ACSC FeatureServer (Apalachicola Bay, Green Swamp, Big Cypress, Florida Keys, City of Key West). Clear.'});
+  items.push({label: 'Recorded conservation easement (s. 704.06, F.S.)', status: 'manual', detail: 'No statewide easement layer exists — recorded county-by-county at the Clerk/Recorder. Confirm via title search.'});
+  items.push({label: 'Military installation buffer (s. 163.3175(2), F.S.)', status: 'manual', detail: 'No consolidated statewide layer matches this statutory definition. Confirm manually if the parcel is near a known military installation.'});
+  items.push({label: 'Unincorporated status', status: unincHit ? 'fail' : 'pass', detail: unincHit ? 'Parcel falls inside incorporated city limits — statutory ineligibility.' : (isPasco ? 'Automated via a dedicated Pasco City_Limits layer — no incorporated-city overlap.' : 'Automated via FLUM spatial join — no incorporated-jurisdiction overlap.')});
+
+  // Osceola Option E follow-up
+  if(isOsceola){
+    items.push({
+      label: 'Option E (rural study area, s. 163.3164(4)(c)3) — Osceola-specific',
+      status: 'manual',
+      detail: 'Osceola has an 8,517-ac Mixed-Use District 5/6 study area (14,010 planned residential units) described in county materials as inside the "urban service area" — ambiguous under (c)3. Wired as False here; if this parcel is inside that boundary, confirm with Osceola Planning whether it counts as a (c)3 rural study area.',
+    });
+  }
+
+  return items;
+}
+
+function renderChecklistItem(it){
+  if(it.group){
+    return `<tr class="group-head"><td colspan="3">${it.group}</td></tr>`;
+  }
+  const symbols = {pass: '✓ Automated', fail: '✗ Fail', est: '⚠ Estimated', manual: '📋 Manual'};
+  return `<tr>
+    <td>${it.label}</td>
+    <td class="check-status ${it.status}">${symbols[it.status] || it.status}</td>
+    <td class="check-detail">${it.detail}</td>
+  </tr>`;
+}
+
+// Populated by loadCounties(); used by buildVerificationChecklist to look
+// up (f) county-population figures without another API call.
+const COUNTY_INFO = {};
+
 function buildOverlayContent(r, key){
   const owner = [r.owner_name, r.owner_name_2].filter(Boolean).join(' / ') || '—';
   const pathways = r.likely_pathways || [];
@@ -917,9 +1087,25 @@ function buildOverlayContent(r, key){
     </div>
 
     <div class="overlay-section">
-      <h4>Exclusions (hard) &amp; review notes (soft)</h4>
-      ${exclusions.length ? `<ul class="flag-list exclusion">${exclusions.map(f => `<li>${f}</li>`).join('')}</ul>` : '<div class="empty-note">No hard exclusions found.</div>'}
-      ${reviewNotes.length ? `<ul class="flag-list review" style="margin-top:8px;">${reviewNotes.map(f => `<li>${f}</li>`).join('')}</ul>` : ''}
+      <h4>Verification checklist for this parcel</h4>
+      ${(() => {
+        const items = buildVerificationChecklist(r);
+        const nAuto = items.filter(i => i.status === 'pass').length;
+        const nFail = items.filter(i => i.status === 'fail').length;
+        const nEst  = items.filter(i => i.status === 'est').length;
+        const nMan  = items.filter(i => i.status === 'manual').length;
+        return `<p class="checklist-summary">
+          <span class="count">${nAuto}</span> automated pass ·
+          <span class="count">${nFail}</span> automated fail ·
+          <span class="count">${nEst}</span> estimated (verify) ·
+          <span class="count">${nMan}</span> manual required
+        </p>
+        <table class="checklist-table">
+          <thead><tr><th>Requirement / exclusion</th><th>Status</th><th>Detail</th></tr></thead>
+          <tbody>${items.map(renderChecklistItem).join('')}</tbody>
+        </table>`;
+      })()}
+      ${reviewNotes.length ? `<details style="margin-top:14px;font-size:12px;"><summary style="cursor:pointer;color:var(--ink-faint);font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.04em;text-transform:uppercase;">Raw per-parcel review notes (${reviewNotes.length}) — the full backend output that feeds the checklist above</summary><ul class="flag-list review" style="margin-top:8px;">${reviewNotes.map(f => `<li>${f}</li>`).join('')}</ul></details>` : ''}
     </div>
 
     <div class="overlay-section" style="margin-bottom:0;">
@@ -1293,8 +1479,8 @@ function renderNextSteps(){
     body: 'Water and sewer are already estimated from a real FDOH Florida Water Management Inventory record on each parcel\'s detail view' + (anyWaterUnknown ? ' — at least one selected parcel\'s estimate has low or no confidence, worth a direct confirmation call' : ', worth a direct confirmation call regardless of the confidence tag') + '. Transportation, schools, and recreation capacity have no data source here and need a direct check with Public Works, the School Board, and Parks.',
   });
   steps.push({
-    title: 'Ask Planning directly about exclusion zones and Option E',
-    body: 'Confirm the parcel isn\'t in the Wekiva Study Area, an Area of Critical State Concern, or a military buffer, and ask whether it falls inside a designated rural study area (Option E — a pathway this tool can\'t check automatically).'
+    title: 'Confirm the manual exclusion checks with Planning',
+    body: 'Wekiva, Everglades, and Areas of Critical State Concern are already checked automatically. Ask the county Planning Department about the two exclusions that aren\'t automated at all (conservation easement, military installation buffer) and, if this is an Osceola parcel, whether it sits inside the county\'s Mixed-Use District 5/6 study area (the Option E ambiguity noted in the checklist).'
       + (anyPasco ? ' At least one selected parcel is in Pasco — this tool\'s unincorporated-status check is manual-only there; confirm directly.' : ''),
   });
   if(anyPossible){
@@ -1339,31 +1525,60 @@ document.getElementById('exportChecklistBtn').addEventListener('click', () => {
   lines.push(`Candidate parcels: ${rows.length}`);
   lines.push('');
   lines.push('GENERAL — verify for every parcel before relying on any result:');
-  lines.push('  [ ] 5-year continuous agricultural use history (single point-in-time snapshot only)');
-  lines.push('  [ ] Public services availability — transportation, schools, recreation (no data source here)');
-  lines.push('  [ ] Conservation easements');
-  lines.push('  [ ] Military installation buffers');
-  lines.push('  [ ] Rural study area / Option E designation (not automated)');
+  lines.push('  [ ] 5-year continuous agricultural use history — s. 163.3164(4)(b), F.S.');
+  lines.push('      No data source carries use history. Confirm with the county Property');
+  lines.push('      Appraiser (5 years of agricultural exemption records).');
+  lines.push('  [ ] Public services — transportation, schools, recreation — s. 163.3164(4)(d)');
+  lines.push('      No parcel-level source found. Confirm with county Planning: school');
+  lines.push('      capacity, road level-of-service, recreation-facility inventory.');
+  lines.push('  [ ] Conservation easements — s. 163.3162(4)(i) + s. 704.06');
+  lines.push('      No statewide layer. Confirm via title search / County Clerk.');
+  lines.push('  [ ] Military installation buffer — s. 163.3175(2)');
+  lines.push('      No matching statewide layer. Confirm manually if parcel is near any');
+  lines.push('      known military installation.');
+  lines.push('');
+  lines.push('AUTOMATED CHECKS (already run — no action needed unless a fail is flagged below):');
+  lines.push('  [x] Wekiva Study Area intersection (s. 369.316)');
+  lines.push('  [x] Everglades Protection Area intersection (s. 373.4592(2))');
+  lines.push('  [x] Area of Critical State Concern intersection (s. 380.055 et al.)');
+  lines.push('  [x] Unincorporated status (Pasco: city-limits layer; others: FLUM spatial join)');
+  lines.push('  [x] County population <= 1.75M (s. 163.3164(4)(f))');
+  lines.push('  [x] Base acreage cap 1,280 ac (s. 163.3164(4)(e))');
+  lines.push('  [x] Encirclement pathway (Options 1-4, s. 163.3164(4)(c)1-2)');
   lines.push('');
   lines.push('PER-PARCEL FLAGS:');
   rows.forEach(r => {
     const exclusions = r.exclusion_flags || [];
     const reviewNotes = r.needs_manual_review || [];
-    const isPasco = r.county_id === 'pasco';
+    const isOsceola = r.county_id === 'osceola';
     lines.push('');
     lines.push(`${r.county_id} — ${r.parcel_id || 'unknown parcel'} (${r.acreage!=null ? r.acreage.toFixed(1) : '?'} ac) — confidence: ${r.confidence_tier}`);
-    lines.push(`  [ ] Ownership: ${r.single_owner_signal === false ? 'CO-OWNER RECORDED, confirm with title search' : r.single_owner_signal == null ? 'unknown, county has no co-owner field' : 'no co-owner on record'}`);
-    lines.push(`  [ ] Water/sewer estimate (${r.water_sewer_confidence}): ${r.water_source || 'unknown'} / ${r.wastewater_method || 'unknown'} — confirm with the county utility`);
+    lines.push(`  [ ] Ownership as of 1/1/2025 — s. 163.3164(4)(a)`);
+    if(r.single_owner_signal === false){
+      lines.push(`      CO-OWNER RECORDED on parcel; confirm with title search.`);
+    } else if(r.single_owner_signal == null){
+      lines.push(`      Co-owner field unavailable in this county's parcel layer; title search required.`);
+    } else if(r.sold_since_2025 === true){
+      lines.push(`      Most recent recorded sale is on/after 1/1/2025 — confirm ownership continuity.`);
+    } else {
+      lines.push(`      No co-owner on record AND no post-1/1/2025 sale — reasonable proxy;`);
+      lines.push(`      non-sale transfers (inheritance, LLC restructure) still need title-search confirmation.`);
+    }
+    lines.push(`  [ ] Water/sewer (${r.water_sewer_confidence}): ${r.water_source || 'unknown'} / ${r.wastewater_method || 'unknown'}`);
+    lines.push(`      FDOH FLWMI estimate; confirm with the county utility.`);
     if(exclusions.length){
-      lines.push('  Exclusions (hard fail — must resolve):');
+      lines.push('  AUTOMATED EXCLUSION HITS (hard fail — must resolve):');
       exclusions.forEach(f => lines.push(`    [ ] ${f}`));
     }
     if(reviewNotes.length){
-      lines.push('  Review notes (soft — verify before proceeding):');
+      lines.push('  Backend per-parcel notes:');
       reviewNotes.forEach(f => lines.push(`    [ ] ${f}`));
     }
-    if(isPasco){
-      lines.push('  [ ] Pasco unincorporated-status check (manual-only — not automated for this county)');
+    if(isOsceola){
+      lines.push(`  [ ] Option E rural study area — s. 163.3164(4)(c)3`);
+      lines.push(`      Osceola has an 8,517-ac Mixed-Use District 5/6 study area described as inside`);
+      lines.push(`      the "urban service area." If this parcel falls inside it, confirm with Osceola`);
+      lines.push(`      Planning whether it counts as a (c)3 rural study area.`);
     }
   });
   const blob = new Blob([lines.join('\n')], {type:'text/plain'});

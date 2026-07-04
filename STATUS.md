@@ -1314,3 +1314,154 @@ No exceptions, all four return expected results:
   Rural Area layer for Osceola, so usb_perimeter_pct=0, Option 4
   correctly doesn't fire). Third parcel `012527000000400000` shows the
   Reedy Creek/Disney exclusion flag as expected.
+
+## v1 pass — 2026-07-06 (very-very late session)
+
+Compiled the full open-gap list from STATUS.md, sorted into "close now"
+vs "flag as manual review, always visible per-parcel," closed the first
+bucket, and made the second bucket structurally impossible to miss in the
+UI. Not committed yet -- awaiting Tyler review.
+
+### Close-now items closed this pass
+
+- **Nassau FLWMI PARCELNO cross-check** -- was "assumed consistent, not
+  cross-checked" in `flwmi_client.py`. Live-verified against 5 real
+  Nassau parcels via direct GET query: all 5 round-tripped cleanly, no
+  transform needed. Docstring updated.
+- **`/health` code_version stale hardcoded string** -- `main.py` now
+  reads Render's `RENDER_GIT_COMMIT` env var when present, falls back
+  to reading `.git/HEAD` in local dev, cached at import time. Local
+  test returns the current HEAD (`3704b7a` when tested). Deploys will
+  now show the real commit hash instead of `step-labels-v3-2026-07-03`.
+- **Stale Manual Review Checklist export** -- header still listed
+  "Pasco unincorporated-status check (manual-only)" (no longer manual
+  since city_limits_layer_join wired in) and "Rural study area / Option
+  E designation (not automated)" (now automated, False for all four
+  pilots after direct comp-plan review). Rewritten header into
+  "AUTOMATED CHECKS (already run)" and "GENERAL VERIFICATION"
+  sections; per-parcel sections cite each applicable statute subsection.
+- **Stale Option E "cannot check automatically" language** in the
+  Step 4 next-steps panel -- replaced with an honest description of
+  what IS automated (Wekiva/Everglades/ACSC) and what the actual manual
+  asks are (conservation easements, military buffers, Osceola-specific
+  Mixed-Use District 5/6 ambiguity).
+
+### Per-parcel verification checklist -- structurally added to the parcel detail overlay
+
+Tyler's specific ask: every scan result should visibly show which
+manual checks still apply to it, not have those buried in a docs tab.
+Done via `buildVerificationChecklist(r)` in `web/index.html`, which
+returns a per-parcel list of every s. 163.3164(4) requirement AND every
+s. 163.3162(4)(i) exclusion mapped to one of four statuses:
+- **Automated pass** (green): tool confirmed the check
+- **Automated fail** (red, bold): tool confirmed the check FAILED
+- **Estimated** (brass): proxy check or partial automation; verify
+- **Manual required** (muted): no data source, must check by hand
+
+Rendered as a bordered table in the parcel detail overlay, right after
+the pathway list and before the demographics section (previously the
+"Exclusions and review notes" bullet list). Header line shows a running
+count: "N automated pass / N automated fail / N estimated / N manual."
+
+Verified via preview_eval with mocked rows covering real edge cases:
+- 32.87-ac Pasco parcel matching Options [1, 4], no exclusions: 7 pass
+  / 0 fail / 2 est / 4 manual -> renders correctly.
+- 361.78-ac Osceola parcel: 8 pass / 0 fail / 1 est / 5 manual (Osceola-
+  specific Option E follow-up row appears, mentioning the Mixed-Use
+  District 5/6 ambiguity).
+- 2,500-ac parcel: (e) row correctly flips from "1,280 pass" to "4,480
+  estimated" with the exception language.
+- Parcel with recorded co-owner: (a) row correctly shows "fail" with a
+  title-search recommendation.
+- Parcel with sold_since_2025=True: (a) row correctly shows "fail"
+  distinguished from the co-owner case.
+- Parcel with Wekiva exclusion hit: exclusions section correctly shows
+  Wekiva as "fail," the others as "pass."
+
+Raw `needs_manual_review` list from the backend preserved behind a
+`<details>` element labeled as "the full backend output that feeds the
+checklist above" -- available for audit, not front-and-center.
+
+`/api/counties` responses cached in a frontend-side `COUNTY_INFO` object
+at load time so the (f) 1.75M cap check on the checklist can render
+without an extra fetch per parcel.
+
+### Deferred, not closed this pass
+
+- **flum_character filter dropdown**: backend accepts the filter but
+  UI does not populate per-county real options. Cosmetic.
+- **Map view**: deferred by Tyler's own prior scope call.
+- **Population-weighted median household income / median age**: still
+  deliberately null. Non-trivial (needs block-group weighting).
+- **Everything genuinely unautomatable**: 5-year continuous ag use,
+  conservation easements, military buffers, non-water/sewer public
+  services. These now render as always-visible "Manual required" items
+  on every parcel -- nothing silently missing.
+
+### End-to-end regression -- all four counties clean
+
+`.venv312` local run, `max_candidates=3` each:
+- **Pasco**: reference parcel `35-24-16-0000-00100-0011` still [1, 4],
+  100% qualifying. Others at 48% and 24%, no pathway. Consistent with
+  prior sessions, unchanged.
+- **Nassau**: 3 Rayonier timberland parcels, 0% qualifying, no pathway,
+  0 exclusion flags. Correct.
+- **St. Johns**: 3 parcels at 0% qualifying, no pathway. FLWMI water/
+  sewer now shows Known / Somewhat Likely for two of the three --
+  confirmed live FDOH lookup working through v1 wiring.
+- **Osceola**: 2 parcels at 100% qualifying show [1] only (Option 4
+  correctly does not fire; usb_perimeter_pct=0, no Rural Area layer).
+  Third parcel is Reedy Creek/Disney land with 1 exclusion flag, as
+  expected.
+
+No regressions. Ready for review.
+
+## v1 status -- what this tool can and cannot do, straight
+
+**Automatically verified end-to-end, trust these:**
+- Encirclement Options 1-4 against real live FLUM data with ROW/canal
+  substitution and per-neighbor buffered intersection.
+- Interstate frontage credit for Option 3 (real FDOT layer).
+- USB perimeter percent for Option 4 (Pasco only, approximated via the
+  Northeast Rural Area layer; Nassau/St. Johns/Osceola have no USB
+  data, so Options 3/4 are not reachable there).
+- Base 1,280-ac cap and county 1.75M population cap (defensive).
+- Wekiva Study Area, Everglades Protection Area, ACSC intersection
+  checks (real live GIS layers, per-parcel).
+- Unincorporated status via dedicated city-limits layer (Pasco) or
+  FLUM spatial join (Nassau, St. Johns, Osceola).
+- FDOH FLWMI water/sewer estimate with Known/Likely/SWL/Unknown rating.
+
+**Estimated -- surfaces eligibility, still needs a human confirm:**
+- (a) Single owner as of 1/1/2025: proxy via co-owner name field +
+  sold_since_2025. Non-sale transfers (inheritance, LLC restructure)
+  can slip through; title search always required.
+- (d) Water/sewer: FDOH estimate with confidence rating; confirm with
+  county utility for the parcel's specific case.
+- (e) 4,480-ac dense-urban exception: eligibility surfaced but
+  buildout-density condition not automated.
+- Option 5 (rural study area) for Osceola: 8,517-ac Mixed-Use District
+  5/6 ambiguity flagged for direct Planning Dept follow-up.
+
+**Manual only -- tool cannot help beyond flagging that they apply:**
+- (b) 5-year continuous agricultural use -- no history data anywhere.
+  County Property Appraiser has the exemption records.
+- (d) Transportation, schools, recreation availability -- no parcel-
+  level source. County Planning has capacity/LOS data.
+- Conservation easements (s. 704.06) -- no statewide layer, recorded
+  county-by-county. Always title search.
+- Military installation buffer (s. 163.3175(2)) -- no matching
+  statewide layer. Manual GIS overlay per parcel.
+
+**What the tool will not do at all**, plainly:
+- File anything, submit anything, or contact a county on the user's
+  behalf.
+- Provide a legal opinion. Every result is a first-pass filter over
+  public GIS data.
+- Guarantee no false positives on the automated checks (any GIS layer
+  can be stale; the surrounding-FLUM computation is a real
+  approximation, not a survey; water/sewer is an estimate).
+
+For every candidate the tool surfaces, the parcel detail overlay's
+verification checklist tells the user, in one table, which of the
+above categories each check falls into for that specific parcel.

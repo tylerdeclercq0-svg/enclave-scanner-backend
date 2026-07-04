@@ -23,9 +23,9 @@ Confirmed live via describe_layer() + real sample queries:
                own ParcelID field, no transform needed.
       Osceola: "012527000000400000" (no dashes) -- identical to
                Osceola's own PARCELNO field, no transform needed.
-      Nassau:  "00-00-30-0020-0001-0000" -- same dash pattern as its own
-               PARCELID; assumed direct match (not yet cross-checked
-               against one specific real Nassau PARCELID sample).
+      Nassau:  "00-00-30-0020-0001-0000" -- same dash pattern as Nassau's
+               own PARCELID; cross-checked live 2026-07-06, 5/5 real
+               Nassau parcels round-tripped cleanly with no transform.
       St. Johns: bare 10-digit string ("0000200010"), but this county's
                own PIN field is space-separated ("010832 0010") -- see
                `CountyEndpoint.flwmi_parcel_id_transform`.

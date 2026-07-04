@@ -39,6 +39,7 @@ from encirclement import compute_encirclement, determine_pathways, EncirclementR
 from arcgis_client import query_layer
 import exclusions
 import scoring
+import statutory_checks
 
 
 @dataclass
@@ -59,6 +60,7 @@ class ScanResultRow:
     needs_manual_review: list[str]
     centroid_lat: Optional[float] = None
     centroid_lon: Optional[float] = None
+    sold_since_2025: Optional[bool] = None
 
 
 def run_county_scan(
@@ -156,6 +158,17 @@ def run_county_scan(
                 needs_review.append(f"Encirclement test failed to run: {exc}")
 
         exclusion_flags = exclusions.check_exclusions(parcel)
+
+        is_unincorporated, unincorporated_detail = statutory_checks.check_unincorporated(
+            county, parcel.geometry, AREA_SR
+        )
+        if is_unincorporated is False:
+            exclusion_flags.append(
+                f"Unincorporated-status hard filter FAILED: {unincorporated_detail}"
+            )
+        elif is_unincorporated is None:
+            needs_review.append(f"Unincorporated-status check: {unincorporated_detail}")
+
         if exclusion_flags:
             needs_review.append(
                 "Possible statutory exclusion zone overlap — see flags. "
@@ -171,17 +184,19 @@ def run_county_scan(
             "statewide GIS layer found during research — search the "
             "county Clerk/Recorder directly."
         )
-        if parcel.jurisdiction is not None:
+
+        if parcel.sold_since_2025 is None:
             needs_review.append(
-                f"Jurisdiction field present ('{parcel.jurisdiction}') but "
-                f"NOT yet enforced as a hard unincorporated-only filter — "
-                f"confirm this parcel is unincorporated before proceeding."
+                "Post-1/1/2025 ownership-change status could not be "
+                "determined from this county's sale-date field(s) — "
+                "confirm manually before relying on single-owner-as-of-"
+                "1/1/2025 eligibility."
             )
-        else:
+        elif parcel.sold_since_2025:
             needs_review.append(
-                "This county's parcel layer has no confirmed jurisdiction "
-                "field — unincorporated status cannot be checked from this "
-                "data source at all; confirm manually."
+                "Parcel's most recent recorded sale is on or after "
+                "1/1/2025 — confirm this doesn't disqualify the "
+                "single-owner-as-of-1/1/2025 pathway requirement."
             )
 
         centroid_lat: Optional[float] = None
@@ -222,6 +237,7 @@ def run_county_scan(
             needs_manual_review=needs_review,
             centroid_lat=centroid_lat,
             centroid_lon=centroid_lon,
+            sold_since_2025=parcel.sold_since_2025,
         ))
 
     rows.sort(key=lambda r: (r.attractiveness_score or 0), reverse=True)

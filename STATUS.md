@@ -444,17 +444,24 @@ is groundwork only, picked back up next session.
   excluding those specific FLU category strings, not a spatial join. Not
   yet wired into exclusion logic (currently only informs
   `agricultural_flu_values`, not a separate unincorporated check).
-- **Pasco**: no jurisdiction field at all on the FLUM layer (confirmed via
-  fresh field grep). New finding this session: the layer is titled **"BOCC
-  Future Land Use"** (Board of County Commissioners) — Florida
-  municipalities each adopt their own separate FLU plan under home-rule
-  law, so this layer is *plausibly* already unincorporated-only by
-  construction, same as Nassau's. **This is an inference, NOT confirmed**
-  — has not been verified that incorporated Pasco cities (Dade City,
-  Zephyrhills, New Port Richey, Port Richey, San Antonio) are actually
-  absent from this layer's spatial extent. Decide before implementing:
-  spend a query confirming this (e.g. test a known point inside Zephyrhills
-  city limits against the layer), or accept it as a documented assumption.
+- **Pasco**: no jurisdiction field at all on the FLUM layer. **INFERENCE
+  DISPROVEN 2026-07-05** — live point-in-polygon query against the FLUM
+  layer (`Land_Use/MapServer/0`) at each incorporated city's City Hall
+  coordinate: Zephyrhills, Dade City, New Port Richey, and San Antonio all
+  correctly returned 0 features (consistent with unincorporated-only), but
+  **Port Richey City Hall (28.2612, -82.7168) returned a real feature** —
+  `FLU_CODE='RES-9'`, 266.7 acres, `OBJECTID=949` — not a boundary sliver,
+  a substantial designated area. A control point over known unincorporated
+  land (28.41, -82.66, the same parcel used elsewhere in this doc)
+  correctly hit too, confirming the query itself is sound. **Conclusion:
+  the "BOCC layer is unincorporated-only by home-rule construction"
+  assumption is FALSE, at least for Port Richey** — this layer cannot be
+  used as-is as a proxy for the unincorporated hard filter in Pasco, since
+  it would silently pass incorporated Port Richey parcels through as if
+  unincorporated. Pasco's unincorporated-status check remains an open gap;
+  do NOT wire "any FLUM hit = ok" logic for Pasco. Needs either a real
+  Pasco city-limits boundary layer (not yet searched for) or manual-review
+  fallback, same as St. Johns' pre-existing gap.
 
 ### 2. Wekiva Study Area / Everglades Protection Area exclusion — both real layers found, one real trap avoided
 
@@ -504,27 +511,91 @@ surfaced as a flag anywhere.
 
 ## Exact next step
 
-1. Get a go/no-go from Tyler on the Pasco BOCC-layer inference (item 1
-   above), then implement all three: the unincorporated hard filter
-   (per-county logic above), the Wekiva `WSA='yes'` + Everglades exclusion
-   checks in `exclusions.py` (replacing the placeholder constants), and a
-   post-1/1/2025-sale flag in `scan_orchestrator.py`/`ScanResultRow` using
-   the per-county fields in the table above.
-2. Consider re-running the same live `describe_layer` + distinct-values
+All three statutory gaps are now implemented and live-verified (see
+section above) — not yet committed/pushed or deployed to Render. Next
+session should:
+
+1. Commit and push these changes, then confirm via Render's deploy log
+   (not `/health`'s stale `code_version`) that the new commit is live,
+   same pattern as the demographics-endpoint deploy earlier in this file.
+2. Consider wiring `sold_since_2025` and the hard unincorporated
+   exclusion into `web/index.html`'s table columns/CSV export — the
+   backend now returns both, but the dashboard hasn't been updated to
+   surface them yet.
+3. Consider re-running the same live `describe_layer` + distinct-values
    spot-check that caught Pasco's wrong `flu_field` against the other
    three counties' FLUM layers, now that there's a concrete example of
    how an "UNCONFIRMED CARRYOVER guess" note in this file turned out to
    be silently wrong in production-relevant code.
-3. `max_candidates=25` default in `run_county_scan` has not been timed
+4. `max_candidates=25` default in `run_county_scan` has not been timed
    against a real full run yet — worth a rough wall-clock check before
    wiring this into a synchronous web request (see the function's own
-   docstring re: free-tier hosting timeouts).
+   docstring re: free-tier hosting timeouts). This pass added two more
+   live queries per candidate (unincorporated spatial join + Wekiva/
+   Everglades checks), so this is more relevant now than before.
+
+## All three statutory gaps implemented and live-verified — 2026-07-05
+
+New module `app/statutory_checks.py` holds the sale-date decoder
+(`sold_on_or_after_cutoff`) and the unincorporated spatial-join check
+(`check_unincorporated`), dispatched per-county via two new
+`CountyEndpoint` fields (`sale_date_encoding` + `sale_year_field`/
+`sale_month_field`/`sale_day_field`/`sale_date_field`, and
+`unincorporated_check` + `incorporated_flu_values`).
+
+1. **Pasco go/no-go, resolved NO-GO**: a live point-in-polygon query
+   against Pasco's BOCC FLUM layer at each incorporated city's City Hall
+   coordinate disproved the "unincorporated by home-rule construction"
+   inference — Port Richey City Hall (28.2612, -82.7168) intersects a
+   real 266.7-acre `FLU_CODE='RES-9'` feature, while Zephyrhills, Dade
+   City, New Port Richey, and San Antonio correctly returned zero
+   features. Pasco's `unincorporated_check` is left at `"manual_only"` —
+   no automated pass/fail wired in, to avoid a false positive.
+2. **Unincorporated hard filter wired in for Osceola/Nassau/St. Johns**,
+   via `scan_orchestrator.run_county_scan`'s per-parcel loop calling
+   `statutory_checks.check_unincorporated()`. A `False` result now
+   appends to `exclusion_flags` (hard filter), not just a soft
+   `needs_manual_review` note. Live-verified against real parcels: a
+   real Osceola ag parcel (PARCELNO `012527000000400000`) came back
+   jurisdiction `'R.C.I.D.'` (Reedy Creek Improvement District, Walt
+   Disney's special district) — correctly flagged as NOT unincorporated,
+   not a bug; a real St. Johns ag parcel (PIN `010832 0010`) correctly
+   passed with no incorporated-city FLU overlap.
+3. **Wekiva `WSA='yes'` + Everglades exclusion wired into
+   `exclusions.py`**, replacing both placeholder constants with the real
+   URLs found in the prior research pass. Also fixed a real latent bug
+   while wiring this in: `check_exclusions` was about to query these
+   layers using `parcel.geometry` with no `spatialReference` set — same
+   "ArcGIS Server omits spatialReference on a feature's geometry" bug
+   class already fixed once in `scan_orchestrator._buffer_esri_geometry`;
+   `inSR` would have silently defaulted to 4326 and misinterpreted
+   AREA_SR (3086) meter coordinates as lat/long. Fixed via a new
+   `_with_area_sr()` helper. Live-verified against a real Pasco parcel
+   (`35-24-16-0000-00100-0011`) — both queries ran cleanly with no
+   errors and correctly found no hits (Pasco isn't geographically near
+   either zone).
+4. **Post-1/1/2025 sale flag wired into `parcel_fetcher.CandidateParcel`
+   and `scan_orchestrator.ScanResultRow`** as `sold_since_2025:
+   Optional[bool]`. Sale-date decoding logic unit-verified standalone
+   against the exact sample values recorded in this file (Pasco
+   2018-05-02 → False, 2025-01-01 → True, 2024-12-31 → False; Nassau
+   2019 → False, 2025 → True; St. Johns serial 38520 → False; Osceola
+   epoch-millis 1690848000000 (2023-08-01) → False). Live-verified end-
+   to-end against a real Pasco parcel — `SALE_YEAR`/`SALE_MON`/
+   `SALE_DAY` came back `None` on that specific row (field exists and is
+   populated on other Pasco parcels per this file's earlier
+   confirmation; just null on this one) — correctly surfaces as "could
+   not be determined," not a guessed `False`.
+
+No committed unit test suite exists in this repo (searched — none
+found), so all of the above was verified via live one-off scripts against
+the real ArcGIS endpoints, then deleted; not left behind as test files.
 
 ## Known gaps (still true, not addressed this pass)
 
 5-year continuous ag-use history and public-services availability remain
-fully unaddressed (no data source research done yet). Wekiva/Everglades
-exclusion, single-owner-as-of-1/1/2025, and the unincorporated-status hard
-filter all have real, live, confirmed data sources now (see research pass
-above) but are NOT yet wired into any exclusion/scoring code — still
-manual-review-only until implemented.
+fully unaddressed (no data source research done yet). Pasco's
+unincorporated-status check remains manual-review-only (see NO-GO above).
+ACSC layer is still an unresolved Hub-page placeholder, not a real
+FeatureServer endpoint. Conservation easements and military installation
+buffers still have no automatable data source at all.

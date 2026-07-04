@@ -125,6 +125,59 @@ class CountyEndpoint:
     # parcel layer has no jurisdiction field at all.
     parcel_jurisdiction_field: Optional[str] = None
 
+    # -- Post-1/1/2025 ownership-change flag (statutory gap #3, research
+    # pass 2026-07-04) -- a real sale-date field exists on every county's
+    # parcel layer but the encoding differs; statutory_checks.py decodes
+    # per this value. One of:
+    #   "ymd_ints"     -- separate year/month/day integer fields (Pasco)
+    #   "year_only"    -- a single year integer field only (Nassau) --
+    #                     sufficient for this cutoff since sale year >=
+    #                     2025 is equivalent to "on or after 1/1/2025"
+    #                     with no month/day precision needed
+    #   "excel_serial" -- integer day count since 1899-12-30 (St. Johns;
+    #                     encoding INFERRED from value magnitude, not
+    #                     confirmed by documentation -- see STATUS.md)
+    #   "epoch_millis" -- standard Esri date field, ms since Unix epoch
+    #                     (Osceola)
+    sale_date_encoding: Optional[str] = None
+    sale_year_field: Optional[str] = None
+    sale_month_field: Optional[str] = None
+    sale_day_field: Optional[str] = None
+    sale_date_field: Optional[str] = None  # single combined field, for excel_serial/epoch_millis
+
+    # -- Unincorporated-status hard filter (statutory gap #1, research
+    # pass 2026-07-04). One of:
+    #   "flum_jurisdiction_join"          -- parcel layer's own jurisdiction
+    #                                        field is NULL on every row;
+    #                                        spatially join the candidate
+    #                                        against the FLUM layer and read
+    #                                        jurisdiction_field off whichever
+    #                                        FLUM polygon(s) intersect it
+    #                                        (Osceola)
+    #   "already_filtered"                -- the layer is pre-scoped to
+    #                                        unincorporated land at the
+    #                                        source, no query needed (Nassau)
+    #   "flum_incorporated_flu_exclude"   -- no jurisdiction field anywhere;
+    #                                        incorporated cities appear as
+    #                                        their own FLU category strings
+    #                                        on the FLUM layer
+    #                                        (incorporated_flu_values below)
+    #                                        -- spatially join and exclude
+    #                                        those exact values (St. Johns)
+    #   "manual_only"                     -- no automated check available.
+    #                                        A live point-in-polygon query
+    #                                        DISPROVED the "layer is
+    #                                        unincorporated-only by
+    #                                        home-rule construction"
+    #                                        assumption for Pasco (confirmed
+    #                                        2026-07-05: Port Richey City
+    #                                        Hall intersects a real 266.7-
+    #                                        acre FLUM feature) -- do not
+    #                                        wire an automated pass/fail
+    #                                        here, see STATUS.md
+    unincorporated_check: str = "manual_only"
+    incorporated_flu_values: tuple = field(default_factory=tuple)
+
 
 COUNTIES: dict[str, CountyEndpoint] = {
 
@@ -221,6 +274,16 @@ COUNTIES: dict[str, CountyEndpoint] = {
         parcel_owner_field="NAD_NAME_1",
         parcel_owner_field_2="NAD_NAME_2",
         parcel_id_field="ParcelID",
+        # Confirmed via live sample: SALE_YEAR/SALE_MON/SALE_DAY are
+        # separate full-precision ints (e.g. 2018-05-02, $30,000 SALE_AMT).
+        sale_date_encoding="ymd_ints",
+        sale_year_field="SALE_YEAR",
+        sale_month_field="SALE_MON",
+        sale_day_field="SALE_DAY",
+        # unincorporated_check left at default "manual_only" -- see
+        # CountyEndpoint docstring: a live query disproved the assumption
+        # this county's FLUM layer is unincorporated-only by construction
+        # (confirmed 2026-07-05, Port Richey City Hall hit).
     ),
 
     "sarasota": CountyEndpoint(
@@ -364,6 +427,22 @@ COUNTIES: dict[str, CountyEndpoint] = {
         parcel_acreage_field=None,  # not populated -- compute from geometry
         parcel_owner_field="PRP_NAME",
         parcel_id_field="PIN",
+        # SALEDATE values like 38520/37741 -- near-certainly Excel/OLE
+        # serial day count (days since 1899-12-30), NOT YYYYMMDD (wrong
+        # magnitude for that). Encoding INFERRED from value magnitude, not
+        # confirmed by documentation -- flagged as such in STATUS.md.
+        sale_date_encoding="excel_serial",
+        sale_date_field="SALEDATE",
+        # No jurisdiction field anywhere on this county's layers (confirmed
+        # via field grep) -- incorporated cities appear as their own
+        # FUTLUSE1 categories instead (28-category live distinct-values
+        # query). These are the exact incorporated-city values found.
+        unincorporated_check="flum_incorporated_flu_exclude",
+        incorporated_flu_values=(
+            "CITY OF ST. AUGUSTINE",
+            "CITY OF ST. AUGUSTINE BEACH",
+            "TOWN OF MARINELAND",
+        ),
     ),
     "nassau": CountyEndpoint(
         id="nassau",
@@ -418,6 +497,14 @@ COUNTIES: dict[str, CountyEndpoint] = {
         parcel_acreage_field="ACRES",
         parcel_owner_field="ONAME",
         parcel_id_field="PARCELID",
+        # SALEYR1 is year-only (no month/day) -- confirmed sufficient for
+        # this specific cutoff, since the statute's exact 1/1/2025 date
+        # means "sale year >= 2025" has no precision loss vs. a full date.
+        sale_date_encoding="year_only",
+        sale_year_field="SALEYR1",
+        # FLUM layer is pre-scoped to unincorporated land at the source
+        # (see jurisdiction_field note above) -- no spatial join needed.
+        unincorporated_check="already_filtered",
     ),
     "osceola": CountyEndpoint(
         id="osceola",
@@ -487,6 +574,15 @@ COUNTIES: dict[str, CountyEndpoint] = {
         # ("Jurisdiction") in the parcel layer's outFields fails with an
         # ArcGIS 400 error, since that field doesn't exist on this layer.
         parcel_jurisdiction_field="Jurisdicti",
+        # SaleDate/PrevSaleDa are standard Esri epoch-millis date fields --
+        # cleanest encoding of the four counties (confirmed live sample:
+        # 1690848000000 = 2023-08-01).
+        sale_date_encoding="epoch_millis",
+        sale_date_field="SaleDate",
+        # Parcel layer's own Jurisdicti/JurisDesc are NULL on every sampled
+        # row (confirmed 2026-07-03) -- the FLUM layer's Jurisdiction field
+        # is populated and must be reached via a spatial join instead.
+        unincorporated_check="flum_jurisdiction_join",
     ),
 }
 

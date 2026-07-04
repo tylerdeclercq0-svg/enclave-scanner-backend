@@ -60,6 +60,7 @@ from typing import Callable, Optional
 
 from arcgis_client import query_layer
 from county_registry import COUNTIES, CountyEndpoint
+import statutory_checks
 
 
 SQM_PER_ACRE = 4046.8564224
@@ -83,6 +84,10 @@ class CandidateParcel:
     owner_name_2: Optional[str]
     jurisdiction: Optional[str]
     geometry: Optional[dict]
+    # True/False if a post-1/1/2025 sale is determinable from this
+    # county's parcel-layer sale-date field(s), None if not (missing
+    # field, unparseable value, or county has no sale_date_encoding set).
+    sold_since_2025: Optional[bool] = None
 
 
 def _signed_ring_area(ring: list[list[float]]) -> float:
@@ -276,7 +281,9 @@ def fetch_candidate_parcels(
 
     out_fields_set = {county.parcel_use_code_field, county.parcel_owner_field,
                        county.parcel_owner_field_2, county.parcel_id_field,
-                       county.parcel_jurisdiction_field, county.parcel_acreage_field}
+                       county.parcel_jurisdiction_field, county.parcel_acreage_field,
+                       county.sale_year_field, county.sale_month_field,
+                       county.sale_day_field, county.sale_date_field}
     out_fields = ",".join(f for f in out_fields_set if f)
 
     candidates: list[CandidateParcel] = []
@@ -311,6 +318,7 @@ def fetch_candidate_parcels(
             owner_name_2=attrs.get(county.parcel_owner_field_2) if county.parcel_owner_field_2 else None,
             jurisdiction=attrs.get(county.parcel_jurisdiction_field) if county.parcel_jurisdiction_field else None,
             geometry=geometry,
+            sold_since_2025=statutory_checks.sold_on_or_after_cutoff(county, attrs),
         ))
 
         if len(candidates) >= max_candidates:

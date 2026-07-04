@@ -315,6 +315,7 @@
     <div class="masthead-links">
       <button class="linklike" id="howToLink">How to use this tool</button>
       <button class="linklike" id="whatThisDoesLink">What this does / doesn't do &amp; methodology</button>
+      <button class="linklike" id="settingsLink">Settings</button>
     </div>
   </header>
 
@@ -337,16 +338,18 @@
       <h3 class="section-label" id="countyCoverageLabel">County coverage</h3>
       <div class="county-grid" id="countyGrid"><div class="county-meta">Loading from /api/counties&hellip;</div></div>
     </div>
-    <div class="panel">
-      <h3 class="section-label">Backend</h3>
-      <div class="filter-grid">
-        <div class="field" style="grid-column:span 2;">
-          <label>API base URL</label>
-          <input type="text" id="apiBase" placeholder="https://your-render-url.onrender.com">
-        </div>
-      </div>
-      <div class="status" id="apiStatus"></div>
+  </div>
+
+  <!-- Settings live in the masthead's Settings overlay, not in the main
+       flow. The apiBase input + apiStatus stay in the DOM (hidden here so
+       existing JS keeps finding them) and are moved into the Settings
+       overlay's body when it opens. -->
+  <div style="display:none;" id="settingsHost">
+    <div class="field" style="grid-column:span 2;">
+      <label>API base URL</label>
+      <input type="text" id="apiBase" placeholder="https://your-render-url.onrender.com">
     </div>
+    <div class="status" id="apiStatus"></div>
   </div>
 
   <!-- STEP 2 -->
@@ -562,13 +565,11 @@ function renderCounties(){
   counties.forEach(c => {
     const card = document.createElement('label');
     card.className = 'county-card' + (selectedCounties.has(c.id) ? ' active' : '') + (c.live ? '' : ' disabled');
-    const servicePath = (c.flum_service_url || '').split('/').slice(-3).join('/');
     card.innerHTML = `
       <input type="radio" name="countyPick" ${selectedCounties.has(c.id) ? 'checked' : ''} ${c.live ? '' : 'disabled'} data-id="${c.id}">
       <div>
         <div class="county-name">${c.name}</div>
         <div class="county-meta">Pop. ${fmtPop(c.population)}</div>
-        <div class="county-meta">${servicePath}</div>
         ${c.live ? '' : '<div class="coming-soon-badge">Coming soon — field names unconfirmed</div>'}
       </div>`;
     if(c.live){
@@ -1550,6 +1551,60 @@ document.getElementById('whatThisDoesLink').addEventListener('click', () => {
   document.getElementById('overlayContent').innerHTML = buildWhatThisDoesHtml();
   document.getElementById('overlayBackdrop').classList.add('open');
 });
+
+// Settings overlay: moves the API-base + connection-status controls out
+// of the main scan flow (Step 1) and into a dedicated settings panel the
+// user only opens when they need to change backend config. Uses the same
+// DOM nodes throughout their lifetime (attached to #settingsHost by
+// default, moved into the overlay when opened, restored on close) so
+// existing JS references to `apiBase`/`apiStatus` keep working without
+// changes.
+const _SETTINGS_LINK = document.getElementById('settingsLink');
+const _SETTINGS_HOST = document.getElementById('settingsHost');
+let _settingsMountPoint = null;
+
+_SETTINGS_LINK.addEventListener('click', () => {
+  openOverlayRowKey = null;
+  document.getElementById('overlayContent').innerHTML = `
+    <div class="overlay-title">Settings</div>
+    <div class="overlay-sub">Backend connection and other tool-level configuration</div>
+    <div class="overlay-section">
+      <h4>Backend</h4>
+      <p class="info-copy" style="margin-bottom:12px;font-size:13px;color:var(--ink-faint);">
+        The API base URL points at the deployed backend (Render by default). Change this only if
+        you're running a local dev backend, testing a preview deploy, or the production URL has
+        moved. The main scan flow assumes this is already configured — you shouldn't need to visit
+        this panel during normal use.
+      </p>
+      <div id="settingsMountPoint"></div>
+    </div>`;
+  _settingsMountPoint = document.getElementById('settingsMountPoint');
+  // Move the actual apiBase/apiStatus nodes into the overlay so they
+  // keep the same identity + event bindings; the field-grid wrapper
+  // around them preserves the styling.
+  const wrapper = document.createElement('div');
+  wrapper.className = 'filter-grid';
+  while(_SETTINGS_HOST.firstChild) wrapper.appendChild(_SETTINGS_HOST.firstChild);
+  _settingsMountPoint.appendChild(wrapper);
+  document.getElementById('overlayBackdrop').classList.add('open');
+});
+
+// When the overlay closes (via close button, backdrop click, or Escape),
+// restore the settings nodes to their hidden home so subsequent openings
+// find them where they belong.
+function _restoreSettingsNodes(){
+  if(_settingsMountPoint && _settingsMountPoint.firstChild){
+    // Move each child back to the hidden #settingsHost.
+    const wrapper = _settingsMountPoint.firstChild;
+    while(wrapper.firstChild) _SETTINGS_HOST.appendChild(wrapper.firstChild);
+  }
+  _settingsMountPoint = null;
+}
+document.getElementById('overlayClose').addEventListener('click', _restoreSettingsNodes);
+document.getElementById('overlayBackdrop').addEventListener('click', (e) => {
+  if(e.target.id === 'overlayBackdrop') _restoreSettingsNodes();
+});
+document.addEventListener('keydown', (e) => { if(e.key === 'Escape') _restoreSettingsNodes(); });
 
 // ---------------------------------------------------------------------
 // Step 4 — next steps, CSV export, checklist export

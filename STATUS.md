@@ -617,11 +617,216 @@ No committed unit test suite exists in this repo (searched — none
 found), so all of the above was verified via live one-off scripts against
 the real ArcGIS endpoints, then deleted; not left behind as test files.
 
+## Next-step follow-ups closed out — 2026-07-06
+
+1. **FLUM field-name spot-check re-run against Nassau, St. Johns, Osceola**:
+   live `describe_layer` + distinct-values queries against all three
+   confirm zero drift — `flu_field`/`jurisdiction_field`/
+   `agricultural_flu_values`/`incorporated_flu_values` in
+   `county_registry.py` all still match the real live schema exactly as
+   documented above (e.g. Nassau's `FLUM` field still returns
+   `'Agriculture'` among 22 real distinct values; St. Johns' `FUTLUSE1`
+   still has all three `incorporated_flu_values` entries present among 28
+   categories; Osceola's `FLU`/`Jurisdiction` fields and
+   `'rural/agricultural'` value confirmed present). No code changes
+   needed — this was a verification pass only, run via a deleted one-off
+   script (same convention as prior live checks in this file).
+2. **`max_candidates=25` timed against a real local run**: Pasco — 25
+   candidates in 48.4s (1.94s/candidate); Osceola — 25 candidates in
+   54.8s (2.19s/candidate), the more expensive path since it's the one
+   county running the unincorporated FLUM spatial join per-candidate on
+   top of the encirclement + Wekiva/Everglades checks. Both measured
+   locally (`.venv312`, no Render network hop), so a real Render-hosted
+   request will run slower than this. ~50s for the current default is
+   already close to common free-tier reverse-proxy timeout thresholds
+   (e.g. Heroku's router hard-cuts at 30s; Render's own limit is less
+   strictly documented but not unlimited) — worth lowering the default
+   `max_candidates` (e.g. to ~10–15) or moving to a background-job/poll
+   pattern before this is relied on for a real production scan, per the
+   function's own docstring caveat. Not changed this pass — a timing
+   measurement only, no code changed.
+
+## Session 2026-07-06: rebuild to match "Falcone Group v3" mockup + Ledger & Brass restyle
+
+Tyler asked for a pure visual restyle of `web/index.html` to a new "Ledger &
+Brass" design direction (tokens below). While scoping that, he shared
+screenshots + two PDFs of a hand-built mockup ("Enclave Scanner v3") showing
+a materially different UX he actually wanted: a 4-step wizard, richer
+filters, and parcels grouped into Confident/Possible/Unlikely tiers. He
+confirmed (via plan-mode questions) this supersedes the restyle-only
+request — it's a real feature rebuild, not a CSS swap. Full plan is still
+on disk at `C:\Users\tyler\.claude\plans\jolly-orbiting-pudding.md` if the
+reasoning behind any decision below needs to be re-derived.
+
+**Before the pivot**, two small pieces were also built and verified this
+session, on top of the OLD single-scroll-page dashboard (now superseded by
+the rebuild below, but the underlying backend/JS logic they added was
+carried forward):
+- A parcel detail overlay (click a result row for full detail: facts,
+  encirclement bar + pathway descriptions, score breakdown, exclusions/
+  review notes, inline demographics pull).
+- A "How to use this tool" panel, a "What this does / doesn't do" panel
+  (split out of the old single caveats footer), and a downloadable
+  Manual Review Checklist export (`.txt`) alongside the existing CSV
+  export.
+
+### Decisions locked with Tyler before implementing
+
+- **Counties**: keep all of them in the registry (the mockup's 7 —
+  Hillsborough, Orange, Pasco, Sarasota, Manatee, Brevard, Volusia — plus
+  Nassau/St. Johns/Osceola, the 4 more rigorously ground-truthed this
+  project has since added). Live/confirmed ones selectable; unconfirmed
+  ones (Orange, Sarasota, Manatee — field names/URLs never
+  describe_layer-verified) shown shaded "coming soon."
+- **Water/sewer estimate**: research a real source now, not a stub. Found
+  and live-verified — see below.
+- **Map view**: deferred as a follow-up. List view only, built fully.
+- **Restyle timing**: Ledger & Brass tokens applied directly on the new
+  wizard structure, not on the old page first.
+
+### Ledger & Brass design tokens (now live in `web/index.html`)
+
+```
+--ink:#1e2a24        --paper:#faf9f6      --paper-raised:#ffffff
+--line:#e2ddd0       --line-strong:#d8d3c4
+--brass:#8a6d1f      --brass-dim:#eee3c2  --brass-800:#6b5218
+--clay:#8b3a2f       --clay-dim:#f3ded9   --ink-faint:#8a8574
+```
+Display/headers: Source Serif 4 (700). Body/UI: Inter. Data/labels/mono
+(eyebrows, table headers, badges, parcel IDs, coordinates): IBM Plex Mono.
+2-4px border-radius, 1px hairline borders as the primary separator (not
+shadows), no gradients. Score/status pills use brass-dim/brass-800 for
+positive states and clay/clay-dim for exclusions/warnings — no red/green
+traffic-light colors anywhere.
+
+### New real data source found and live-verified: FDOH's FLWMI (water/sewer)
+
+`https://gis.floridahealth.gov/server/rest/services/FLWMI/FLWMI_Wastewater/MapServer/0`
+— a real statewide parcel-level layer with `WW` (wastewater) / `DW`
+(drinking water) coded values that already bake in a confidence tier
+(`Known*`/`Likely*`/`SWL*` = Somewhat Likely/`UNDT`/`UNK`/`NA`), exactly
+matching what the mockup claimed existed. New module `app/flwmi_client.py`
+wraps it. Two real things confirmed live, not assumed:
+- This host silently returns the HTML "ArcGIS REST Services Directory"
+  page (still HTTP 200) if `f=json` is sent in a POST body instead of the
+  URL query string — the opposite of every other ArcGIS host in this
+  project (which all accept POST fine, per `arcgis_client.py`'s existing
+  design). `flwmi_client.py` deliberately bypasses `arcgis_client.query_layer`
+  and does a plain GET instead, since this lookup never needs geometry
+  anyway.
+- `PARCELNO` join key format matches each county's own parcel-ID field
+  exactly for Pasco and Osceola (confirmed with real live samples); for
+  St. Johns it does NOT (`PIN` is space-separated, FLWMI's is not) — a new
+  `CountyEndpoint.flwmi_parcel_id_transform="strip_spaces"` handles it,
+  confirmed live. Nassau's format looks consistent but hasn't been
+  cross-checked against one specific real Nassau `PARCELID` sample yet.
+
+### Real bug found and fixed: `exclusion_flags` was never actually empty
+
+`exclusions.check_exclusions()` used to unconditionally append 3
+boilerplate "not automated, verify manually" reminders (ACSC, conservation
+easements, military buffers) into the SAME list as genuine hard hits
+(Wekiva/Everglades/unincorporated-check failures). That meant every real
+parcel's `exclusion_flags` was non-empty even when nothing actually
+applied — silently defeating the dashboard's "clear" vs. "N EXCLUDED"
+distinction added earlier this session, and making a "no manual review
+needed" confidence tier structurally impossible. Fixed: the 3 boilerplate
+reminders moved to a new `exclusions.standing_manual_notes()`, merged into
+`needs_manual_review` unconditionally in `scan_orchestrator.py` instead.
+Live-verified end-to-end against a real Pasco scan — `exclusion_flags`
+now genuinely comes back `[]` for parcels with no real hit.
+
+### New backend fields/logic, all live-verified against a real Pasco scan
+
+- `single_owner_signal` (`CandidateParcel`/`ScanResultRow`) — `True`/`False`
+  from whether `owner_name_2` is populated on the parcel's own record,
+  `None` when a county has no co-owner field at all (Nassau, St. Johns) —
+  deliberately not assumed single-owner just because the data's missing.
+  `require_single_owner` (previously a dead, unused field on `main.py`'s
+  now-deleted `ScanRequest`) is now a real query param that filters
+  server-side in `parcel_fetcher.fetch_candidate_parcels`.
+- `flu_taxonomy.py` (new): `classify_density()` — a keyword classifier
+  (rural/suburban/urban/unknown) applied to the dominant neighboring FLU
+  value already available per-segment in `EncirclementResult.segments`
+  (no new query); `determine_own_flu()` — the candidate's own current FLU
+  designation, found via area-overlap against the same `neighbor_features`
+  already fetched for encirclement (also no new query). Verified live:
+  works well against descriptive FLU strings (Osceola's
+  `'rural/agricultural'`, St. Johns' `'AGRICULTURE'`); legitimately comes
+  back `"unknown"` for Pasco's abbreviated codes (`RES-6`, `PD`) since
+  those aren't descriptive keywords — an honest gap, not a crash or a
+  guess, flagged as a real limitation of this keyword approach.
+- `scoring.classify_confidence()` — Confident/Possible/Unlikely, unit- and
+  live-verified against all three outcomes: Unlikely = no pathway matched
+  at all; Confident = a pathway matched AND no real exclusion hit AND no
+  co-owner on record AND water/sewer confidence is Known/Likely; Possible
+  = pathway matched but something above isn't confirmed.
+- `county_registry.py`: added `population` (approximate 2024 Census
+  estimates, public data, not live-queried) and `confirmed_live` (explicit
+  per-county flag, replacing `main.py`'s old ad hoc `flu_field` heuristic)
+  for all 10 counties.
+- `/api/counties/{id}/scan` gained real query params: `require_single_owner`,
+  `min_encirclement_pct`, `surrounding_density`. `flum_character` filtering
+  exists in `scan_orchestrator.run_county_scan()` but isn't wired to a
+  populated dropdown in the UI yet (no per-county FLU category list built
+  out — left as "Any" only, honestly, rather than a fake-looking dropdown).
+
+Live end-to-end confirmation: a real Pasco scan (5 candidates) came back
+with correct, differentiated `confidence_tier`, `single_owner_signal`,
+real FDOH `water_source`/`wastewater_method`/`water_sewer_confidence`, and
+`flum_character` values — genuinely wired, not synthetic.
+
+### Frontend: `web/index.html` fully rebuilt as a 4-step wizard
+
+Masthead (brass eyebrow "FALCONE GROUP" + serif "Enclave Scanner" title) →
+step bar (Select county → Run scan → Review candidates → Verify and
+export, Back/Continue nav, state persists client-side across steps, no
+reloads) → Step 1 county cards (population, shaded "coming soon" for
+unconfirmed counties) → Step 2 filter panel (Size & Ownership: acreage,
+DOR-range display-only dropdown, ownership dropdown wired to
+`require_single_owner`; Character & Density: FLUM character (display-only
+for now), surrounding density, min encirclement %, all wired) → Step 3
+results grouped into Confident/Possible/Unlikely (Unlikely collapsed by
+default, "Show N unlikely properties" toggle), row click reopens the
+parcel detail overlay (now extended with water/sewer, ownership signal,
+FLUM character/density, confidence-tier badge) → Step 4 keeps the CSV +
+Manual Review Checklist exports and adds a new "Your next steps, in
+order" panel — a real ordered narrative generated from each
+selected/scanned parcel's actual flags (title work, Property Appraiser
+call, public-services confirmation referencing the real water/sewer
+estimate, Planning Dept call re: exclusion zones/Option E, re-review of
+"possible"-tier parcels). "How to use this tool" and "What this does /
+doesn't do & methodology" are now overlay panels with content adapted
+from Tyler's two reference PDFs, corrected to reflect this project's
+actual current automation status rather than the mockup's claims.
+
+Verified via the preview tools (`.claude/launch.json`'s `web` config,
+mock `results`/`counties` injected via `preview_eval` since CORS still
+blocks the real Render backend from localhost, same approach as prior
+sessions): county shading, step navigation, tiered grouping + unlikely
+toggle, the extended detail overlay, the Step 4 next-steps panel, and the
+"what this does" info overlay all confirmed rendering correctly with the
+new tokens, no console errors.
+
+**Deliberately left out, not an oversight**: the mockup's "CERTIFICATION
+WINDOW CLOSES JAN 1, 2028" badge and its "SB 686 / CH. 2026-34" chapter-law
+citation (vs. this codebase's existing "SB 686 / HB 691, F.S.
+163.3164(4)" citation used everywhere else). Neither could be verified
+against anything already in this project — asked Tyler whether he has the
+real enrolled-bill chapter number and certification deadline; waiting on
+that answer before adding either, rather than presenting an unverified
+legal date/citation in a tool meant to be relied on for legal screening.
+
 ## Known gaps (still true, not addressed this pass)
 
-5-year continuous ag-use history and public-services availability remain
-fully unaddressed (no data source research done yet). Pasco's
-unincorporated-status check remains manual-review-only (see NO-GO above).
-ACSC layer is still an unresolved Hub-page placeholder, not a real
-FeatureServer endpoint. Conservation easements and military installation
-buffers still have no automatable data source at all.
+5-year continuous ag-use history and transportation/schools/recreation
+public-services availability remain fully unaddressed (no data source
+found). Water/sewer specifically is now Estimated, not a gap — see FLWMI
+above. Pasco's unincorporated-status check remains manual-review-only
+(see NO-GO above). ACSC layer is still an unresolved Hub-page placeholder,
+not a real FeatureServer endpoint. Conservation easements and military
+installation buffers still have no automatable data source at all. Map
+view is deferred (List view only, built fully). `flum_character` filtering
+has no populated per-county dropdown yet (backend supports it; UI doesn't
+expose real options). Nassau's FLWMI `PARCELNO` join format is assumed,
+not cross-checked against one specific real sample yet.

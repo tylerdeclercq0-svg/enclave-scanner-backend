@@ -84,6 +84,22 @@ class CountyEndpoint:
     usb_layer_url: Optional[str] = None
     agricultural_flu_values: tuple = field(default_factory=tuple)
 
+    # -- Population + live-confirmation status (added for the wizard UI
+    # rebuild, 2026-07-06). population is an approximate 2024 Census
+    # Bureau county population estimate (public data, not live-queried
+    # from any GIS layer) -- used only for the statutory <=1.75M county
+    # population cap display/check, s. 163.3164(4), F.S. confirmed_live
+    # reflects whether THIS county's FLUM/parcel field names have
+    # actually been verified via a live describe_layer() call (see each
+    # county's own `notes` above) -- Orange, Sarasota, and Manatee are
+    # explicitly NOT set True below despite being reachable endpoints,
+    # since their exact field names are still unconfirmed guesses per
+    # their own notes. Deliberately separate from the old ad hoc
+    # flu_field heuristic in main.py's list_counties(), which conflated
+    # "reachable" with "field names confirmed."
+    population: int = 0
+    confirmed_live: bool = False
+
     # -- Per-county PARCEL/cadastral layer (separate from the FLUM layer
     # above) -- confirmed live via describe_layer (?f=pjson) the same way
     # as the FLUM layer, per-county, 2026-07-03. This is what acreage/
@@ -178,6 +194,19 @@ class CountyEndpoint:
     unincorporated_check: str = "manual_only"
     incorporated_flu_values: tuple = field(default_factory=tuple)
 
+    # -- FLWMI (Florida Water Management Inventory, FDOH) join key
+    # transform, added alongside flwmi_client.py 2026-07-06. Confirmed
+    # live: FLWMI's PARCELNO matches Pasco's ParcelID and Osceola's
+    # PARCELNO byte-for-byte with no transform. St. Johns is the one
+    # confirmed exception -- FLWMI's PARCELNO is a bare 10-digit string
+    # (e.g. "0000200010") but this county's own PIN field is
+    # space-separated (e.g. "010832 0010") -- "strip_spaces" tells
+    # flwmi_client to remove spaces from the local PIN before joining.
+    # None means "join with the parcel id field as-is, no transform
+    # needed" (confirmed for Pasco/Osceola; assumed-but-not-yet-cross-
+    # checked-against-a-real-sample for Nassau, same dash pattern).
+    flwmi_parcel_id_transform: Optional[str] = None
+
 
 COUNTIES: dict[str, CountyEndpoint] = {
 
@@ -194,6 +223,8 @@ COUNTIES: dict[str, CountyEndpoint] = {
         acreage_field="ACREAGE",
         agricultural_flu_values=("A", "A/M", "A/R", "AE"),
         usb_layer_url=None,
+        population=1584000,
+        confirmed_live=True,
         notes=(
             "Confirmed live FeatureLayer with advanced queries, full polygon "
             "geometry, FLU code + description + acreage + jurisdiction. "
@@ -213,6 +244,8 @@ COUNTIES: dict[str, CountyEndpoint] = {
         jurisdiction_field=None,
         acreage_field=None,
         agricultural_flu_values=("Rural/Agricultural",),
+        population=1466000,
+        confirmed_live=False,  # field names unconfirmed, see notes below
         notes=(
             "Confirmed live FeatureLayer. Exact field names should be "
             "re-confirmed via /query?f=pjson before production use."
@@ -241,6 +274,8 @@ COUNTIES: dict[str, CountyEndpoint] = {
         jurisdiction_field=None,
         acreage_field=None,
         agricultural_flu_values=("AG", "AG/R"),
+        population=587000,
+        confirmed_live=True,
         notes=(
             "FLUM layer (Land_Use/MapServer/0): CONFIRMED via live "
             "describe_layer + full distinct-values query 2026-07-03 "
@@ -299,6 +334,8 @@ COUNTIES: dict[str, CountyEndpoint] = {
         acreage_field=None,
         agricultural_flu_values=("Rural", "Semi-Rural"),
         usb_layer_url=None,
+        population=448000,
+        confirmed_live=False,  # field name + exact URL unconfirmed, see notes
         notes=(
             "Substantially resolved but field name and exact FeatureServer "
             "URL still need one describe_layer() confirmation call."
@@ -317,6 +354,8 @@ COUNTIES: dict[str, CountyEndpoint] = {
         jurisdiction_field="CITY_NAME",
         acreage_field="Acres",
         agricultural_flu_values=("Agriculture/Rural", "AG", "A"),
+        population=430000,
+        confirmed_live=False,  # field name unconfirmed, see notes below
         notes=(
             "Substantially resolved; alternate host www.mymanatee.org/"
             "gisits/rest/services/opendata/Planning/FeatureServer available "
@@ -336,6 +375,8 @@ COUNTIES: dict[str, CountyEndpoint] = {
         jurisdiction_field=None,
         acreage_field=None,
         agricultural_flu_values=("AGRIC",),
+        population=647000,
+        confirmed_live=True,
         notes=(
             "Fully resolved. Native spatial reference is WKID 2881 "
             "(Florida State Plane East, feet) -- reproject before combining "
@@ -356,6 +397,8 @@ COUNTIES: dict[str, CountyEndpoint] = {
         jurisdiction_field=None,
         acreage_field=None,
         agricultural_flu_values=("RURAL",),
+        population=583000,
+        confirmed_live=True,
         notes=(
             "Fully resolved. Native spatial reference is WKID 2881, same "
             "as Brevard -- reproject before combining with web-mercator "
@@ -397,6 +440,8 @@ COUNTIES: dict[str, CountyEndpoint] = {
         # "agricultural" for statute purposes -- flagged separately, not
         # included below until reviewed.
         agricultural_flu_values=("AGRICULTURE",),
+        population=273000,
+        confirmed_live=True,
         notes=(
             "FLUM layer CONFIRMED live + describe_layer-tested. Values "
             "CITY OF ST. AUGUSTINE / CITY OF ST. AUGUSTINE BEACH / TOWN "
@@ -443,6 +488,11 @@ COUNTIES: dict[str, CountyEndpoint] = {
             "CITY OF ST. AUGUSTINE BEACH",
             "TOWN OF MARINELAND",
         ),
+        # Confirmed live 2026-07-06: FLWMI's PARCELNO for this county is a
+        # bare 10-digit string ("0000200010") with no spaces, but this
+        # county's own PIN field is space-separated ("010832 0010") --
+        # strip spaces from PIN before joining to FLWMI.
+        flwmi_parcel_id_transform="strip_spaces",
     ),
     "nassau": CountyEndpoint(
         id="nassau",
@@ -470,6 +520,8 @@ COUNTIES: dict[str, CountyEndpoint] = {
         acreage_field="Acre",
         # Confirmed via live distinct-values query (23 categories total).
         agricultural_flu_values=("Agriculture",),
+        population=114000,
+        confirmed_live=True,
         notes=(
             "FLUM layer CONFIRMED live + describe_layer-tested; layer ID "
             "is 156, not 0 -- the FeatureServer root must be checked for "
@@ -529,6 +581,8 @@ COUNTIES: dict[str, CountyEndpoint] = {
         # data ('rural/agricultural'), not title case -- filter must
         # match exact case or use UPPER()/case-insensitive comparison.
         agricultural_flu_values=("rural/agricultural",),
+        population=449000,
+        confirmed_live=True,
         notes=(
             "FLUM layer CONFIRMED live + describe_layer-tested; layer id "
             "is 12, not 0. Jurisdiction field is clean and directly "

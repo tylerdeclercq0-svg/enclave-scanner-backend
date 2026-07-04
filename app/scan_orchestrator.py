@@ -38,6 +38,8 @@ from parcel_fetcher import fetch_candidate_parcels, CandidateParcel, AREA_SR
 from encirclement import compute_encirclement, determine_pathways, EncirclementResult, get_centroid_lat_lon
 from arcgis_client import query_layer
 import exclusions
+import flu_taxonomy
+import flwmi_client
 import scoring
 import statutory_checks
 
@@ -61,6 +63,13 @@ class ScanResultRow:
     centroid_lat: Optional[float] = None
     centroid_lon: Optional[float] = None
     sold_since_2025: Optional[bool] = None
+    single_owner_signal: Optional[bool] = None
+    water_source: Optional[str] = None
+    wastewater_method: Optional[str] = None
+    water_sewer_confidence: str = "Unknown"
+    flum_character: Optional[str] = None
+    surrounding_density: str = "unknown"
+    confidence_tier: str = "unlikely"
 
 
 def run_county_scan(
@@ -69,6 +78,10 @@ def run_county_scan(
     max_acreage: float = 1280.0,
     fetch_neighbor_buffer_feet: float = 50.0,
     max_candidates: int = 25,
+    require_single_owner: bool = False,
+    min_encirclement_pct: Optional[float] = None,
+    flum_character_filter: Optional[str] = None,
+    surrounding_density_filter: Optional[str] = None,
 ) -> list[ScanResultRow]:
     """
     Run the full pipeline for one county and return scored, ranked
@@ -101,6 +114,7 @@ def run_county_scan(
         min_acreage=min_acreage,
         max_acreage=max_acreage,
         max_candidates=max_candidates,
+        require_single_owner=require_single_owner,
     )
 
     rows: list[ScanResultRow] = []
@@ -109,6 +123,8 @@ def run_county_scan(
         needs_review: list[str] = []
         pathways: list[int] = []
         pct_qualifying: Optional[float] = None
+        flum_character: Optional[str] = None
+        surrounding_density = "unknown"
 
         if parcel.geometry is None:
             needs_review.append(
@@ -149,6 +165,16 @@ def run_county_scan(
                         "neither is fully automated yet. Don't treat this as "
                         "a definitive disqualification."
                     )
+                # FLUM character (candidate's own designation) + surrounding
+                # density bucket (dominant neighboring designation) — both
+                # reuse neighbor_features/segments already fetched above,
+                # no new query. Best-effort classification, see
+                # flu_taxonomy.py's own caveat.
+                flum_character = flu_taxonomy.determine_own_flu(
+                    parcel.geometry, neighbor_features, county.flu_field
+                )
+                dominant_neighbor_flu = flu_taxonomy.dominant_segment_flu(encirclement.segments)
+                surrounding_density = flu_taxonomy.classify_density(dominant_neighbor_flu)
             except ImportError:
                 needs_review.append(
                     "Shapely not installed in this environment — "
@@ -156,6 +182,13 @@ def run_county_scan(
                 )
             except Exception as exc:  # noqa: BLE001 — surface any geometry/query failure to the reviewer rather than silently dropping the parcel
                 needs_review.append(f"Encirclement test failed to run: {exc}")
+
+        if min_encirclement_pct is not None and (pct_qualifying or 0) < min_encirclement_pct:
+            continue
+        if flum_character_filter and (flum_character or "").lower() != flum_character_filter.lower():
+            continue
+        if surrounding_density_filter and surrounding_density != surrounding_density_filter:
+            continue
 
         exclusion_flags = exclusions.check_exclusions(parcel)
 
@@ -171,7 +204,7 @@ def run_county_scan(
 
         if exclusion_flags:
             needs_review.append(
-                "Possible statutory exclusion zone overlap — see flags. "
+                "Real statutory exclusion zone hit — see Exclusions. "
                 "Confirm with the relevant agency before proceeding."
             )
 
@@ -179,11 +212,11 @@ def run_county_scan(
             "5-year continuous agricultural use is not verifiable from "
             "this data source — confirm with the county Property Appraiser."
         )
-        needs_review.append(
-            "Conservation easement status is not covered by any "
-            "statewide GIS layer found during research — search the "
-            "county Clerk/Recorder directly."
-        )
+        # ACSC / conservation easement / military buffer reminders — always
+        # present regardless of geometry or query results, distinct from a
+        # real exclusion_flags hit. See exclusions.standing_manual_notes()
+        # docstring for why these moved out of exclusion_flags.
+        needs_review.extend(exclusions.standing_manual_notes())
 
         if parcel.sold_since_2025 is None:
             needs_review.append(
@@ -220,6 +253,28 @@ def run_county_scan(
             adjacent_to_usb=False,
         )
 
+        water_sewer = flwmi_client.WaterSewerResult(
+            water_source=None, wastewater_method=None, confidence="Unknown", found=False
+        )
+        if parcel.parcel_id:
+            try:
+                water_sewer = flwmi_client.lookup_water_sewer(county, parcel.parcel_id)
+            except Exception as exc:  # noqa: BLE001 — a water/sewer lookup failure shouldn't sink the whole candidate
+                needs_review.append(f"Water/sewer service estimate lookup failed: {exc}")
+        if not water_sewer.found:
+            needs_review.append(
+                "No FDOH Florida Water Management Inventory record found for "
+                "this parcel — water/sewer service is unestimated, not "
+                "confirmed absent. Confirm directly with the county utility."
+            )
+
+        confidence_tier = scoring.classify_confidence(
+            likely_pathways=pathways,
+            exclusion_flags=exclusion_flags,
+            single_owner_signal=parcel.single_owner_signal,
+            water_sewer_confidence=water_sewer.confidence,
+        )
+
         rows.append(ScanResultRow(
             parcel_id=parcel.parcel_id,
             county_id=county_id,
@@ -231,6 +286,13 @@ def run_county_scan(
             jurisdiction=parcel.jurisdiction,
             pct_perimeter_qualifying=pct_qualifying,
             likely_pathways=pathways,
+            single_owner_signal=parcel.single_owner_signal,
+            water_source=water_sewer.water_source,
+            wastewater_method=water_sewer.wastewater_method,
+            water_sewer_confidence=water_sewer.confidence,
+            flum_character=flum_character,
+            surrounding_density=surrounding_density,
+            confidence_tier=confidence_tier,
             exclusion_flags=exclusion_flags,
             attractiveness_score=score,
             score_breakdown=breakdown,

@@ -88,6 +88,15 @@ class CandidateParcel:
     # county's parcel-layer sale-date field(s), None if not (missing
     # field, unparseable value, or county has no sale_date_encoding set).
     sold_since_2025: Optional[bool] = None
+    # True when owner_name_2 is empty (no co-owner recorded on this
+    # parcel's own attributes), False when a second owner name IS
+    # present, None when this county's parcel layer has no owner_field_2
+    # at all (Nassau, St. Johns) -- unknowable, not assumed single-owner.
+    # This is ONLY a name-matching signal on THIS parcel's own record,
+    # not a real ownership/control lookup across a multi-parcel enclave
+    # or a title search -- same caveat already noted above in
+    # fetch_candidate_parcels()'s docstring.
+    single_owner_signal: Optional[bool] = None
 
 
 def _signed_ring_area(ring: list[list[float]]) -> float:
@@ -240,6 +249,7 @@ def fetch_candidate_parcels(
     min_acreage: float = 20.0,
     max_acreage: float = 1280.0,
     max_candidates: int = 200,
+    require_single_owner: bool = False,
 ) -> list[CandidateParcel]:
     """
     Query a county's own parcel layer for parcels that plausibly meet
@@ -319,7 +329,15 @@ def fetch_candidate_parcels(
             jurisdiction=attrs.get(county.parcel_jurisdiction_field) if county.parcel_jurisdiction_field else None,
             geometry=geometry,
             sold_since_2025=statutory_checks.sold_on_or_after_cutoff(county, attrs),
+            single_owner_signal=(
+                None if county.parcel_owner_field_2 is None
+                else not bool(attrs.get(county.parcel_owner_field_2))
+            ),
         ))
+
+        if require_single_owner and candidates[-1].single_owner_signal is False:
+            candidates.pop()
+            continue
 
         if len(candidates) >= max_candidates:
             break

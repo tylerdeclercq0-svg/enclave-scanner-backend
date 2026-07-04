@@ -128,3 +128,43 @@ def score_candidate(
     }
 
     return round(total), breakdown
+
+
+def classify_confidence(
+    likely_pathways: list[int],
+    exclusion_flags: list[str],
+    single_owner_signal: Optional[bool],
+    water_sewer_confidence: str,
+) -> str:
+    """
+    Bucket a scanned candidate into "confident" / "possible" / "unlikely"
+    for the review-candidates UI, per Tyler's "Falcone Group v3" mockup.
+
+    This is a classification of what's ALREADY been computed elsewhere
+    in the pipeline (pathways, exclusions, ownership signal, water/sewer
+    estimate) — it adds no new data source of its own. Deliberately
+    conservative: "confident" requires every automatable signal to be
+    both present AND favorable, not just "no bad news."
+
+    - "unlikely": no pathway matched at all — the core legal test fails
+      with today's data, regardless of anything else.
+    - "confident": a pathway matched, no real hard-exclusion hit
+      (exclusion_flags is empty — meaningful now that
+      exclusions.check_exclusions() only returns genuine hits, not the
+      permanent manual-review boilerplate), the parcel's own record
+      shows no co-owner, and the water/sewer estimate has at least
+      "Likely" confidence (not "Somewhat Likely" or "Unknown").
+    - "possible": a pathway matched but at least one of the above isn't
+      confirmed — still worth reviewing, just not a slam dunk.
+    """
+    if not likely_pathways:
+        return "unlikely"
+
+    if (
+        not exclusion_flags
+        and single_owner_signal is True
+        and water_sewer_confidence in ("Known", "Likely")
+    ):
+        return "confident"
+
+    return "possible"

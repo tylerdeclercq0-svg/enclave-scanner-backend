@@ -66,13 +66,8 @@ class CountyInfo(BaseModel):
     flum_service_url: str
     flu_field: str
     live: bool
+    population: int
     notes: str
-
-
-class ScanRequest(BaseModel):
-    min_acreage: float = 20.0
-    max_acreage: float = 1280.0
-    require_single_owner: bool = True
 
 
 @app.get("/health")
@@ -85,29 +80,25 @@ def health():
 def list_counties():
     """
     Return all counties in the registry with their resolution status.
-    'live' here reflects whether county_registry.py has a confirmed
-    flu_field — NOT whether this endpoint has actually test-queried it.
-    Treat 'live' as "worth trying," not "guaranteed to work," until each
-    has been exercised against a real request at least once.
+
+    'live' reflects `CountyEndpoint.confirmed_live` — an explicit flag set
+    per county based on whether its FLUM/parcel field names have actually
+    been verified via a live describe_layer() call (see each county's own
+    `notes`), not a heuristic. Orange, Sarasota, and Manatee are reachable
+    endpoints but have unconfirmed field names, so they come back with
+    live=False ("coming soon" in the UI) until a ground-truth pass
+    confirms them, same standard as every other county here.
     """
     result = []
     for county_id, county in COUNTIES.items():
-        is_live = county.flu_field not in ("UNKNOWN", "LU_DESC", "FLUNAME") or county_id in (
-            "hillsborough", "orange", "pasco", "brevard", "volusia",
-        )
-        # NOTE: the flu_field-based live check above is a rough heuristic
-        # carried over from the registry's own inline comments — Sarasota's
-        # LU_DESC and Manatee's FLUNAME are themselves best-guess field
-        # names pending confirmation, not confirmed-live like the other
-        # five. Consider this endpoint's "live" flag provisional for those
-        # two until describe_layer() is run against them for real.
         result.append(CountyInfo(
             id=county.id,
             name=county.name,
             fips=county.fips,
             flum_service_url=county.flum_service_url,
             flu_field=county.flu_field,
-            live=is_live,
+            live=county.confirmed_live,
+            population=county.population,
             notes=county.notes,
         ))
     return result
@@ -119,6 +110,10 @@ def scan_county(
     min_acreage: float = Query(20.0, ge=0),
     max_acreage: float = Query(1280.0, gt=0),
     max_candidates: int = Query(25, ge=1, le=200, description="Caps how many parcels get the full (slower) encirclement check. Start small (10-25) for testing."),
+    require_single_owner: bool = Query(False, description="Drop candidates with a recorded co-owner (owner_name_2 populated). Parcels where this county has no co-owner field at all are NOT dropped — unknowable, not assumed single-owner."),
+    min_encirclement_pct: Optional[float] = Query(None, ge=0, le=100, description="Drop candidates below this qualifying-perimeter percentage."),
+    flum_character: Optional[str] = Query(None, description="Exact-match filter on the candidate's own FLUM designation string."),
+    surrounding_density: Optional[str] = Query(None, description="One of rural/suburban/urban/unknown — filters on the dominant neighboring FLU density bucket."),
 ):
     """
     Run a live scan against one county: pulls candidates from the
@@ -142,6 +137,10 @@ def scan_county(
             min_acreage=min_acreage,
             max_acreage=max_acreage,
             max_candidates=max_candidates,
+            require_single_owner=require_single_owner,
+            min_encirclement_pct=min_encirclement_pct,
+            flum_character_filter=flum_character,
+            surrounding_density_filter=surrounding_density,
         )
     except ImportError as exc:
         # Shapely missing — this is the single most likely first-run

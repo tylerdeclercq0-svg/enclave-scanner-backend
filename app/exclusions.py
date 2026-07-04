@@ -105,21 +105,50 @@ def _with_area_sr(geometry: dict) -> dict:
     return geometry_with_sr
 
 
+def standing_manual_notes() -> list[str]:
+    """
+    Permanent "not automated, always verify manually" reminders that
+    apply to every parcel regardless of geometry or query results — ACSC,
+    conservation easements, and military buffers. These are NOT exclusion
+    hits (they don't mean the parcel fails anything), so they belong in
+    needs_manual_review, not exclusion_flags.
+
+    FIXED 2026-07-06: these three lines used to be appended directly
+    inside check_exclusions()'s returned list, which meant
+    exclusion_flags was NEVER actually empty for any real parcel — even
+    when Wekiva/Everglades genuinely didn't hit. That silently broke the
+    dashboard's "clear" vs "N EXCLUDED" distinction (every parcel showed
+    as excluded) and made a "no manual review needed" confidence tier
+    impossible to reach. Split out here so exclusion_flags means what it
+    claims: a real, automated hard-exclusion hit, nothing else.
+    """
+    return [
+        "Area of Critical State Concern check not yet wired to a "
+        "resolved FeatureServer endpoint — none of the seven pilot "
+        "counties fall within a designated ACSC as of this research "
+        "pass, but confirm this assumption before adding counties "
+        "outside the current pilot set.",
+        "Conservation easement check has no available statewide or "
+        "consistent county GIS source — always verify with the county "
+        "Clerk/Recorder before relying on enclave eligibility.",
+        "Military installation buffer (s. 163.3175(2), F.S.) check not "
+        "automated — verify manually if the parcel is near a known "
+        "military installation.",
+    ]
+
+
 def check_exclusions(parcel: CandidateParcel) -> list[str]:
     """
-    Return a list of human-readable exclusion flags for a candidate
-    parcel. An empty list means "no automated exclusion hit" — NOT
-    "definitely clear." Conservation easements and military buffers
-    always get a manual-review flag regardless of geometry, since no
-    automated source exists for them yet.
+    Return a list of human-readable HARD exclusion flags for a candidate
+    parcel — real, automated hits only (Wekiva/Everglades intersection).
+    An empty list means "no automated exclusion hit" — NOT "definitely
+    clear." See standing_manual_notes() for the separate, always-present
+    manual-verification reminders (ACSC/easements/military) that used to
+    be merged into this list.
     """
     flags: list[str] = []
 
     if parcel.geometry is None:
-        flags.append(
-            "No geometry available to check exclusion zone overlap — "
-            "verify manually."
-        )
         return flags
 
     geometry = _with_area_sr(parcel.geometry)
@@ -156,29 +185,5 @@ def check_exclusions(parcel: CandidateParcel) -> list[str]:
             "agricultural enclave pathway does not apply here per "
             "s. 373.4592(2), F.S."
         )
-
-    # ACSC check — structurally present but expected to return nothing
-    # for any of the seven pilot counties; kept as a real check rather
-    # than a skip so a future county addition (e.g. Monroe) doesn't
-    # silently bypass it.
-    flags.append(
-        "Area of Critical State Concern check not yet wired to a "
-        "resolved FeatureServer endpoint — none of the seven pilot "
-        "counties fall within a designated ACSC as of this research "
-        "pass, but confirm this assumption before adding counties "
-        "outside the current pilot set."
-    )
-
-    flags.append(
-        "Conservation easement check has no available statewide or "
-        "consistent county GIS source — always verify with the county "
-        "Clerk/Recorder before relying on enclave eligibility."
-    )
-
-    flags.append(
-        "Military installation buffer (s. 163.3175(2), F.S.) check not "
-        "automated — verify manually if the parcel is near a known "
-        "military installation."
-    )
 
     return flags

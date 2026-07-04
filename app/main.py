@@ -509,6 +509,10 @@ def coverage_advance(county_id: str, payload: CoverageAdvancePayload):
 
     processed_ids = [r.parcel_id for r in rows if r.parcel_id]
     coverage_ledger.mark_processed(county_id, target_zcta5, processed_ids)
+    # Persist the full row data into the master property database so the
+    # ranked view can be built from accumulated history, not just this
+    # session. Deliberately part of the same ledger, not a parallel store.
+    coverage_ledger.save_parcel_results(county_id, scan_orchestrator.rows_to_dicts(rows))
 
     summary = coverage_ledger.county_summary(county_id, zcta_codes)
     zcta_state = coverage_ledger.get_zcta_state(county_id, target_zcta5)
@@ -526,6 +530,48 @@ def coverage_advance(county_id: str, payload: CoverageAdvancePayload):
         "summary": summary,
         "county_complete": summary["county_complete"],
         "next_incomplete_zcta": coverage_ledger.next_incomplete_zcta(county_id, zcta_codes),
+    }
+
+
+# Sort order: real candidates first, excluded at the very bottom, in
+# the exact order Tyler specified 2026-07-06.
+_TIER_SORT_ORDER = {
+    "confirmed_qualifying": 0,
+    "strong_candidate":     1,
+    "watch_list":           2,
+    "unlikely":             3,
+    "excluded":             4,
+    # Legacy old-tier fallback so pre-migration rows still sort sensibly.
+    "confident": 0,
+    "possible":  1,
+    "watch":     2,
+}
+
+
+@app.get("/api/property-db/{county_id}/ranked")
+def property_db_ranked(county_id: str):
+    """
+    Return every parcel ever scanned for this county, sorted by master
+    tier first (confirmed -> strong -> watch -> unlikely -> excluded)
+    and attractiveness score descending within tier.
+
+    This is the persistent, ranked view Tyler wants the UI to present
+    as the primary way of looking at scan results -- not per-session,
+    but accumulated across every run over time via the coverage_ledger's
+    master property database.
+    """
+    if county_id not in COUNTIES:
+        raise HTTPException(status_code=404, detail=f"Unknown county: {county_id}")
+    rows = coverage_ledger.list_all_parcels(county_id)
+    rows.sort(key=lambda r: (
+        _TIER_SORT_ORDER.get(r.get("tier") or r.get("confidence_tier") or "unlikely", 3),
+        -(r.get("attractiveness_score") or 0),
+    ))
+    return {
+        "county_id": county_id,
+        "total": len(rows),
+        "tier_distribution": coverage_ledger.tier_distribution(county_id),
+        "parcels": rows,
     }
 
 

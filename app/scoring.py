@@ -190,3 +190,213 @@ def classify_confidence(
     ):
         return "watch"
     return "unlikely"
+
+
+# -------- Master tier ranking (2026-07-06 pass) --------------------
+#
+# Turns the per-scan pathway results into a single primary signal per
+# parcel -- one of five tiers -- so the ranked property database can be
+# sorted by tier first, per-pathway detail second. Deliberately NOT a
+# fabricated composite score: each tier's assignment is grounded in
+# real pathway percentages against their real statutory thresholds.
+#
+# Tiers (ordered top-to-bottom in the sort):
+#   1. confirmed_qualifying -- >=1 pathway matched AND no unresolved fails
+#   2. strong_candidate     -- >=1 pathway matched BUT has fail(s) that
+#                              could flip verification (co-owner recorded,
+#                              post-2025 sale, etc.)
+#   3. watch_list           -- no pathway currently matches, but one or
+#                              more pathways show 30-59% real potential
+#                              (a plausible future match if surrounding
+#                              development continues or a fail resolves)
+#   4. unlikely             -- every pathway below the watch-list floor
+#   5. excluded             -- hard statutory exclusion hit (Wekiva,
+#                              Everglades, ACSC, acreage > 4,480, county
+#                              population > 1.75M). Sits alone at the
+#                              bottom of the ranked list, never mixed
+#                              in with candidates.
+
+# Watch-list per-pathway band. Tighter than the earlier classify_
+# confidence band because this is the primary UI signal now, not a
+# secondary tier -- 60-74% used to be watch but joins unlikely here
+# unless there's a fail that lands the parcel in strong. Per Tyler
+# 2026-07-06 spec ("roughly 30-59%").
+MASTER_WATCH_MIN_PCT = 30.0
+MASTER_WATCH_MAX_PCT = 59.0
+
+# Per-pathway thresholds -- match determine_pathways() in encirclement.py
+# so the driving-pathway readouts here are anchored to the real
+# statutory tests, not paraphrased.
+_PATHWAY_THRESHOLDS = {
+    1: 75,  # (c)1.a -- pct_qualifying >= 75
+    2: 75,  # (c)1.b -- pct_qualifying >= 75 AND designated_pct >= 75
+    3: 75,  # (c)1.c -- (pct_qualifying + interstate_frontage_pct) >= 75
+    4: 50,  # (c)2   -- pct_qualifying >= 50 AND usb_perimeter_pct >= 50
+    5: 100, # (c)3   -- boolean; if True the parcel is at 100%.
+}
+
+
+def _has_fail_items(
+    single_owner_signal: Optional[bool],
+    sold_since_2025: Optional[bool],
+) -> bool:
+    """
+    Server-side equivalent of the frontend's buildVerificationChecklist
+    "fail" detection. A checklist item ranked 'fail' means a real
+    automated signal is inconsistent with qualifying -- for the two
+    fields the backend has full authority over: co-owner recorded, or
+    post-1/1/2025 sale. Exclusion-type fails are handled separately
+    (they land the parcel in the excluded tier).
+    """
+    if single_owner_signal is False:
+        return True
+    if sold_since_2025 is True:
+        return True
+    return False
+
+
+def _driving_pathway_potentials(
+    pct_perimeter_qualifying: Optional[float],
+    interstate_frontage_pct: Optional[float],
+    usb_perimeter_pct: Optional[float],
+    acreage: Optional[float],
+    adjacent_to_interstate: bool,
+    adjacent_to_usb: bool,
+) -> list[dict]:
+    """
+    For each currently-implemented pathway, compute a "readiness"
+    percentage: the actual live-computed value against that pathway's
+    real statutory threshold. Returns a list of per-pathway dicts:
+        {option: int, value: float, target: int, at_threshold: bool,
+         gated_by: str or None, label: str}
+    Used both for the watch-list detail readout ("Option 4 driving,
+    currently 42% vs. needed 50%") and for the excluded-tier's
+    can't-fire-anyway diagnostic.
+    """
+    pct = pct_perimeter_qualifying or 0.0
+    intr = interstate_frontage_pct or 0.0
+    usb = usb_perimeter_pct or 0.0
+    ac = acreage or 0.0
+
+    out: list[dict] = []
+
+    # Option 1 (c)1.a: raw pct vs 75.
+    out.append({
+        "option": 1,
+        "value": pct,
+        "target": _PATHWAY_THRESHOLDS[1],
+        "at_threshold": pct >= _PATHWAY_THRESHOLDS[1],
+        "gated_by": None,
+        "label": f"Option 1: {pct:.0f}% qualifying perimeter (needs 75%)",
+    })
+
+    # Option 3 (c)1.c: combined perimeter vs 75, gated on both adjacencies.
+    combined = min(100.0, pct + intr)
+    gated_3 = None
+    if not adjacent_to_interstate: gated_3 = "no interstate adjacency"
+    elif not adjacent_to_usb:      gated_3 = "no USB adjacency"
+    out.append({
+        "option": 3,
+        "value": combined,
+        "target": _PATHWAY_THRESHOLDS[3],
+        "at_threshold": combined >= _PATHWAY_THRESHOLDS[3] and gated_3 is None,
+        "gated_by": gated_3,
+        "label": (
+            f"Option 3: {combined:.0f}% combined interstate+FLUM perimeter "
+            f"(needs 75%{'; ' + gated_3 if gated_3 else ''})"
+        ),
+    })
+
+    # Option 4 (c)2: two >=50% tests, gated on acreage <=700.
+    gated_4 = None
+    if ac > 700: gated_4 = f"{ac:.0f} ac exceeds 700-ac cap"
+    limiting = min(pct, usb)
+    out.append({
+        "option": 4,
+        "value": limiting,
+        "target": _PATHWAY_THRESHOLDS[4],
+        "at_threshold": (
+            pct >= 50 and usb >= 50 and gated_4 is None
+        ),
+        "gated_by": gated_4,
+        "label": (
+            f"Option 4: {pct:.0f}% designated-dev perimeter / "
+            f"{usb:.0f}% USB perimeter (both need 50%"
+            f"{'; ' + gated_4 if gated_4 else ''})"
+        ),
+    })
+
+    return out
+
+
+def assign_master_tier(
+    *,
+    exclusion_flags: list[str],
+    likely_pathways: list[int],
+    pct_perimeter_qualifying: Optional[float],
+    interstate_frontage_pct: Optional[float],
+    usb_perimeter_pct: Optional[float],
+    acreage: Optional[float],
+    adjacent_to_interstate: bool,
+    adjacent_to_usb: bool,
+    single_owner_signal: Optional[bool],
+    sold_since_2025: Optional[bool],
+) -> tuple[str, list[str]]:
+    """
+    Returns (tier, driving_pathway_labels). Called from scan_orchestrator
+    per parcel; the tier is stored on the row AND in the persistent
+    coverage_ledger so the master property database can be re-ranked
+    without re-running the pipeline.
+
+    driving_pathway_labels is a list of human-readable descriptions of
+    which pathway(s) drove this parcel into its tier -- for watch and
+    strong especially, that's the whole point ("this is watch because
+    Option 4 is at 42% and needs 50%").
+    """
+    # 1. EXCLUDED dominates everything -- a hard-excluded parcel with
+    # even 100% qualifying perimeter is statutorily out, and the ranked
+    # list should never let it sit alongside real candidates.
+    if exclusion_flags:
+        return "excluded", [f"Hard exclusion: {flag[:80]}" for flag in exclusion_flags[:3]]
+
+    potentials = _driving_pathway_potentials(
+        pct_perimeter_qualifying=pct_perimeter_qualifying,
+        interstate_frontage_pct=interstate_frontage_pct,
+        usb_perimeter_pct=usb_perimeter_pct,
+        acreage=acreage,
+        adjacent_to_interstate=adjacent_to_interstate,
+        adjacent_to_usb=adjacent_to_usb,
+    )
+    has_fails = _has_fail_items(single_owner_signal, sold_since_2025)
+
+    # 2/3. Pathway matched -> confirmed or strong depending on fails.
+    if likely_pathways:
+        driving = [p["label"] for p in potentials if p["option"] in likely_pathways]
+        if not driving:
+            # Shouldn't happen (any matched pathway also has a potentials
+            # entry), but guard anyway.
+            driving = [f"Option {p} matched" for p in likely_pathways]
+        if has_fails:
+            fail_notes = []
+            if single_owner_signal is False:
+                fail_notes.append("co-owner recorded (verify with title search)")
+            if sold_since_2025 is True:
+                fail_notes.append("post-1/1/2025 sale on record (verify continuity)")
+            driving = driving + [f"Unresolved: {n}" for n in fail_notes]
+            return "strong_candidate", driving
+        return "confirmed_qualifying", driving
+
+    # 4. Watch-list: no pathway matched, but at least one pathway's
+    # readiness value is in the 30-59% band. Report every pathway that
+    # qualifies as "driving," not just the highest -- knowing Options 1
+    # AND 4 both show potential is more actionable than knowing only the
+    # top one.
+    watch_drivers = [
+        p["label"] for p in potentials
+        if MASTER_WATCH_MIN_PCT <= p["value"] <= MASTER_WATCH_MAX_PCT
+    ]
+    if watch_drivers:
+        return "watch_list", watch_drivers
+
+    # 5. Unlikely: nothing meets threshold, nothing in watch band.
+    return "unlikely", []

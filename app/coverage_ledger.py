@@ -13,7 +13,7 @@ STATUS.md as an acceptable v1 limitation; a paid disk mount or a
 client-side localStorage mirror would fix it, but neither is worth the
 complexity for the current use case (one analyst, one desk).
 
-Structure:
+Structure (2026-07-06 pass: also holds the master property database):
 {
   "counties": {
     "st_johns": {
@@ -24,10 +24,24 @@ Structure:
           "last_run_at": "2026-07-06T18:32:00Z",
           "complete": false
         }
+      },
+      "parcels": {
+        "140970 0010": {
+          <full ScanResultRow as dict, tier, driving_pathways, etc.>,
+          "first_scanned_at": "2026-07-06T18:32:00Z",
+          "last_scanned_at": "2026-07-06T18:32:00Z"
+        }
       }
     }
   }
 }
+
+The parcels dict IS the persistent property database Tyler requested:
+one entry per parcel_id per county, accumulating across every scan run
+over time. Re-scanning a parcel updates its row (and last_scanned_at)
+but preserves first_scanned_at. This is the same file/lock/atomic-write
+mechanism the ZCTA ledger already uses -- deliberately not a second,
+parallel store.
 """
 
 from __future__ import annotations
@@ -177,6 +191,69 @@ def county_summary(county_id: str, all_zctas: list[str]) -> dict[str, Any]:
         "totals_known": known_total,
         "county_complete": complete_count == len(all_zctas) and len(all_zctas) > 0,
     }
+
+
+def save_parcel_results(county_id: str, rows: list[dict[str, Any]]) -> None:
+    """
+    Persist a batch of scan-result rows into the master property
+    database. Rows are keyed by parcel_id within their county. Existing
+    entries are UPDATED (last_scanned_at bumped, all fields refreshed)
+    but first_scanned_at is preserved -- Tyler wants to know when a
+    parcel first entered the database, not just when it was last
+    touched.
+    """
+    if not rows:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    with _LOCK:
+        data = _load()
+        cs = data["counties"].setdefault(county_id, {"zctas": {}})
+        parcels = cs.setdefault("parcels", {})
+        for row in rows:
+            pid = row.get("parcel_id")
+            if not pid:
+                continue
+            existing = parcels.get(pid, {})
+            row_copy = dict(row)
+            row_copy["first_scanned_at"] = existing.get("first_scanned_at") or now
+            row_copy["last_scanned_at"] = now
+            parcels[pid] = row_copy
+        _save(data)
+
+
+def list_all_parcels(county_id: str) -> list[dict[str, Any]]:
+    """Every parcel ever scanned for this county, unsorted."""
+    with _LOCK:
+        data = _load()
+        cs = data["counties"].get(county_id, {})
+        return list(cs.get("parcels", {}).values())
+
+
+def list_all_parcels_all_counties() -> list[dict[str, Any]]:
+    """
+    Every parcel ever scanned across every county, unsorted.
+    """
+    with _LOCK:
+        data = _load()
+        rows: list[dict[str, Any]] = []
+        for cs in data["counties"].values():
+            rows.extend(cs.get("parcels", {}).values())
+        return rows
+
+
+def tier_distribution(county_id: str) -> dict[str, int]:
+    """
+    Count parcels per tier for a given county. Used for the ranked-view
+    header ("st_johns: 4 confirmed, 12 strong, 47 watch, 128 unlikely,
+    9 excluded"). Legacy 'confidence_tier' rows (before the master-tier
+    field was added) count under their old bucket -- documented, not
+    silently reclassified.
+    """
+    counts: dict[str, int] = {}
+    for row in list_all_parcels(county_id):
+        t = row.get("tier") or row.get("confidence_tier") or "unlikely"
+        counts[t] = counts.get(t, 0) + 1
+    return counts
 
 
 def next_incomplete_zcta(county_id: str, all_zctas: list[str]) -> Optional[str]:

@@ -30,7 +30,7 @@ tested against live data).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Optional
 
 from county_registry import COUNTIES
@@ -72,6 +72,18 @@ class ScanResultRow:
     surrounding_density: str = "unknown"
     confidence_tier: str = "unlikely"
     zcta5: Optional[str] = None
+    # Master tier ranking (2026-07-06 pass). Overlaps with confidence_tier
+    # by design during the transition -- both are populated so the old UI
+    # keeps working while the new tier-driven UI is being wired in.
+    tier: str = "unlikely"  # excluded / confirmed_qualifying / strong_candidate / watch_list / unlikely
+    driving_pathways: list[str] = field(default_factory=list)
+    # Kept on the row so tier can be recomputed later without re-running
+    # the pipeline (persisted in coverage_ledger as part of the
+    # master property database).
+    interstate_frontage_pct: Optional[float] = None
+    usb_perimeter_pct: Optional[float] = None
+    adjacent_to_interstate: bool = False
+    adjacent_to_usb: bool = False
 
 
 def run_county_scan(
@@ -395,6 +407,18 @@ def run_county_scan(
             water_sewer_confidence=water_sewer.confidence,
             pct_perimeter_qualifying=pct_qualifying,
         )
+        tier, driving_pathways = scoring.assign_master_tier(
+            exclusion_flags=exclusion_flags,
+            likely_pathways=pathways,
+            pct_perimeter_qualifying=pct_qualifying,
+            interstate_frontage_pct=interstate_frontage_pct,
+            usb_perimeter_pct=usb_perimeter_pct,
+            acreage=parcel.acreage,
+            adjacent_to_interstate=adjacent_to_interstate,
+            adjacent_to_usb=adjacent_to_usb,
+            single_owner_signal=parcel.single_owner_signal,
+            sold_since_2025=parcel.sold_since_2025,
+        )
 
         rows.append(ScanResultRow(
             parcel_id=parcel.parcel_id,
@@ -422,6 +446,12 @@ def run_county_scan(
             centroid_lon=centroid_lon,
             sold_since_2025=parcel.sold_since_2025,
             zcta5=zcta5,
+            tier=tier,
+            driving_pathways=driving_pathways,
+            interstate_frontage_pct=interstate_frontage_pct,
+            usb_perimeter_pct=usb_perimeter_pct,
+            adjacent_to_interstate=adjacent_to_interstate,
+            adjacent_to_usb=adjacent_to_usb,
         ))
 
     rows.sort(key=lambda r: (r.attractiveness_score or 0), reverse=True)

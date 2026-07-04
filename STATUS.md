@@ -372,6 +372,15 @@ verified up to "the real server accepts this request shape and rejects
 only the key." Get a real key and re-verify once available. The
 dashboard also still has no UI element calling this endpoint at all.
 
+**Deployed and confirmed live**: committed as `32c88b3`, pushed to
+GitHub, and confirmed via the Render dashboard's own deploy log —
+"Deploy live for `32c88b3`" at July 3, 2026, 10:12 PM. Note this only
+confirms the code is deployed, not that the ACS fetch works against
+real data (still blocked on getting a `CENSUS_API_KEY`, per above) —
+`/health`'s `code_version` string is a stale hardcoded marker from an
+earlier commit and was NOT bumped here, so don't use it to verify which
+commit is live; check Render's deploy log directly instead.
+
 ## Exact next step
 
 1. Get a real `CENSUS_API_KEY` (https://api.census.gov/data/key_signup.html),

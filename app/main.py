@@ -215,6 +215,21 @@ def parcel_demographics(
         )
     except ImportError as exc:
         raise HTTPException(status_code=500, detail=f"Missing dependency: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        # Covers real failure modes confirmed live during implementation:
+        # a bad/expired CENSUS_API_KEY (RuntimeError, from an HTML error
+        # page instead of JSON) and any requests.RequestException from
+        # either the TIGERweb or ACS calls. Same rationale as the /scan
+        # endpoint's catch-all: surface the raw exception rather than a
+        # bare 500 with no detail.
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Demographics pull failed",
+                "exception_type": type(exc).__name__,
+                "exception_str": str(exc),
+            },
+        )
 
     return {
         "parcel_id": parcel_id,

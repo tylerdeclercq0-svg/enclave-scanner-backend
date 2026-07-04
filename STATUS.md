@@ -282,15 +282,104 @@ internet access (`DEPLOYMENT.md` Step 1) or the frontend to Netlify
 demographics endpoint (`/api/parcels/{id}/demographics`) is also still
 unwired in the dashboard — no UI element calls it yet.
 
+## Backend + frontend deployed live, 2026-07-03/04
+
+Backend deployed to Render: `https://enclave-scanner-backend.onrender.com`
+(free tier). Confirmed live post-deploy: `/health`, and real scans against
+Pasco and Osceola (the TLS-cert-bundling county) both returned the same
+results seen locally, including outbound calls to live ArcGIS servers and
+Osceola's bundled Entrust intermediate cert working from Render's network.
+
+Frontend deployed to Netlify: `https://enclave-scanner-backend.netlify.app`.
+Netlify's build had to be scoped with **Base directory = `web`** — its
+build image auto-detected the repo-root `runtime.txt`/`requirements.txt`
+(which exist for the Python backend, deployed separately via Render) and
+tried to provision a Python toolchain for what should be a zero-build
+static-file deploy, failing because `mise`/`pyenv` had no precompiled
+build for the exact pinned patch version. Scoping the base directory to
+`web/` stops Netlify from seeing those root-level Python files at all —
+**do not** "fix" this by changing `runtime.txt`'s version; that file is
+load-bearing for Render's backend and unrelated to the frontend failure.
+
+`web/index.html`'s default API base URL now points at the live Render
+URL (was `localhost:8000`). Render's `FRONTEND_ORIGIN` is locked to the
+exact Netlify origin (no more `*`) — confirmed via direct `curl` with an
+`Origin` header that the real Netlify origin gets
+`access-control-allow-origin` echoed back and an arbitrary other origin
+does not.
+
+Both GitHub accounts involved (`tylerdeclercq0-svg`, repo owner;
+`tjd135-rgb`, pushes from this machine) belong to the same person —
+`tjd135-rgb` was added as a repo collaborator to fix a 403 on push.
+
+## Demographics endpoint (`ring_demographics.py`) implemented, 2026-07-04
+
+The batched ACS fetch flagged as `NotImplementedError` above is now
+implemented, and two more real, previously-undiscovered bugs were found
+and fixed live while building/testing it (no `CENSUS_API_KEY` available
+yet, but every other piece was verified against the real Census/TIGERweb
+servers):
+
+1. **`fetch_acs_values_for_block_groups`**: implemented the
+   state/county/tract grouping and per-tract batched call the docstring
+   had already sketched out. Confirmed live against the real ACS API
+   (with a deliberately fake key) that the request shape itself is
+   correct — the server got far enough to reject only the bad key, not
+   the query structure. Also discovered live that an invalid/expired key
+   returns HTTP 200 with an HTML "Invalid Key" page, not a 4xx or JSON —
+   added explicit handling so this fails with a clear message instead of
+   a raw `JSONDecodeError`.
+2. **`TIGERWEB_BLOCKGROUP_URL` pointed at the wrong service entirely**
+   (real bug, not just an unconfirmed layer index as the old comment
+   said): `TIGERweb/State_County/MapServer` only has States/Counties
+   layers at any index — no block groups exist there at all, so every
+   call silently returned zero features. Fixed to
+   `TIGERweb/tigerWMS_ACS2023/MapServer/10` ("Census Block Groups"),
+   confirmed live (321 real block groups returned within 15 miles of a
+   real Pasco parcel centroid, all real 12-digit GEOIDs).
+3. **Missing `outSR` on the TIGERweb query** — same class of bug as the
+   FLUM neighbor query fixed earlier in this file: without it, geometry
+   came back in the service's default Web Mercator (meters) while
+   `compute_ring_demographics`'s ring-inclusion check compares distances
+   in degrees. Fixed by adding `outSR=4326`.
+4. **`shape(geom)` crashed on every real block-group geometry** — Shapely's
+   generic `shape()` expects GeoJSON (`{"type": "Polygon", ...}`), but
+   TIGERweb (like every other Esri REST source in this project) returns
+   Esri JSON (`{"rings": [...]}`) with no `"type"` key at all, so this
+   raised `AttributeError: 'NoneType' object has no attribute 'lower'`
+   every time. This was already flagged as unfinished in the function's
+   own inline comment ("adapt esri_json_to_shapely... if reusing that
+   converter") but never actually fixed. Fixed by reusing
+   `encirclement.esri_json_to_shapely()` (the same multipart-ring-aware
+   converter used for FLUM polygons) instead of `shapely.geometry.shape`.
+
+Also implemented population margin-of-error aggregation (root-sum-of-
+squares across included block groups) since it's well-defined and the
+`RingDemographics.population_moe` field already existed for it — income
+and age medians are deliberately left as `None`, since those need a
+population-weighted approach, not a simple sum/RSS, and that's a bigger
+follow-up, not a quick fix.
+
+Added an `except Exception` catch-all to `/api/parcels/{id}/demographics`
+in `main.py` (previously only caught `NotImplementedError`/`ImportError`),
+matching the `/scan` endpoint's existing pattern, since a bad API key
+(`RuntimeError`) or a `requests` network error would otherwise surface as
+a bare unhandled 500 with no detail.
+
+**Not yet done**: no `CENSUS_API_KEY` exists yet, so the ACS fetch itself
+has never been exercised against real Census data end-to-end — only
+verified up to "the real server accepts this request shape and rejects
+only the key." Get a real key and re-verify once available. The
+dashboard also still has no UI element calling this endpoint at all.
+
 ## Exact next step
 
-1. Deploy the backend somewhere with real internet access (Render, per
-   `DEPLOYMENT.md`) and re-point the dashboard's API base URL at it —
-   local-only was sufficient to confirm the wiring is correct, but the
-   real deployment target has never been tried.
-2. Wire the demographics endpoint into the dashboard (e.g. a per-row
-   "pull area demographics" action), including getting a real
-   `CENSUS_API_KEY`.
+1. Get a real `CENSUS_API_KEY` (https://api.census.gov/data/key_signup.html),
+   set it on Render, and re-verify `/api/parcels/{id}/demographics`
+   end-to-end against real Census data (only the failure path has been
+   confirmed so far).
+2. Wire the demographics endpoint into the dashboard (a per-row "pull
+   area demographics" action) — no UI element calls it yet.
 3. Revisit the unincorporated-status hard filter given the Osceola
    parcel-layer jurisdiction data gap found earlier in this file —
    likely needs a spatial join against the FLUM layer's `Jurisdiction`

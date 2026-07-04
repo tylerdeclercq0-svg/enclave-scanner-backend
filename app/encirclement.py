@@ -403,6 +403,8 @@ def determine_pathways(
     adjacent_to_usb: bool,
     designated_pct_existing_development: Optional[float] = None,
     inside_rural_study_area: bool = False,
+    interstate_frontage_pct: float = 0.0,
+    usb_perimeter_pct: float = 0.0,
 ) -> list[int]:
     """
     Map an encirclement result plus a few other facts onto the statutory
@@ -435,11 +437,21 @@ def determine_pathways(
         comprehensive-plan review — see scan_orchestrator.py for the
         per-county sourcing.
 
-    Known under-specification, still open as of 2026-07-06: Option 3's
-    75% test currently uses only the FLUM-neighbor qualifying percent
-    and doesn't credit the interstate's own perimeter segment; Option 4's
-    USB test currently uses a boolean touch-test, not the >=50% USB
-    perimeter the statute requires. Both are noted in STATUS.md.
+    Fixed 2026-07-06 (late-late session):
+    - Option 3 now credits interstate frontage toward the 75% test.
+      The statute's (c)1.c reads "A combination of an interstate highway
+      AND a parcel or parcels that are within an urban service district"
+      -- so the interstate segment counts alongside the qualifying FLUM
+      neighbors, not just as a boolean gate. Uses interstate_frontage_pct
+      passed in from roads_client.measure_interstate_frontage_meters, and
+      caps the combined total at 100 (a parcel with both high FLUM and
+      high interstate frontage shouldn't overflow).
+    - Option 4 now uses a real usb_perimeter_pct instead of the boolean
+      adjacent_to_usb. The statute's (c)2 second clause reads "the parcel
+      or parcels are surrounded on at least 50 percent of their perimeter
+      by a parcel or parcels within an urban service district" -- a real
+      >=50% test, not just adjacency. usb_perimeter_pct comes from
+      roads_client.measure_usb_perimeter_meters.
     """
     pathways: list[int] = []
 
@@ -453,10 +465,22 @@ def determine_pathways(
     ):
         pathways.append(2)
 
-    if adjacent_to_interstate and adjacent_to_usb and encirclement.pct_qualifying >= 75:
+    # Option 3 (c)1.c: 75% = interstate + qualifying-FLUM combined. Still
+    # gate on adjacent_to_usb since the statute specifies the FLUM portion
+    # must be USB-designated -- our current pct_qualifying doesn't
+    # distinguish USB-designated FLUM from other qualifying FLUM, so this
+    # gate is a defense-in-depth check; the "combined 75%" is what
+    # actually determines this pathway.
+    option3_combined_pct = min(100.0, encirclement.pct_qualifying + interstate_frontage_pct)
+    if adjacent_to_interstate and adjacent_to_usb and option3_combined_pct >= 75:
         pathways.append(3)
 
-    if acreage <= 700 and encirclement.pct_qualifying >= 50 and adjacent_to_usb:
+    # Option 4 (c)2: two separate >=50% tests -- >=50% designated-for-dev
+    # perimeter AND >=50% USB perimeter. pct_qualifying is the first
+    # (residential/commercial/industrial FLUM proxy for designated-dev);
+    # usb_perimeter_pct is the second, replacing the pre-2026-07-06
+    # boolean adjacent_to_usb check that was over-inclusive.
+    if acreage <= 700 and encirclement.pct_qualifying >= 50 and usb_perimeter_pct >= 50:
         pathways.append(4)
 
     if inside_rural_study_area:

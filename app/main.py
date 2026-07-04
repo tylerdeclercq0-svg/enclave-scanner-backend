@@ -35,7 +35,7 @@ from pydantic import BaseModel
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from county_registry import COUNTIES  # noqa: E402
+from county_registry import COUNTIES, POPULATION_CAP  # noqa: E402
 import scan_orchestrator  # noqa: E402
 import ring_demographics  # noqa: E402
 
@@ -130,6 +130,24 @@ def scan_county(
     """
     if county_id not in COUNTIES:
         raise HTTPException(status_code=404, detail=f"Unknown county: {county_id}")
+
+    # s. 163.3164(4)(f), F.S.: agricultural-enclave eligibility only
+    # applies "within a county with a population of 1.75 million or
+    # less." Every current registry entry is well under this, but check
+    # explicitly rather than relying on that -- if the registry is ever
+    # extended to a larger county, this returns the correct answer
+    # (statutorily ineligible) instead of a silently-wrong result set.
+    county_entry = COUNTIES[county_id]
+    if county_entry.population is not None and county_entry.population > POPULATION_CAP:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{county_entry.name} County (population ~{county_entry.population:,}) "
+                f"exceeds the {POPULATION_CAP:,} population cap in "
+                f"s. 163.3164(4)(f), F.S. -- agricultural-enclave pathway "
+                f"is not available for parcels in this county under SB 686."
+            ),
+        )
 
     try:
         rows = scan_orchestrator.run_county_scan(

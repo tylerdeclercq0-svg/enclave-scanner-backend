@@ -236,6 +236,16 @@ class CountyEndpoint:
     flwmi_parcel_id_transform: Optional[str] = None
 
 
+# Statutory maximum county population for agricultural-enclave eligibility
+# under s. 163.3164(4)(f), F.S. ("Are located within a county with a
+# population of 1.75 million or less."). Enforced in main.scan_county;
+# every current registry entry is well under this, so the check is a
+# defensive guard rather than an active filter today -- but it needs to
+# be an explicit, visible check so a future Miami-Dade (~2.6M) or Broward
+# (~1.9M) addition doesn't silently pass.
+POPULATION_CAP = 1_750_000
+
+
 COUNTIES: dict[str, CountyEndpoint] = {
 
     "hillsborough": CountyEndpoint(
@@ -302,7 +312,9 @@ COUNTIES: dict[str, CountyEndpoint] = {
         jurisdiction_field=None,
         acreage_field=None,
         agricultural_flu_values=("AG", "AG/R"),
-        population=587000,
+        # BEBR April 1, 2024 estimate. Well under s. 163.3164(4)(f)'s
+        # 1.75M population cap (~36% of the cap).
+        population=633029,
         confirmed_live=True,
         notes=(
             "FLUM layer (Land_Use/MapServer/0): CONFIRMED via live "
@@ -489,7 +501,9 @@ COUNTIES: dict[str, CountyEndpoint] = {
         # "agricultural" for statute purposes -- flagged separately, not
         # included below until reviewed.
         agricultural_flu_values=("AGRICULTURE",),
-        population=273000,
+        # BEBR April 1, 2024 estimate. Well under s. 163.3164(4)(f)'s
+        # 1.75M population cap (~19% of the cap).
+        population=331479,
         confirmed_live=True,
         notes=(
             "FLUM layer CONFIRMED live + describe_layer-tested. Values "
@@ -569,7 +583,9 @@ COUNTIES: dict[str, CountyEndpoint] = {
         acreage_field="Acre",
         # Confirmed via live distinct-values query (23 categories total).
         agricultural_flu_values=("Agriculture",),
-        population=114000,
+        # BEBR April 1, 2024 estimate. Well under s. 163.3164(4)(f)'s
+        # 1.75M population cap (~6% of the cap).
+        population=103990,
         confirmed_live=True,
         notes=(
             "FLUM layer CONFIRMED live + describe_layer-tested; layer ID "
@@ -630,7 +646,9 @@ COUNTIES: dict[str, CountyEndpoint] = {
         # data ('rural/agricultural'), not title case -- filter must
         # match exact case or use UPPER()/case-insensitive comparison.
         agricultural_flu_values=("rural/agricultural",),
-        population=449000,
+        # BEBR April 1, 2024 estimate. Well under s. 163.3164(4)(f)'s
+        # 1.75M population cap (~26% of the cap).
+        population=451231,
         confirmed_live=True,
         notes=(
             "FLUM layer CONFIRMED live + describe_layer-tested; layer id "

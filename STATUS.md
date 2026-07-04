@@ -1212,3 +1212,105 @@ review note.
 **Deploy pending Tyler's go-ahead** — this session's work is committed
 locally but nothing has been pushed since `1f28ed8` (which is itself
 still unpushed on `main`).
+
+## Options 3/4 under-specifications fixed + population cap enforced — 2026-07-06 (very late session)
+
+All three items from the just-added punch list closed. Not yet committed
+— Tyler asked to review the deltas before commit/push this time.
+
+### #1 (Option 3 interstate frontage credit) — DONE, wired but with a real "no visible delta" caveat.
+
+`roads_client.py` gained `measure_interstate_frontage_meters()` — buffers
+the FDOT interstate polylines by `INTERSTATE_ROW_HALFWIDTH_FEET = 150.0`
+(half of a typical 300-ft mainline ROW per FDOT standards) into an
+approximate ROW polygon, measures `candidate.boundary.intersection(ROW).length`.
+Returns meters, capped elsewhere against total perimeter.
+`encirclement.determine_pathways()` now takes `interstate_frontage_pct`,
+adds it to `pct_qualifying` for Option 3 (capped at 100), so a parcel
+with e.g. 40% qualifying FLUM + 40% interstate frontage now correctly
+matches Option 3's 75% test. Old behavior only counted FLUM.
+
+**Live-verified against 100 real Pasco candidates**: 0 of 100 show any
+interstate frontage. This is a real, expected result -- ag parcels in
+Pasco are all interior/rural, not touching I-75 or I-275. No visible
+pathway delta on this data. The fix is a correctness improvement that
+applies WHEN a candidate touches an interstate; the code is wired and
+tested (measure function runs, returns 0.0 correctly for all 100), but
+this sample won't demonstrate a flip. Would need a hand-picked
+interstate-adjacent parcel (or a different county's ag data) to see a
+real match gain. Left unchanged: candidates in Nassau (I-10), St. Johns
+(I-95), Osceola (I-4) don't get this exercised either at the current
+`max_candidates=25` default -- also expected, same reason.
+
+### #2 (Option 4 USB perimeter percent) — DONE, live-verified with 8-of-100 real Pasco delta.
+
+`roads_client.py` gained `measure_usb_perimeter_meters()` — queries
+Pasco's Rural Area layer for polygons near the candidate, unions them,
+subtracts `boundary.intersection(rural_union).length` from
+`total_perimeter`. If no rural polygons intersect at all (parcel is
+fully outside any mapped rural area), returns full perimeter (100% USB).
+`encirclement.determine_pathways()` now takes `usb_perimeter_pct` and
+tests `>= 50` for Option 4 instead of the boolean `adjacent_to_usb`.
+
+**Live-verified against 100 real Pasco candidates**: 8 of 100 parcels
+LOST a false Option 4 match. All 8 are ag parcels at 100% qualifying
+perimeter that sit deep inside Pasco's Northeast Rural Area (USB
+perimeter 0-26.5%, well below the 50% statutory threshold). Old
+adjacent_to_usb=True (their buffered boundary wasn't wholly within a
+single Rural Area polygon, so the touch-test fired); new usb_perimeter_pct
+correctly measures how MUCH of the perimeter is outside the Rural Area
+and correctly excludes them from Option 4. These parcels still match
+Option 1 (they're 100% qualifying), so they're not lost from results
+— just no longer bogusly credited with a second pathway they don't
+statutorily qualify for.
+
+Sample of the 8 flipped parcels:
+```
+parcel_id                   ac    pctQ  iPct  uPct  old      new
+09-24-17-0000-00600-0000  40.0  100.0% 0.0%  26.5%  [1, 4] -> [1]
+16-24-17-0000-01500-0000  39.2  100.0% 0.0%   0.0%  [1, 4] -> [1]
+16-24-17-0000-01400-0000  38.5  100.0% 0.0%  26.2%  [1, 4] -> [1]
+26-24-17-0000-00400-0070  50.0  100.0% 0.0%   0.0%  [1, 4] -> [1]
+26-24-17-0000-00400-0060  23.0  100.0% 0.0%   0.0%  [1, 4] -> [1]
+26-24-17-0000-00400-0040  20.1  100.0% 0.0%  16.2%  [1, 4] -> [1]
+21-24-17-0000-00200-0000  40.0  100.0% 0.0%  25.2%  [1, 4] -> [1]
+```
+
+The reference parcel (`35-24-16-0000-00100-0011`) stays at `[1, 4]` —
+it's OUTSIDE the Rural Area, so usb_perimeter_pct=100%, both Options 1
+and 4 correctly fire. Same result as prior deploys; sanity intact.
+
+### #3 (population cap, s. 163.3164(4)(f)) — DONE, defensive check enforced.
+
+`county_registry.py` now has `POPULATION_CAP = 1_750_000` at module
+scope. Populations refreshed to BEBR April 1, 2024 estimates for the
+four pilot counties (source: BEBR "Florida Estimates of Population 2024,"
+edr.state.fl.us + bebr.ufl.edu):
+- Pasco: 587,000 -> 633,029 (~36% of cap)
+- St. Johns: 273,000 -> 331,479 (~19% of cap)
+- Nassau: 114,000 -> 103,990 (~6% of cap)
+- Osceola: 449,000 -> 451,231 (~26% of cap)
+
+All four are well under the cap; the six other registry counties are
+also confirmed under (Hillsborough at ~1.6M is closest to the cap).
+
+`main.py`'s `/api/counties/{county_id}/scan` now returns HTTP 400 with
+a clear message when the county's population exceeds POPULATION_CAP,
+citing the statute. Not exercised by any current registry entry; strictly
+a guard for a future Miami-Dade/Broward addition (or a population update
+that pushes an existing county over the threshold).
+
+### End-to-end regression check — all four counties clean.
+
+Ran `run_county_scan(cid, max_candidates=3)` for all four via `.venv312`.
+No exceptions, all four return expected results:
+- **Pasco**: reference parcel `35-24-16-0000-00100-0011` still [1, 4] —
+  consistent with prior deploys. Other two parcels [] at 48% and 24%
+  qualifying (also consistent with the ROW-fix session data).
+- **Nassau**: 3 parcels at 0% qualifying (Rayonier timberland tracts,
+  consistent with STATUS.md's prior notes) — no pathways, correct.
+- **St. Johns**: 3 parcels at 0% qualifying — no pathways, correct.
+- **Osceola**: 2 parcels at 100% qualifying show [1] only (correct — no
+  Rural Area layer for Osceola, so usb_perimeter_pct=0, Option 4
+  correctly doesn't fire). Third parcel `012527000000400000` shows the
+  Reedy Creek/Disney exclusion flag as expected.

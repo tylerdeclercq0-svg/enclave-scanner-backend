@@ -154,19 +154,37 @@ def run_county_scan(
                     agricultural_flu_values=county.agricultural_flu_values,
                 )
                 pct_qualifying = encirclement.pct_qualifying
+                interstate_frontage_pct = 0.0
+                usb_perimeter_pct = 0.0
                 try:
                     adjacent_to_interstate = roads_client.check_adjacent_to_interstate(
                         parcel.geometry, county.name
                     )
+                    if adjacent_to_interstate and encirclement.total_perimeter > 0:
+                        frontage_m = roads_client.measure_interstate_frontage_meters(
+                            parcel.geometry, county.name
+                        )
+                        interstate_frontage_pct = min(
+                            100.0, frontage_m / encirclement.total_perimeter * 100.0
+                        )
                 except Exception as exc:  # noqa: BLE001 — a roads-layer failure shouldn't sink the whole candidate
                     adjacent_to_interstate = False
+                    interstate_frontage_pct = 0.0
                     needs_review.append(f"Interstate-adjacency check failed to run: {exc}")
                 try:
                     adjacent_to_usb = roads_client.check_adjacent_to_usb(
                         parcel.geometry, county.rural_area_layer_url
                     )
+                    if county.rural_area_layer_url is not None and encirclement.total_perimeter > 0:
+                        usb_m = roads_client.measure_usb_perimeter_meters(
+                            parcel.geometry, county.rural_area_layer_url
+                        )
+                        usb_perimeter_pct = min(
+                            100.0, usb_m / encirclement.total_perimeter * 100.0
+                        )
                 except Exception as exc:  # noqa: BLE001 — a roads-layer failure shouldn't sink the whole candidate
                     adjacent_to_usb = False
+                    usb_perimeter_pct = 0.0
                     needs_review.append(f"Urban-service-area adjacency check failed to run: {exc}")
                 if county.rural_area_layer_url is not None:
                     needs_review.append(
@@ -208,6 +226,8 @@ def run_county_scan(
                     adjacent_to_interstate=adjacent_to_interstate,
                     adjacent_to_usb=adjacent_to_usb,
                     inside_rural_study_area=inside_rural_study_area,
+                    interstate_frontage_pct=interstate_frontage_pct,
+                    usb_perimeter_pct=usb_perimeter_pct,
                 )
                 if not pathways:
                     needs_review.append(

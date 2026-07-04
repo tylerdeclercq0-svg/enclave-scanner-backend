@@ -329,7 +329,7 @@
       <div class="filter-grid">
         <div class="field">
           <label>Max acreage</label>
-          <input type="number" id="maxAcres" value="1280">
+          <input type="number" id="maxAcres" value="4480">
         </div>
         <div class="field">
           <label>Min acreage</label>
@@ -460,9 +460,9 @@ let openOverlayRowKey = null;
 const PATHWAY_DESCRIPTIONS = {
   1: '≥75% perimeter qualifying, adjacent to existing industrial/commercial/residential development.',
   2: '≥75% perimeter, FLUM-designated development AND ≥75% of those designated parcels already built out.',
-  3: 'Interstate + urban service area adjacency — not yet wired to a real data source, never matches.',
-  4: '≤700 acres, perimeter split between designated-development (≥50%) and urban service boundary (≥50%).',
-  5: 'Established rural study area in the local comprehensive plan (Option E) — no data source identified yet, never matches.',
+  3: 'Interstate + urban service area adjacency (s. 163.3164(4)(c)1.c). Interstate check is live for all four counties; USB check is approximated for Pasco only.',
+  4: '≤700 acres, perimeter split between designated-development (≥50%) and USB (≥50%) (s. 163.3164(4)(c)2). USB currently a boolean touch-test — see STATUS.md.',
+  5: 'Established rural study area intended for residential development (s. 163.3164(4)(c)3). All four pilot counties evaluate false based on direct comp-plan review.',
 };
 
 function getApiBase(){
@@ -610,7 +610,7 @@ async function runScan(){
   selectedParcels.clear();
 
   const minAcres = parseFloat(document.getElementById('minAcres').value) || 0;
-  const maxAcres = parseFloat(document.getElementById('maxAcres').value) || 1280;
+  const maxAcres = parseFloat(document.getElementById('maxAcres').value) || 4480;
   const maxCandidates = parseInt(document.getElementById('maxCandidates').value) || 25;
   const requireSingleOwner = document.getElementById('ownershipFilter').value === 'single';
   const density = document.getElementById('densityFilter').value;
@@ -972,9 +972,11 @@ const HOW_TO_USE_HTML = `
     <h3>2. Set your filters (Step 2)</h3>
     <p>Four things to set, all optional (defaults are the statute's own limits, not arbitrary):</p>
     <ul>
-      <li><strong>Acreage range</strong> — defaults to the statute's 1,280-acre cap. If you believe a
-      specific parcel qualifies for the larger 4,480-acre exception (dense/rural areas — see the other
-      panel), raise this manually; the tool does not detect that exception on its own.</li>
+      <li><strong>Acreage range</strong> — defaults to 4,480 acres, the statute's absolute ceiling under
+      the dense-urban exception. Parcels 1,280–4,480 acres are surfaced with a specific manual-review
+      note explaining what still has to be confirmed (the exception requires ≥75% residential development
+      at ≥1,000 residents/sq mi buildout density — the residential-only breakdown and buildout density
+      aren't automated here). Lower this to 1,280 if you only want the general-cap parcels.</li>
       <li><strong>Ownership requirement</strong> — filter to parcels that show no co-owner on record. Some
       counties don't publish a co-owner field at all, so this can under-include, never over-include.</li>
       <li><strong>Surrounding density</strong> — a rough rural/suburban/urban read on what land actually
@@ -1084,15 +1086,19 @@ function buildWhatThisDoesHtml(){
       planned-development land, and half touches land inside the urban service area. Same status as Option
       C's urban-service-area half: reachable, approximately, for Pasco only; not reachable for Nassau,
       St. Johns, or Osceola.</li>
-      <li><strong>Option E</strong> — the property sits inside a "rural study area" the county has formally
-      designated in its comprehensive plan as intended for eventual residential development.
-      <strong>Not reachable in this build</strong> — no consistent statewide or per-county dataset for
-      "rural study area" boundaries was ever found during research, so this always evaluates as false.</li>
+      <li><strong>Option E</strong> — the property sits inside "an established rural study area adopted in
+      the local government's comprehensive plan which was intended to be developed with residential uses"
+      (s. 163.3164(4)(c)3, F.S.). Wired in as of 2026-07-06; based on direct comprehensive-plan review,
+      set to <strong>False</strong> for all four pilot counties: Pasco's Northeast Rural Area and St. Johns'
+      Rural/Silviculture designations are preservation-oriented, Nassau explicitly discourages rural
+      development, and Osceola's 8,517-acre Mixed-Use District 5/6 study area sits inside the county's
+      urban service area rather than a rural area transitioning to residential. Osceola specifically gets a
+      per-parcel note flagging that ambiguity for direct confirmation with Osceola Planning.</li>
     </ul>
     <p>In practice, this means every "Confident" or "Possible" result you see today qualified through
-    Option A specifically. A parcel that would genuinely qualify through Options B-E has no way to show up
-    as a match right now — if you have specific knowledge that a parcel might qualify through one of those
-    four, that still needs to be checked by hand.</p>
+    Option A specifically. A parcel that would genuinely qualify through Options B-D has no way to show up
+    as a match right now, and Option E is set to false for every county — if you have specific knowledge
+    that a parcel might qualify through one of those four, that still needs to be checked by hand.</p>
 
     <h3>What disqualifies a property outright</h3>
     <p>Independent of the six requirements above, s. 163.3162(4)(i), F.S. excludes this pathway entirely
@@ -1129,7 +1135,7 @@ function buildWhatThisDoesHtml(){
       <thead><tr style="border-bottom:1px solid var(--line-strong);"><th style="text-align:left;">Requirement</th><th style="text-align:left;">Status</th></tr></thead>
       <tbody>
         <tr><td>Acreage cap (base 1,280 ac)</td><td>Automated — direct filter on the county's own parcel layer</td></tr>
-        <tr><td>Acreage cap exception (4,480 ac, dense/rural areas)</td><td>Not automated — the tool never raises this on its own; you must manually widen the acreage filter if you believe it applies</td></tr>
+        <tr><td>Acreage cap exception (4,480 ac, dense/urban areas)</td><td>Partially automated — the default acreage filter now includes 1,280–4,480 acre parcels, and each such parcel gets a specific manual-review note explaining the buildout-density condition (≥1,000 residents/sq mi at buildout) that isn't automatable without per-county FLU density coefficients</td></tr>
         <tr><td>County population cap (≤1.75M)</td><td>True by construction — every county in this tool's registry is already under the cap, not a runtime check</td></tr>
         <tr><td>DOR/local agricultural use code</td><td>Automated — per-county confirmed codes, not a generic statewide range</td></tr>
         <tr><td>Unincorporated status</td><td>Automated for all four pilot counties — Pasco uses a separate, dedicated city-limits layer instead of the FLUM-based method used for the other three, see below</td></tr>
@@ -1137,7 +1143,7 @@ function buildWhatThisDoesHtml(){
         <tr><td>Encirclement Option A</td><td>Automated — a real, live geometric calculation against each county's own future land-use map</td></tr>
         <tr><td>Encirclement Option B</td><td>Structurally unreachable today — the additional data it needs (how much of the planned-development land is already built out) isn't wired into the live scan; can never evaluate true right now, regardless of a parcel's real facts</td></tr>
         <tr><td>Encirclement Options C, D</td><td>Reachable, approximately, for Pasco only — interstate adjacency is a real live check for all four counties, and Pasco's own "Rural Area" comprehensive-plan layer is used as an approximate stand-in for its missing urban-service-boundary (USB) layer. Nassau, St. Johns, and Osceola have no USB data source at all, so Options C/D stay unreachable there.</td></tr>
-        <tr><td>Encirclement Option E</td><td>Structurally unreachable today — no rural-study-area dataset was found for any county</td></tr>
+        <tr><td>Encirclement Option E</td><td>Wired in, currently False for every pilot county — direct comp-plan review found no county with a "rural study area … intended to be developed with residential uses" as the statute defines it. Osceola is the one ambiguous case (its Mixed-Use District 5/6 study area) and gets a per-parcel note flagging it for direct planning-department confirmation.</td></tr>
         <tr><td>Post-1/1/2025 sale</td><td>Automated — reflects only this parcel's own most recent recorded sale</td></tr>
         <tr><td>Single ownership/control</td><td>Estimated — name-matching on this parcel's own record only; some counties have no co-owner field at all, in which case this shows "unknown," never a guessed "yes"</td></tr>
         <tr><td>Public services — water &amp; wastewater</td><td>Estimated — real FDOH Florida Water Management Inventory record, Known/Likely/Somewhat Likely/Unknown confidence</td></tr>

@@ -40,11 +40,17 @@ except ImportError:  # pragma: no cover
 # point precision in the source data.
 ADJACENCY_BUFFER_FEET = 5.0
 
-# Right-of-way / canal handling: per s. 163.3164(4), F.S., if a road,
-# right-of-way, body of water, or canal runs along the perimeter, the
-# calculation should be based on the parcel ACROSS that feature, not
-# the right-of-way itself. This module's MVP version does not yet
-# implement that substitution — see the TODO in classify_perimeter().
+# Right-of-way / canal handling: per s. 163.3164(4), F.S., "where a
+# right-of-way, body of water, or canal exists along the perimeter of a
+# parcel, the perimeter calculations of the agricultural enclave must be
+# based on the adjacent parcel or parcels across the right-of-way, body
+# of water, or canal." Implemented 2026-07-06 via ROW_SUBSTITUTION_FEET
+# below and the buffered-neighbor intersection in compute_encirclement().
+# Typical local/collector road ROW is 60-120 ft, arterials 100-150 ft,
+# residential canals in Florida are typically 60-100 ft wide. 150 ft is
+# a conservative default that reaches across all three cases without
+# routinely engulfing non-adjacent second-row parcels.
+ROW_SUBSTITUTION_FEET = 150.0
 
 
 @dataclass
@@ -274,6 +280,7 @@ def compute_encirclement(
     neighbor_features: list[dict],
     flu_field: str,
     agricultural_flu_values: tuple[str, ...],
+    row_substitution_feet: float = ROW_SUBSTITUTION_FEET,
 ) -> EncirclementResult:
     """
     Core perimeter-adjacency calculation.
@@ -300,6 +307,8 @@ def compute_encirclement(
     candidate_poly = esri_json_to_shapely(candidate_geometry)
     boundary = candidate_poly.boundary
     total_perimeter = boundary.length
+
+    row_substitution_meters = max(0.0, row_substitution_feet) * 0.3048
 
     segments: list[PerimeterSegment] = []
     qualifying_perimeter = 0.0
@@ -334,6 +343,25 @@ def compute_encirclement(
         # the touching stretch counts).
         shared = boundary.intersection(neighbor_poly)
         shared_length = shared.length
+
+        # ROW/canal/water-body substitution rule (s. 163.3164(4), F.S.):
+        # if a right-of-way runs between the candidate and this neighbor,
+        # the direct check above returns ~0 for that stretch, silently
+        # under-counting qualifying perimeter. Buffering the neighbor
+        # outward by a typical ROW width lets it "reach across" the gap.
+        # We use max() rather than adding: if the neighbor is already
+        # directly adjacent, the direct length is what we want (buffering
+        # inflates it slightly at corners); if there IS a gap, the
+        # buffered version is strictly larger and correctly credits the
+        # far-side neighbor for the ROW-blocked stretch. The existing
+        # >=100% cap below protects against two neighbors both reaching
+        # into the same gap and double-counting.
+        if row_substitution_meters > 0:
+            buffered_shared = boundary.intersection(
+                neighbor_poly.buffer(row_substitution_meters)
+            )
+            shared_length = max(shared_length, buffered_shared.length)
+
         if shared_length <= 0:
             continue
 
@@ -374,29 +402,44 @@ def determine_pathways(
     adjacent_to_interstate: bool,
     adjacent_to_usb: bool,
     designated_pct_existing_development: Optional[float] = None,
+    inside_rural_study_area: bool = False,
 ) -> list[int]:
     """
-    Map an encirclement result plus a few other facts onto the five
-    statutory pathways in s. 163.3164(4)(c), F.S. Pathway numbers match
-    the order used elsewhere in this project (and in the bill itself):
+    Map an encirclement result plus a few other facts onto the statutory
+    pathways in s. 163.3164(4)(c), F.S. The enrolled bill text (verified
+    2026-07-06 against flsenate.gov/Session/Bill/2026/686/BillText/er,
+    Ch. 2026-34) organizes (c) as one preamble ("Are surrounded on at
+    least 75 percent of their perimeter by:") followed by (c)1 with three
+    OR-separated sub-alternatives (a/b/c), then (c)2, then (c)3. This
+    project labels them Options 1-5 for continuity with prior code, but
+    the statute-to-Option mapping is:
 
-      1. >=75% perimeter, existing industrial/commercial/residential
-         development.
-      2. >=75% perimeter, FLUM-designated development AND >=75% of
-         those designated parcels already have existing development.
-         NOTE: the 75% figure here was corrected from an earlier draft
-         that used 50% — the enrolled bill text requires 75%, not 50%.
-      3. Combination of an interstate highway and parcels within an
-         urban service district/area/line designated for development.
-      4. Parcel(s) <=700 acres, with the perimeter split between
-         designated-development parcels (>=50%) and parcels within a
-         USB (>=50%) — these can be the same or different segments.
-      5. Located within an established rural study area in the local
-         comprehensive plan — this requires a dataset this module does
-         not yet fetch (no statewide or even consistently-named county
-         layer was found for "rural study area" boundaries during
-         research); always returns False here until that data source
-         is identified per county.
+      Option 1 = (c)1.a: existing industrial/commercial/residential
+        development (the 75% comes from the (c) preamble).
+      Option 2 = (c)1.b: FLUM-designated for such development AND >=75%
+        of those designated parcels already have existing development.
+        NOTE: the 75% figure here was corrected from an earlier draft
+        that used 50% — the enrolled bill text requires 75%, not 50%.
+      Option 3 = (c)1.c: combination of an interstate highway AND
+        parcels within an urban service district/area/line that are
+        designated for development.
+      Option 4 = (c)2: parcel(s) <=700 acres, with the perimeter split
+        between designated-development parcels (>=50%) AND parcels
+        within a USB (>=50%) — these can be the same or different
+        segments.
+      Option 5 = (c)3: located within an established rural study area
+        adopted in the local government's comprehensive plan which was
+        intended to be developed with residential uses. This is a pure
+        boundary check with no acreage/percentage math. `inside_rural_
+        study_area` is set per-county by the caller based on a direct
+        comprehensive-plan review — see scan_orchestrator.py for the
+        per-county sourcing.
+
+    Known under-specification, still open as of 2026-07-06: Option 3's
+    75% test currently uses only the FLUM-neighbor qualifying percent
+    and doesn't credit the interstate's own perimeter segment; Option 4's
+    USB test currently uses a boolean touch-test, not the >=50% USB
+    perimeter the statute requires. Both are noted in STATUS.md.
     """
     pathways: list[int] = []
 
@@ -415,5 +458,8 @@ def determine_pathways(
 
     if acreage <= 700 and encirclement.pct_qualifying >= 50 and adjacent_to_usb:
         pathways.append(4)
+
+    if inside_rural_study_area:
+        pathways.append(5)
 
     return pathways

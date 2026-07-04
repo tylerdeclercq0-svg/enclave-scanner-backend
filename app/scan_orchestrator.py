@@ -76,7 +76,7 @@ class ScanResultRow:
 def run_county_scan(
     county_id: str,
     min_acreage: float = 20.0,
-    max_acreage: float = 1280.0,
+    max_acreage: float = 4480.0,
     fetch_neighbor_buffer_feet: float = 50.0,
     max_candidates: int = 25,
     require_single_owner: bool = False,
@@ -175,19 +175,60 @@ def run_county_scan(
                         "USB layer — confirm with the Planning Department before relying on an "
                         "Option C/D match."
                     )
+                # Option 5 (s. 163.3164(4)(c)3, F.S.): "located within the
+                # boundary of an established rural study area adopted in the
+                # local government's comprehensive plan which was intended
+                # to be developed with residential uses." Verified per-county
+                # 2026-07-06 via direct comp-plan review (not GIS search):
+                # - Pasco: Northeast Pasco Rural Area is preservation-oriented
+                #   (concurrent boundary amendment required for higher density
+                #   applications). Not a (c)3 area. -> False.
+                # - Nassau: 2030 plan discourages rural development, 2050
+                #   vision preserves rural character. Not a (c)3 area. -> False.
+                # - St. Johns: 2050 plan's Rural/Silviculture and Agricultural-
+                #   Intensive designations are preservation, not future-
+                #   residential. Not a (c)3 area. -> False.
+                # - Osceola: has an 8,517-acre "study area" for Mixed-Use
+                #   Districts 5 & 6, drafted for 14,010 residential units --
+                #   BUT described in the county's own materials as inside
+                #   the county's "urban service area," not currently a rural
+                #   area transitioning to residential. Ambiguous under the
+                #   statutory definition. Confirming with Osceola Planning
+                #   before wiring True; conservatively False for now to avoid
+                #   a false positive.
+                # All four are False today. When this changes (either an
+                # Osceola confirmation, or a new county added to the registry
+                # that has a real (c)3 area), wire the per-county True/False
+                # here via a CountyEndpoint field + a boundary check.
+                inside_rural_study_area = False
+
                 pathways = determine_pathways(
                     encirclement,
                     acreage=parcel.acreage or 0,
                     adjacent_to_interstate=adjacent_to_interstate,
                     adjacent_to_usb=adjacent_to_usb,
+                    inside_rural_study_area=inside_rural_study_area,
                 )
                 if not pathways:
                     needs_review.append(
                         "No pathway matched automatically. This often means "
-                        "the parcel relies on an interstate/USB combination "
-                        "(pathway 3 or 4) or rural study area (pathway 5) — "
-                        "neither is fully automated yet. Don't treat this as "
-                        "a definitive disqualification."
+                        "the parcel relies on Option 3 (interstate + USB, "
+                        "s. 163.3164(4)(c)1.c) or Option 4 (<=700 ac + USB "
+                        "combination, s. 163.3164(4)(c)2), both of which have "
+                        "known under-specifications (see STATUS.md), or on "
+                        "Option 5 (rural study area, s. 163.3164(4)(c)3), "
+                        "which none of the four pilot counties currently has "
+                        "adopted based on direct comp-plan review. Don't "
+                        "treat this as a definitive disqualification."
+                    )
+                if county_id == "osceola":
+                    needs_review.append(
+                        "Osceola specifically: Option 5 (rural study area, "
+                        "s. 163.3164(4)(c)3) is treated as False here, but the "
+                        "county has an 8,517-acre Mixed-Use District 5/6 "
+                        "study area with 14,010 planned residential units "
+                        "that may qualify. Confirm with Osceola Planning "
+                        "whether this parcel falls within that boundary."
                     )
                 # FLUM character (candidate's own designation) + surrounding
                 # density bucket (dominant neighboring designation) — both
@@ -255,6 +296,35 @@ def run_county_scan(
                 "1/1/2025 — confirm this doesn't disqualify the "
                 "single-owner-as-of-1/1/2025 pathway requirement."
             )
+
+        # Acreage exception (s. 163.3164(4)(e), F.S.): the general 1,280-acre
+        # cap rises to 4,480 acres if the parcel is surrounded on at least
+        # 75% of its perimeter by existing or authorized residential
+        # development at a buildout density >=1,000 residents/sq mi. The
+        # buildout-density part requires per-county FLU-category residents-
+        # per-sq-mi coefficients this project does not currently have, so
+        # this can't be automated end-to-end -- surface the exception-
+        # eligible parcels with a specific manual-review note instead of
+        # silently dropping them (the pre-2026-07-06 behavior) or silently
+        # counting them (which would over-include).
+        if parcel.acreage is not None and parcel.acreage > 1280.0:
+            if (pct_qualifying or 0) >= 75:
+                needs_review.append(
+                    f"Parcel exceeds the 1,280-acre general cap ({parcel.acreage:.0f} ac) "
+                    "and passes the 75% perimeter test — it may qualify for the "
+                    "urban/dense exception raising the cap to 4,480 ac (s. 163.3164(4)(e), "
+                    "F.S.), but only if the surrounding 75% is specifically RESIDENTIAL "
+                    "development at a buildout density of at least 1,000 residents/sq mi. "
+                    "Neither the residential-only breakdown nor buildout density is "
+                    "automated here — confirm with the county Planning Department before "
+                    "relying on this parcel qualifying."
+                )
+            else:
+                exclusion_flags.append(
+                    f"Parcel exceeds the 1,280-acre general cap ({parcel.acreage:.0f} ac) "
+                    "and does not meet the 75% perimeter test required for the urban/dense "
+                    "exception (s. 163.3164(4)(e), F.S.) -- statutorily ineligible."
+                )
 
         centroid_lat: Optional[float] = None
         centroid_lon: Optional[float] = None

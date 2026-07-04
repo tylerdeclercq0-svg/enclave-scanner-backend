@@ -1081,3 +1081,134 @@ documented reason, except:
   dataset for this (RLSA or otherwise) until the real statutory language is
   in hand; get it from Tyler directly before spending more research time
   guessing at it.
+
+## Enrolled bill text obtained + four gap-closes — 2026-07-06 (late session)
+
+Tyler provided the real enrolled bill URL
+(flsenate.gov/Session/Bill/2026/686/BillText/er/HTML, ENROLLED CS for CS
+for CS for SB 686 = Ch. 2026-34) and quoted the actual statutory language
+for the three items this project had been guessing at (rural study area,
+perimeter ROW substitution, acreage cap exception).
+
+**Enrolled bill (c) structure — verified word-for-word, corrects a long-
+standing project mislabeling**: (c)'s preamble is *"Are surrounded on at
+least 75 percent of their perimeter by:"* followed by (c)1 with three OR-
+separated sub-alternatives (a/b/c), then (c)2, then (c)3. This project
+labels them Options 1-5 for continuity, but the statute-to-Option mapping
+is: Option 1 = (c)1.a; Option 2 = (c)1.b; Option 3 = (c)1.c; Option 4 =
+(c)2; Option 5 = (c)3. The `s. 163.3164(4)(c)5` citation this file has
+used above and in prior comments/docs is WRONG — Option 5 is `(c)3`.
+Left prior sections above unedited for historical accuracy; new work in
+this session uses the corrected citations.
+
+**Two additional under-specifications caught while mapping code to bill**
+(both worth remembering but NOT fixed this session, punch-list items):
+- Option 3 currently checks `adjacent_to_interstate and adjacent_to_usb
+  and pct_qualifying >= 75` — but `pct_qualifying` only counts FLUM-
+  neighbor segments, not the interstate's own perimeter segment. The
+  statute says the 75% is the interstate + designated-USB parcels
+  combined. Under-scoring parcels where interstate frontage should count.
+- Option 4 currently checks `adjacent_to_usb` as a boolean touch test.
+  The statute requires >=50% of perimeter INSIDE a USB, not just touch.
+  Over-inclusive.
+
+**One additional real gap flagged from reading (4)(f)**: the enrolled
+bill restricts eligibility to "a county with a population of 1.75 million
+or less." Not enforced anywhere currently. All ten counties in the
+registry are under this threshold, so no observed effect today, but a
+future Miami-Dade/Broward addition would silently pass. Small defensive
+fix, punch-list.
+
+### #1 (statutory clarification) — DONE, findings above.
+
+### #2 (ROW/water/canal perimeter substitution) — DONE, live-verified.
+
+`encirclement.py` now implements the (4) preamble's substitution rule
+via new `ROW_SUBSTITUTION_FEET = 150.0` module constant + a new
+`row_substitution_feet` parameter on `compute_encirclement`. For each
+FLUM neighbor, the function now measures `max(direct_intersection,
+buffered_neighbor_intersection)`, letting a residential FLUM polygon
+"reach across" a road/canal gap to the candidate. Existing >=100%
+qualifying cap protects against double-counting when two neighbors both
+reach into the same ROW gap.
+
+Live-verified against 15 real Pasco candidates via `.venv312`. Sample:
+```
+parcel_id                        ac  before   after   delta
+35-25-16-0030-05700-0000       36.9   47.7%   83.4%  +35.7pp  <- crosses 75% Option 1 threshold
+12-24-16-0000-00100-0070       72.2    3.2%   48.0%  +44.8pp
+36-25-16-0010-05400-0000       69.0   16.8%   60.4%  +43.6pp
+01-26-16-0010-00000-0180       59.0   25.6%   63.2%  +37.6pp
+36-25-16-0000-00200-0000       20.0   91.7%  100.0%   +8.3pp
+35-24-16-0000-00100-0011       32.9  100.0%  100.0%   +0.0pp  <- reference parcel unchanged, expected
+```
+Money row: parcel `35-25-16-0030-05700-0000` crosses 75% threshold —
+was silently no-pathway before this fix, now matches Option 1. Sanity:
+4 parcels already at 100% stay at 100%.
+
+### #3 (acreage cap exception, s. 163.3164(4)(e)) — DONE, honest partial automation.
+
+Previously the fetch cap was a flat 1,280 acres in `parcel_fetcher.py`,
+`scan_orchestrator.py`, `main.py`, and `web/index.html` — so parcels
+1,280-4,480 acres were dropped BEFORE encirclement was measured; the
+exception could never fire. Raised the default cap to 4,480 (the
+statute's absolute ceiling) in all four places. Parcels >1,280 acres now
+get either a specific manual-review note (if pct_qualifying >= 75,
+explaining the buildout-density condition that isn't automatable) or a
+hard exclusion flag (if pct_qualifying < 75, statutorily ineligible).
+The buildout-density check itself (>=1,000 residents/sq mi at buildout)
+remains unautomated by design — would need per-county FLU-category
+residents-per-sq-mi coefficients this project doesn't have.
+
+### #4 (Option 5 / rural study area, s. 163.3164(4)(c)3) — DONE, four-county comp-plan review, wired False everywhere with per-county reasoning.
+
+Direct comprehensive-plan review (not GIS layer search), findings
+recorded inline in `scan_orchestrator.py`:
+- **Pasco**: Northeast Pasco Rural Area is preservation-oriented; plan
+  requires a concurrent rural-boundary amendment for higher-density
+  applications. Opposite of "intended to be developed with residential
+  uses." -> False.
+- **Nassau**: 2030 plan discourages rural development; 2050 vision
+  preserves rural character. -> False.
+- **St. Johns**: 2050 plan's Rural/Silviculture + Agricultural-Intensive
+  designations are preservation-oriented. -> False.
+- **Osceola**: has an 8,517-acre "study area" for Mixed-Use Districts 5
+  & 6 drafted for 14,010 residential units, BUT described in the
+  county's own materials as inside "the county's urban service area."
+  Ambiguous under (c)3. Conservatively False + Osceola-specific per-
+  parcel manual-review note flagging this ambiguity for direct planning-
+  department confirmation.
+
+`encirclement.determine_pathways()` now accepts `inside_rural_study_area:
+bool` (previously Option 5 had NO code at all — the function returned
+after Option 4). All four counties evaluate False today. When this
+changes (Osceola confirmation, or new county added), value gets set via
+a CountyEndpoint field + boundary check — NOT by falling back to the
+statewide RLSA layer, which is a legally distinct s. 163.3248 mechanism
+(the trap this project already avoided once with WSA vs. WRPA).
+
+Live end-to-end scan verified via `.venv312` (real Pasco, 5 candidates)
+— no exceptions, reference parcel still returns [1, 4], other parcels
+show real differentiated qualifying percentages consistent with the ROW-
+fix demo above, new statutorily-correct citations in "No pathway matched"
+review note.
+
+## Punch list — carryovers after this session
+
+**High-value under-specifications caught but NOT fixed this session:**
+1. Option 3 pct_qualifying test doesn't credit interstate frontage —
+   only FLUM neighbors count toward the 75%. Real parcels with mostly-
+   interstate perimeter are under-scored. Would need to add interstate
+   segment length to `qualifying_perimeter` in `compute_encirclement`
+   when the parcel is interstate-adjacent.
+2. Option 4 USB test is a boolean touch instead of the >=50% USB
+   perimeter the statute requires. Currently over-inclusive. Needs
+   Pasco's Rural Area layer used as a real perimeter-percent test
+   (analogous to how FLUM neighbors are already measured).
+3. County population cap (>=1.75M excludes a county entirely,
+   s. 163.3164(4)(f)) — not enforced. Add to `CountyEndpoint.population`
+   check in `main.py` `scan_county()`.
+
+**Deploy pending Tyler's go-ahead** — this session's work is committed
+locally but nothing has been pushed since `1f28ed8` (which is itself
+still unpushed on `main`).

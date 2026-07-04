@@ -108,7 +108,7 @@ def list_counties():
 def scan_county(
     county_id: str,
     min_acreage: float = Query(20.0, ge=0),
-    max_acreage: float = Query(1280.0, gt=0),
+    max_acreage: float = Query(4480.0, gt=0, description="Statutory ceiling: 1,280 acres general cap, or 4,480 acres under the dense-urban exception in s. 163.3164(4)(e), F.S. Default 4,480 to include exception-eligible parcels; they're surfaced with a specific manual-review note explaining the buildout-density condition."),
     max_candidates: int = Query(25, ge=1, le=200, description="Caps how many parcels get the full (slower) encirclement check. Start small (10-25) for testing."),
     require_single_owner: bool = Query(False, description="Drop candidates with a recorded co-owner (owner_name_2 populated). Parcels where this county has no co-owner field at all are NOT dropped — unknowable, not assumed single-owner."),
     min_encirclement_pct: Optional[float] = Query(None, ge=0, le=100, description="Drop candidates below this qualifying-perimeter percentage."),

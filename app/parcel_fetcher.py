@@ -247,7 +247,7 @@ def _extract_acreage(county: CountyEndpoint, attrs: dict, geometry: Optional[dic
 def fetch_candidate_parcels(
     county_id: str,
     min_acreage: float = 20.0,
-    max_acreage: float = 1280.0,
+    max_acreage: float = 4480.0,
     max_candidates: int = 200,
     require_single_owner: bool = False,
 ) -> list[CandidateParcel]:

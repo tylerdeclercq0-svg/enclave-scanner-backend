@@ -366,48 +366,165 @@ matching the `/scan` endpoint's existing pattern, since a bad API key
 (`RuntimeError`) or a `requests` network error would otherwise surface as
 a bare unhandled 500 with no detail.
 
-**Not yet done**: no `CENSUS_API_KEY` exists yet, so the ACS fetch itself
-has never been exercised against real Census data end-to-end — only
-verified up to "the real server accepts this request shape and rejects
-only the key." Get a real key and re-verify once available. The
-dashboard also still has no UI element calling this endpoint at all.
-
 **Deployed and confirmed live**: committed as `32c88b3`, pushed to
 GitHub, and confirmed via the Render dashboard's own deploy log —
 "Deploy live for `32c88b3`" at July 3, 2026, 10:12 PM. Note this only
 confirms the code is deployed, not that the ACS fetch works against
-real data (still blocked on getting a `CENSUS_API_KEY`, per above) —
-`/health`'s `code_version` string is a stale hardcoded marker from an
-earlier commit and was NOT bumped here, so don't use it to verify which
-commit is live; check Render's deploy log directly instead.
+real data by itself — `/health`'s `code_version` string is a stale
+hardcoded marker from an earlier commit and was NOT bumped here, so
+don't use it to verify which commit is live; check Render's deploy log
+directly instead.
+
+**`CENSUS_API_KEY` obtained, activated, and confirmed working end-to-end
+against real data — 2026-07-04.** Signed up at
+https://api.census.gov/data/key_signup.html; the signup flow sends two
+separate emails — the key itself, and a second "click here to activate
+your key" confirmation link that must be clicked before the key works
+(the first live test attempt failed with the "Invalid Key" HTML page
+specifically because this activation step hadn't been done yet — this
+is a real, confirmed gotcha in Census's signup flow, not a Render/env-var
+problem). Set as `CENSUS_API_KEY` on Render's Environment tab (triggers
+an automatic redeploy on save). Called
+`/api/parcels/35-24-16-0000-00100-0011/demographics?lat=28.41&lon=-82.66`
+against the live Render deployment and got real ACS data back for all
+three rings:
+- 5 mi: population 35,266 (±1,925 MOE), 19,630 housing units, 449/sq mi
+- 10 mi: population 197,122 (±5,590 MOE), 98,108 housing units, 627/sq mi
+- 15 mi: population 381,925 (±7,527 MOE), 181,452 housing units, 540/sq mi
+
+`median_household_income`/`median_age` correctly came back `null` for
+all three rings — expected, since that aggregation is deliberately
+unimplemented (see note above, needs population-weighting not a sum).
+
+## Dashboard wired to demographics endpoint — 2026-07-04
+
+Added a "Pull area demographics" button per parcel row in `web/index.html`
+(new rightmost table column). Click-only, per-row fetch to
+`/api/parcels/{parcel_id}/demographics?lat=...&lon=...` using that row's own
+`centroid_lat`/`centroid_lon` (already present on every `ScanResultRow`) —
+confirmed this is NOT called as part of `runScan()`/bulk county scan, matching
+`main.py`'s docstring intent. Rows with a null centroid (e.g. counties/parcels
+where `get_centroid_lat_lon` failed) show a disabled "No centroid" button
+instead of a dead click. Results render 5/10/15-mile population (with MOE),
+housing units, and density inline in the cell; `median_household_income`/
+`median_age` explicitly render as "not available" (styled distinctly, not
+blank/zero) since that aggregation is a known, deliberate gap, not a bug.
+Failed fetches show a "Failed — retry?" state with a retry button rather than
+silently failing. Verified visually in a local static preview (mock data
+injected via console since CORS locks the real Render backend to the Netlify
+origin only, not localhost) — DOM/render logic confirmed correct; the real
+network path was already confirmed working via direct `curl` against Render
+in the prior session.
+
+## Statutory gaps — research pass 2026-07-04 (data sources confirmed live, NO CODE WRITTEN YET)
+
+Tyler asked for these three gaps to be closed, in order, with a live-data
+research pass reported back before writing any implementation. All three
+are researched and confirmed live; nothing below is wired into
+`exclusions.py`, `scan_orchestrator.py`, or `county_registry.py` yet — this
+is groundwork only, picked back up next session.
+
+### 1. Unincorporated-status hard filter — mixed readiness per county
+
+- **Osceola**: FLUM layer's `Jurisdiction` field already confirmed
+  populated (`Unincorporated`/`incorporated`+city). The parcel layer's own
+  `Jurisdicti`/`JurisDesc` are NULL (known gap, prior session) — so this
+  needs a spatial join: candidate parcel geometry -> intersect against
+  Osceola's FLUM layer -> read `Jurisdiction` off whichever FLUM polygon
+  contains it. Not yet implemented.
+- **Nassau**: already effectively satisfied — the FLUM layer
+  (`Unincorporated_Nassau_County_Future_Land_Use_`) is pre-filtered to
+  unincorporated land at the source (confirmed via its own title/ownership,
+  prior session). No join needed, no further action.
+- **St. Johns**: no separate jurisdiction field on either layer (confirmed
+  via a fresh field-name grep against both FLUM and parcel layers this
+  session — genuinely absent, not a naming guess). Incorporated cities
+  appear as their own `FUTLUSE1` categories instead (`CITY OF ST.
+  AUGUSTINE`, etc., confirmed prior session) — the filter here is
+  excluding those specific FLU category strings, not a spatial join. Not
+  yet wired into exclusion logic (currently only informs
+  `agricultural_flu_values`, not a separate unincorporated check).
+- **Pasco**: no jurisdiction field at all on the FLUM layer (confirmed via
+  fresh field grep). New finding this session: the layer is titled **"BOCC
+  Future Land Use"** (Board of County Commissioners) — Florida
+  municipalities each adopt their own separate FLU plan under home-rule
+  law, so this layer is *plausibly* already unincorporated-only by
+  construction, same as Nassau's. **This is an inference, NOT confirmed**
+  — has not been verified that incorporated Pasco cities (Dade City,
+  Zephyrhills, New Port Richey, Port Richey, San Antonio) are actually
+  absent from this layer's spatial extent. Decide before implementing:
+  spend a query confirming this (e.g. test a known point inside Zephyrhills
+  city limits against the layer), or accept it as a documented assumption.
+
+### 2. Wekiva Study Area / Everglades Protection Area exclusion — both real layers found, one real trap avoided
+
+- **Everglades Protection Area**: confirmed live —
+  `https://services1.arcgis.com/sDAPyc2rGRn7vf9B/arcgis/rest/services/RULE40E_63_EVERGLADES_PROTECTION_AREA/FeatureServer/0`
+  (SFWMD-hosted, 6 real features, matches `exclusions.py`'s cited statute
+  s. 373.4592(2), F.S. / Ch. 40E-63 F.A.C.). Not geographically relevant to
+  any of the four current pilot counties, but now a real usable layer
+  instead of the old placeholder URL.
+- **Wekiva — real trap found and avoided**: `exclusions.py` cites s.
+  **369.316**, "Wekiva **Study** Area" specifically — legally DISTINCT from
+  the more commonly-indexed "Wekiva **River Protection** Area" (WRPA, s.
+  369.303/369.301(9), a different part of the same statute chapter). First
+  search results (an Orange County layer, an SJRWMD layer) were both WRPA,
+  not Study Area — wiring either in directly would have been a real
+  conflation bug. Kept digging and found **Seminole County's own layer** —
+  `https://services3.arcgis.com/n4VF6lyYfB5kizho/arcgis/rest/services/WekivaProtectionAreas/FeatureServer/0`
+  — which has explicit separate `WRPA` and `WSA` yes/no fields on the same
+  2 real features (confirmed via live query, e.g. one feature is
+  `WSA=yes, WRPA=no`, ~19,739 acres). Filtering `WSA='yes'` gets the actual
+  statutory boundary needed. Caveat: this layer's extent looks like it only
+  covers the Orange/Seminole border area (~0.1x0.24 degrees), while the
+  statute's metes-and-bounds description spans Lake/Orange/Seminole — may
+  not capture the Lake County portion. Moot for the four current pilot
+  counties (none are in Lake/Orange/Seminole); would matter if Orange
+  County (already in the registry as unconfirmed) gets activated later.
+  Not yet wired into `exclusions.py` — `WEKIVA_STUDY_AREA_LAYER_URL_PLACEHOLDER`
+  is still `None` there.
+
+### 3. Single-owner-as-of-1/1/2025 — real sale-date field confirmed on all four counties, encodings differ
+
+| County | Field(s) | Format | Confirmed via live sample |
+|---|---|---|---|
+| Pasco | `SALE_YEAR`/`SALE_MON`/`SALE_DAY` + `SALE_AMT` | separate ints, full precision | 2018-05-02, $30,000 |
+| Nassau | `SALEYR1`/`SALEPRC1` (+ `SALEYR2`/`SALEPRC2` prior-sale pair) | **year only**, no month/day | 2019, 2018 |
+| St. Johns | `SALEDATE` | integer, values like 38520/37741 — near-certainly Excel/OLE serial day count (days since 1899-12-30), NOT YYYYMMDD (wrong magnitude for that) | plausible mid-2000s dates once decoded; **encoding inferred from value magnitude, not confirmed by documentation** |
+| Osceola | `SaleDate`/`PrevSaleDa` (+ `SalePrice`) | standard Esri epoch-millis date field | 1690848000000 = 2023-08-01; also has a previous-sale pair, best of the four |
+
+Nassau's year-only granularity is not actually a real limitation for this
+specific check: since the cutoff is exactly 1/1/2025, `SALEYR1 >= 2025` is
+equivalent to "sold on or after 1/1/2025" with no precision loss. None of
+these fields let us reconstruct historical ownership before the
+most-recent recorded sale — they only support a "has this parcel changed
+hands since 1/1/2025" flag, which is what was asked for (a flag, not full
+historical reconstruction). Not yet wired into `scan_orchestrator.py` or
+surfaced as a flag anywhere.
 
 ## Exact next step
 
-1. Get a real `CENSUS_API_KEY` (https://api.census.gov/data/key_signup.html),
-   set it on Render, and re-verify `/api/parcels/{id}/demographics`
-   end-to-end against real Census data (only the failure path has been
-   confirmed so far).
-2. Wire the demographics endpoint into the dashboard (a per-row "pull
-   area demographics" action) — no UI element calls it yet.
-3. Revisit the unincorporated-status hard filter given the Osceola
-   parcel-layer jurisdiction data gap found earlier in this file —
-   likely needs a spatial join against the FLUM layer's `Jurisdiction`
-   field instead of the parcel layer's own (NULL) jurisdiction fields.
-4. Consider re-running the same live `describe_layer` + distinct-values
+1. Get a go/no-go from Tyler on the Pasco BOCC-layer inference (item 1
+   above), then implement all three: the unincorporated hard filter
+   (per-county logic above), the Wekiva `WSA='yes'` + Everglades exclusion
+   checks in `exclusions.py` (replacing the placeholder constants), and a
+   post-1/1/2025-sale flag in `scan_orchestrator.py`/`ScanResultRow` using
+   the per-county fields in the table above.
+2. Consider re-running the same live `describe_layer` + distinct-values
    spot-check that caught Pasco's wrong `flu_field` against the other
    three counties' FLUM layers, now that there's a concrete example of
    how an "UNCONFIRMED CARRYOVER guess" note in this file turned out to
    be silently wrong in production-relevant code.
-5. `max_candidates=25` default in `run_county_scan` has not been timed
+3. `max_candidates=25` default in `run_county_scan` has not been timed
    against a real full run yet — worth a rough wall-clock check before
    wiring this into a synchronous web request (see the function's own
    docstring re: free-tier hosting timeouts).
 
-## Known gaps (already flagged, still true, not addressed this pass)
+## Known gaps (still true, not addressed this pass)
 
-5-year continuous ag-use history, Wekiva/Everglades exclusion
-boundaries, public-services availability, single-owner-as-of-1/1/2025
-(vs. current owner of record), and the unincorporated-status hard
-filter (data now exists for Osceola/`Jurisdiction` and is surfaced as a
-manual-review flag in `scan_orchestrator.py`, but is NOT yet enforced as
-an automatic exclusion for any county).
+5-year continuous ag-use history and public-services availability remain
+fully unaddressed (no data source research done yet). Wekiva/Everglades
+exclusion, single-owner-as-of-1/1/2025, and the unincorporated-status hard
+filter all have real, live, confirmed data sources now (see research pass
+above) but are NOT yet wired into any exclusion/scoring code — still
+manual-review-only until implemented.

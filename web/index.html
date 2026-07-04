@@ -106,6 +106,18 @@
   }
   button.export:hover{background:var(--ink);color:var(--parchment);}
 
+  button.demo{
+    font-family:'IBM Plex Mono',monospace;font-size:11px;
+    background:none;border:1px solid var(--field);border-radius:2px;
+    padding:5px 10px;cursor:pointer;color:var(--field);white-space:nowrap;
+  }
+  button.demo:hover{background:var(--field);color:var(--parchment);}
+  button.demo:disabled{border-color:var(--line);color:var(--muted);cursor:not-allowed;background:none;}
+  .demo-cell{min-width:180px;}
+  .demo-rings{font-family:'IBM Plex Mono',monospace;font-size:11px;line-height:1.6;color:var(--ink);}
+  .demo-rings .na{color:var(--muted);font-style:italic;}
+  .demo-error{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--dev);}
+
   table{width:100%;border-collapse:collapse;font-size:13px;}
   thead th{
     text-align:left;font-family:'IBM Plex Mono',monospace;font-size:11px;
@@ -194,6 +206,7 @@
             <th data-key="likely_pathways">Pathway(s)</th>
             <th data-key="attractiveness_score" class="num">Score</th>
             <th data-key="flags"></th>
+            <th>Area Demographics</th>
           </tr>
         </thead>
         <tbody id="resultsBody"></tbody>
@@ -347,13 +360,71 @@ async function runScan(){
   setProgress(0);
 }
 
+function fmtDemoValue(v, digits=0){
+  return v==null ? '<span class="na">not available</span>' : v.toFixed(digits);
+}
+
+function renderDemoCell(td, r, rowIdx){
+  if(r._demoRings){
+    td.innerHTML = `<div class="demo-rings">${r._demoRings.map(ring => `
+      <div><strong>${ring.radius_miles}mi:</strong>
+        pop ${fmtDemoValue(ring.total_population)}${ring.population_moe!=null ? ` (&plusmn;${ring.population_moe.toFixed(0)})` : ''},
+        ${fmtDemoValue(ring.total_housing_units)} units,
+        ${fmtDemoValue(ring.density_per_sqmi)}/mi&sup2;,
+        inc ${fmtDemoValue(ring.median_household_income)}, age ${fmtDemoValue(ring.median_age)}
+      </div>`).join('')}</div>`;
+    return;
+  }
+  if(r._demoError){
+    td.innerHTML = `<div class="demo-error" title="${r._demoError}">Failed &mdash; retry?</div>`;
+    const btn = document.createElement('button');
+    btn.className = 'demo'; btn.textContent = 'Retry';
+    btn.addEventListener('click', () => pullDemographics(r, rowIdx));
+    td.appendChild(btn);
+    return;
+  }
+  const btn = document.createElement('button');
+  btn.className = 'demo';
+  if(r.centroid_lat == null || r.centroid_lon == null){
+    btn.textContent = 'No centroid';
+    btn.disabled = true;
+  } else {
+    btn.textContent = 'Pull area demographics';
+    btn.addEventListener('click', () => pullDemographics(r, rowIdx));
+  }
+  td.innerHTML = '';
+  td.appendChild(btn);
+}
+
+async function pullDemographics(r, rowIdx){
+  const base = getApiBase();
+  const td = document.querySelector(`tr[data-row-idx="${rowIdx}"] td.demo-cell`);
+  if(td) td.innerHTML = '<span style="color:var(--muted);font-family:\'IBM Plex Mono\',monospace;font-size:11px;">Fetching&hellip;</span>';
+  try{
+    const params = new URLSearchParams({lat: r.centroid_lat, lon: r.centroid_lon});
+    const res = await fetch(`${base}/api/parcels/${encodeURIComponent(r.parcel_id)}/demographics?${params.toString()}`);
+    const data = await res.json();
+    if(!res.ok){
+      const detail = data && data.detail;
+      const msg = (detail && detail.message) ? `${detail.message}: ${detail.exception_str}` : (detail || `HTTP ${res.status}`);
+      throw new Error(msg);
+    }
+    r._demoRings = data.rings;
+    r._demoError = null;
+  }catch(err){
+    r._demoError = err.message;
+  }
+  if(td) renderDemoCell(td, r, rowIdx);
+}
+
 function renderResults(){
   document.getElementById('resultsPanel').style.display = 'block';
   document.getElementById('resultCount').textContent = results.length;
   const body = document.getElementById('resultsBody');
   body.innerHTML = '';
-  results.forEach(r => {
+  results.forEach((r, rowIdx) => {
     const tr = document.createElement('tr');
+    tr.dataset.rowIdx = rowIdx;
     const pct = r.pct_perimeter_qualifying;
     const owner = [r.owner_name, r.owner_name_2].filter(Boolean).join(' / ');
     const flags = (r.exclusion_flags||[]).concat(r.needs_manual_review||[]);
@@ -368,8 +439,10 @@ function renderResults(){
       </td>
       <td>${pathwayLabel(r.likely_pathways)}</td>
       <td class="num">${r.attractiveness_score!=null ? r.attractiveness_score : '—'}</td>
-      <td>${flags.length ? `<span title="${flags.join('; ')}" style="color:var(--dev);font-family:'IBM Plex Mono',monospace;font-size:11px;">${flags.length} flag${flags.length>1?'s':''}</span>` : ''}</td>`;
+      <td>${flags.length ? `<span title="${flags.join('; ')}" style="color:var(--dev);font-family:'IBM Plex Mono',monospace;font-size:11px;">${flags.length} flag${flags.length>1?'s':''}</span>` : ''}</td>
+      <td class="demo-cell"></td>`;
     body.appendChild(tr);
+    renderDemoCell(tr.querySelector('td.demo-cell'), r, rowIdx);
   });
 }
 

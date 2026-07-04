@@ -545,16 +545,15 @@ in the right column position.
 
 All three statutory gaps are implemented, live-verified, committed
 (`a6e7db8`), pushed, and confirmed live on Render (2026-07-05). The
-dashboard is now updated to match (this session, not yet committed/
-pushed — see section above). Next session should:
+dashboard update (`88617de`) is pushed and confirmed live on Netlify
+(2026-07-05) as well. Next session should:
 
-1. Commit and push the `web/index.html` changes.
-2. Consider re-running the same live `describe_layer` + distinct-values
+1. Consider re-running the same live `describe_layer` + distinct-values
    spot-check that caught Pasco's wrong `flu_field` against the other
    three counties' FLUM layers, now that there's a concrete example of
    how an "UNCONFIRMED CARRYOVER guess" note in this file turned out to
    be silently wrong in production-relevant code.
-3. `max_candidates=25` default in `run_county_scan` has not been timed
+2. `max_candidates=25` default in `run_county_scan` has not been timed
    against a real full run yet — worth a rough wall-clock check before
    wiring this into a synchronous web request (see the function's own
    docstring re: free-tier hosting timeouts). This pass added two more

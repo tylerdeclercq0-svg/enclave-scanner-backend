@@ -511,23 +511,20 @@ surfaced as a flag anywhere.
 
 ## Exact next step
 
-All three statutory gaps are now implemented and live-verified (see
-section above) — not yet committed/pushed or deployed to Render. Next
-session should:
+All three statutory gaps are now implemented, live-verified, committed
+(`a6e7db8`), pushed to GitHub, and confirmed live on Render as of
+2026-07-05. Next session should:
 
-1. Commit and push these changes, then confirm via Render's deploy log
-   (not `/health`'s stale `code_version`) that the new commit is live,
-   same pattern as the demographics-endpoint deploy earlier in this file.
-2. Consider wiring `sold_since_2025` and the hard unincorporated
+1. Consider wiring `sold_since_2025` and the hard unincorporated
    exclusion into `web/index.html`'s table columns/CSV export — the
    backend now returns both, but the dashboard hasn't been updated to
    surface them yet.
-3. Consider re-running the same live `describe_layer` + distinct-values
+2. Consider re-running the same live `describe_layer` + distinct-values
    spot-check that caught Pasco's wrong `flu_field` against the other
    three counties' FLUM layers, now that there's a concrete example of
    how an "UNCONFIRMED CARRYOVER guess" note in this file turned out to
    be silently wrong in production-relevant code.
-4. `max_candidates=25` default in `run_county_scan` has not been timed
+3. `max_candidates=25` default in `run_county_scan` has not been timed
    against a real full run yet — worth a rough wall-clock check before
    wiring this into a synchronous web request (see the function's own
    docstring re: free-tier hosting timeouts). This pass added two more

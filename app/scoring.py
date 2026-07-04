@@ -66,11 +66,14 @@ def _acreage_fit_score(acreage: Optional[float]) -> float:
 def _access_score(adjacent_to_interstate: bool, adjacent_to_usb: bool) -> float:
     """
     Simple additive model: interstate adjacency and urban-service-
-    boundary adjacency each contribute half the maximum score. Both are
-    currently hardcoded to False upstream (scan_orchestrator.py) until
-    an FDOT roads layer and per-county USB layers are wired in — treat
-    any access score in current output as a placeholder, not a real
-    signal, until that data is connected.
+    boundary adjacency each contribute half the maximum score.
+    `adjacent_to_interstate` is a real, live signal as of 2026-07-06
+    (roads_client.py, FDOT's own Interstates layer). `adjacent_to_usb` is
+    still hardcoded False upstream (scan_orchestrator.py) — no per-county
+    USB layer has been found for any of the four pilot counties (only
+    Hillsborough is confirmed to have one; searched live for the other
+    four with no result) — treat the USB half of this score as a
+    placeholder until that data is connected.
     """
     score = 0.0
     score += 50.0 if adjacent_to_interstate else 20.0

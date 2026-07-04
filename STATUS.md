@@ -830,3 +830,209 @@ view is deferred (List view only, built fully). `flum_character` filtering
 has no populated per-county dropdown yet (backend supports it; UI doesn't
 expose real options). Nassau's FLWMI `PARCELNO` join format is assumed,
 not cross-checked against one specific real sample yet.
+
+## Dashboard docs rewrite — 2026-07-06
+
+`web/index.html`'s two static info overlays (`HOW_TO_USE_HTML`,
+`buildWhatThisDoesHtml()`) were rewritten at Tyler's request, using Tyler's
+"Enclave Scanner v3" reference PDF as a structural model but corrected
+against the real code (`encirclement.py`, `scoring.py`, `exclusions.py`,
+`statutory_checks.py`) rather than the mockup's claims:
+- "How to use" — ~600 words, a ~5-minute action-oriented walkthrough, no
+  legal content.
+- "What this does/doesn't do & methodology" — ~2,500 words, a ~15-minute
+  read covering the bill in plain terms, the six statutory requirements, all
+  five encirclement Options A-E with each one's REAL status, the exclusion
+  zones, the full automation-status table, per-county unincorporated-check
+  status (including the Pasco NO-GO story), scoring methodology, confidence
+  tiers, and public-services/demographics caveats.
+- Real finding surfaced by this rewrite, not previously stated this
+  plainly: Options B, C, and D are not merely "estimated" as the old copy
+  said — they are **structurally unreachable** today.
+  `scan_orchestrator.py` never passes `designated_pct_existing_development`
+  (stays `None`, so Option B can never trigger) and hardcodes
+  `adjacent_to_interstate=False` / `adjacent_to_usb=False` (so Options C and
+  D can never trigger either). Only Option A (≥75% perimeter existing
+  development) can currently ever match. This means every "Confident"/
+  "Possible" result in this build today qualified through Option A alone —
+  worth remembering when prioritizing the punch list below, since wiring in
+  real interstate/USB data is the single highest-leverage fix available.
+- Deliberately used only the codebase's already-verified citation (SB 686 /
+  HB 691, F.S. 163.3164(4), eff. 7/1/2026) — Tyler confirmed NOT to add the
+  mockup's unverified "Ch. 2026-34" / "certification window closes Jan 1,
+  2028" language.
+- Verified via the preview tools: both overlays render with no console
+  errors, correct Ledger & Brass styling on headings/tables/bullets, word
+  counts land at target (~616 / ~2,477 words).
+
+## Punch list — next priorities, 2026-07-06
+
+**High priority (unlocks real functionality):**
+1. Deploy this session's committed work (`1be635c` + the docs rewrite above)
+   to Render/Netlify — nothing has shipped since `88617de`. **Still open —
+   pending Tyler's go-ahead.**
+2. Wire a real FDOT interstate-adjacency layer + per-county urban-service-
+   boundary (USB) layers. This is the single highest-leverage fix — it's
+   what makes Options B, C, and D structurally dead today (see above).
+   **DONE for interstate adjacency (all 4 counties) + USB (Pasco only, via
+   approximation) — see the two follow-up sections below. Nassau/St. Johns/
+   Osceola still have no USB data source; Option B remains unreachable
+   everywhere (different missing data, not addressed this pass).**
+3. Find a rural-study-area dataset per county to unlock Option E. **Still
+   open.**
+4. Resolve the ACSC Hub-page URL
+   (`mapdirect-fdep.opendata.arcgis.com/maps/areas-of-critical-state-concern`)
+   into a real, queryable FeatureServer endpoint. **DONE — see below.**
+
+**Medium priority:**
+5. Pasco's unincorporated-status check — needs a real city-limits boundary
+   layer (currently manual-only; the FLUM-layer inference was disproven via
+   the live Port Richey test). **DONE — see below.**
+6. Auto-detect the statute's 4,480-acre dense/rural exception instead of
+   requiring a user to manually raise the acreage filter.
+7. Cross-check Nassau's FLWMI `PARCELNO` join format against one real Nassau
+   sample (currently assumed consistent, never confirmed).
+
+**Lower priority / longer-term:**
+8. Conservation easements and military installation buffers — no statewide
+   GIS source exists; would likely need a fundamentally different approach
+   (per-county Clerk/Recorder scraping, DOD compatibility-zone layers, etc.).
+9. Population-weighted median household income / median age aggregation for
+   area demographics (currently deliberately `null`).
+10. Populate the `flum_character` filter dropdown in the UI with real
+    per-county FLU category options (backend already supports the filter).
+11. Map view (deferred by Tyler's own prior scope call — List view only).
+
+## Punch-list items #2 and #4 worked — 2026-07-06
+
+**#4 (ACSC endpoint) — RESOLVED.** The Hub page was never a real endpoint;
+found the underlying FeatureServer via ArcGIS Online's item-search API
+(`www.arcgis.com/sharing/rest/search`), owner `FDEPMapDirect`:
+`ca.dep.state.fl.us/arcgis/rest/services/Map_Direct/Program_Support/MapServer/5`.
+Confirmed live: 5 real features (Apalachicola, Green Swamp, Florida Keys, Key
+West, Big Cypress — matching `exclusions.py`'s own long-standing citation),
+none listing any of the seven pilot counties in `CNTYS`. Wired into
+`exclusions.py` as a real automated hard-exclusion check (previously a
+permanent manual-review note) — live-verified two ways: a real Pasco parcel
+still correctly comes back clear, and a synthetic point built from a real
+point inside the Green Swamp ACSC polygon correctly returns a hit. ACSC
+dropped out of `standing_manual_notes()`; only conservation easements and
+military buffers remain there now.
+
+**#2 (interstate/USB adjacency) — HALF RESOLVED.** New module
+`app/roads_client.py` wraps FDOT's own `RCI_Layers/FeatureServer/7`
+("Interstates") — a real statewide polyline layer, confirmed live with a
+`COUNTY` field whose plain-English spelling matches this project's own
+`county_registry.py` `name` field for all four pilot counties (Pasco has
+I-75/I-275, Nassau has I-10, St. Johns has I-95, Osceola has I-4).
+`adjacent_to_interstate` in `scan_orchestrator.py` and `scoring.py` is no
+longer hardcoded `False` — it's a real buffered spatial intersection
+against this layer, live-verified three ways: a real Pasco candidate parcel
+correctly returns `False` (it's nowhere near I-75), a synthetic polygon
+built to straddle a real point on I-75 (fetched live, in the same AREA_SR
+Florida Albers projection used everywhere else in this project) correctly
+returns `True`, and the same polygon offset 50km away correctly returns
+`False` again.
+
+Interstate adjacency alone does NOT unlock Options C/D, since both also
+require `adjacent_to_usb` — searched live via ArcGIS Online's search API for
+a USB/urban-service-boundary layer for Pasco, Nassau, St. Johns, and Osceola
+specifically; found nothing named as such for any of the four (only
+Hillsborough is confirmed, per `county_registry.py`'s pre-existing note, to
+have a real dedicated USB layer). See the follow-up below for what was found
+for Pasco specifically once this was dug into further.
+
+## Punch-list #2 (continued) and #5 — Pasco USB approximation + real city-limits layer, 2026-07-06
+
+Kept digging on the USB gap and found two more real, live, previously-
+unknown Pasco_BOCC/`djohnson_pascocounty`-owned ArcGIS Online items via the
+same item-search API:
+
+**#5 (Pasco unincorporated-status check) — RESOLVED.** Found a real,
+dedicated `City_Limits` FeatureServer (owner `Pasco_BOCC` directly, created
+2025-01-23):
+`services6.arcgis.com/Mo4MddfRHpFwT7UF/arcgis/rest/services/City_Limits/FeatureServer/0`,
+a `CITYNAME` field with real per-city polygons (New Port Richey, Port Richey,
+San Antonio, St Leo, Dade City, etc). This is a different, independent
+dataset from the FLUM layer that disproved the earlier home-rule inference —
+confirmed live two ways: a point built from a real Port Richey polygon
+fragment's own centroid correctly returns `CITYNAME='Port Richey'`, and the
+prior known-unincorporated control point (28.41, -82.66) correctly returns
+no hit. New `CountyEndpoint.unincorporated_check` mode
+`"city_limits_layer_join"` added in `statutory_checks.py`, replacing Pasco's
+`"manual_only"`. Live-verified end-to-end: a real Pasco candidate parcel now
+correctly returns "outside every incorporated city's limits" instead of a
+manual-review note.
+
+**#2 (USB, Pasco only) — approximated, not fully resolved.** Pasco's own
+comprehensive plan (Map 2-22, "Urban Service Area / Rural Area / Expansion
+Area", confirmed via Municode) draws a binary-ish boundary, and a real
+`RuralAreas_Current` FeatureServer exists
+(`services6.arcgis.com/Mo4MddfRHpFwT7UF/arcgis/rest/services/RuralAreas_Current/FeatureServer/0`,
+5 real polygons, `gensis` field references real ordinances like "ORD 25-15").
+No layer named "Urban Service Area" or "Expansion Area" itself was found in
+the same org, despite searching — so this is treated as an approximation:
+`roads_client.check_adjacent_to_usb()` treats a parcel as USB-adjacent if its
+buffered boundary is NOT entirely `esriSpatialRelWithin` a single Rural Area
+polygon. Confirmed live: a point built inside a real Rural Area polygon
+correctly returns "within" (not USB-adjacent), a point in downtown New Port
+Richey (clearly urban) correctly returns no "within" hit (USB-adjacent).
+Caveat, worth remembering: the Rural Area layer's total area is only ~32% of
+Pasco's county area, and the map's title implies a third "Expansion Area"
+category this simple binary check can't distinguish from true USB — so this
+can plausibly over-count USB-adjacency for land that's actually in an
+Expansion Area, not the Urban Service Area itself. A `needs_manual_review`
+note is now appended whenever this approximation is used, specifically
+telling the user to confirm any Option C/D match with Pasco's Planning
+Department.
+
+Wired into `scan_orchestrator.py`/`scoring.py` (`adjacent_to_usb` no longer
+hardcoded `False` for Pasco specifically — `county.rural_area_layer_url` is
+`None` for Nassau/St. Johns/Osceola, so they're unaffected and still
+correctly return `False`). Live end-to-end confirmation: Pasco's own
+reference candidate parcel (`35-24-16-0000-00100-0011`) now matches
+**pathways [1, 4]** (previously just [1]) — Option D (≤700 ac, ≥50%
+encircled, USB-adjacent) is now genuinely reachable for Pasco, score 57→75.
+Tier for this specific parcel is "possible", not "confident" — but that's
+because its `water_sewer_confidence` comes back "Unknown" (no FDOH record
+found for it), unrelated to the USB approximation; `classify_confidence`
+doesn't weight which specific pathway matched. Nassau/St. Johns/Osceola
+remain unaffected and unchanged, confirmed via a live 2-candidate Nassau
+re-run.
+
+Options C/D remain unreachable for Nassau, St. Johns, and Osceola — no USB
+data source was found for any of them.
+
+## Punch-list #3 (Option E / rural study area) — investigated, deliberately NOT wired in
+
+Tried to find a real dataset for encirclement pathway 5. Ran into a real
+provenance problem worth flagging rather than papering over: "rural study
+area" (used throughout this codebase — `encirclement.py`, `web/index.html`,
+this file) is this project's own paraphrase, not a verbatim statutory quote
+— no file in this repo actually cites the bill's exact defined term for this
+option, unlike the other pathways' percentages (75%/75%/50%), which
+`encirclement.py`'s own comment says were checked against "the enrolled bill
+text." Fetching the Florida Legislature's own current published text of s.
+163.3164(4) turned up only two "surrounded by development" options (matching
+Options A/B) — no options 3/4/5 at all — meaning either the fetch was
+incomplete or the currently-published statute page doesn't yet reflect the
+SB 686 amendment (not effective until 7/1/2026). Either way, this means
+Option E's exact legal trigger could not be independently re-confirmed this
+pass.
+
+A plausible-looking candidate dataset exists — Florida's statewide "Rural
+Land Stewardship Area" (RLSA) boundary layer (authorized under a DIFFERENT
+statute, s. 163.3248, a stewardship-credit-trading mechanism, findable via
+Florida's Geographic Data Library) — but wiring this in without confirming
+it's legally the same concept as whatever "rural study area" means in SB 686
+would repeat exactly the mistake this project already caught and avoided
+once before (Wekiva Study Area vs. the legally-distinct Wekiva River
+Protection Area, see the "real trap avoided" section above). Deliberately
+did NOT wire in RLSA data. Option E stays unimplemented, `encirclement.py`
+still always returns `False` for it. If picked up again: get the actual
+enrolled bill/session-law text directly (from Tyler or a verified legislative
+source) for s. 163.3164(4)(c)5's exact wording before searching for a
+matching dataset, rather than searching from this project's own paraphrase.
+
+Not yet done: #1 (deploy to Render/Netlify — pending Tyler's go-ahead since
+it's a live-system push).

@@ -173,4 +173,30 @@ def check_unincorporated(
             )
         return True, "FLUM spatial join found no incorporated-city FLU category overlap."
 
+    if mode == "city_limits_layer_join":
+        features = list(query_layer(
+            county.city_limits_layer_url,
+            geometry=geometry_with_sr,
+            geometry_type="esriGeometryPolygon",
+            spatial_rel="esriSpatialRelIntersects",
+            out_fields=county.city_limits_field,
+            out_sr=area_sr,
+        ))
+        if not features:
+            return True, (
+                "No polygon in the dedicated city-limits layer intersects "
+                "this parcel's geometry -- outside every incorporated "
+                "city's limits."
+            )
+        cities = sorted({
+            f.get("attributes", {}).get(county.city_limits_field)
+            for f in features
+            if f.get("attributes", {}).get(county.city_limits_field) is not None
+        })
+        return False, (
+            f"City-limits spatial join found this parcel inside "
+            f"{', '.join(cities) or 'an incorporated city'} -- not "
+            "unincorporated land."
+        )
+
     return None, f"Unknown unincorporated_check mode '{mode}' -- verify manually."

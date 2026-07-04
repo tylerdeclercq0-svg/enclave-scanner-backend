@@ -191,8 +191,36 @@ class CountyEndpoint:
     #                                        acre FLUM feature) -- do not
     #                                        wire an automated pass/fail
     #                                        here, see STATUS.md
+    #   "city_limits_layer_join"          -- spatial join against a real,
+    #                                        dedicated city-limits
+    #                                        FeatureServer (NOT the FLUM
+    #                                        layer) -- see
+    #                                        city_limits_layer_url/
+    #                                        city_limits_field below. Added
+    #                                        2026-07-06 for Pasco once a
+    #                                        real Pasco_BOCC-owned City_
+    #                                        Limits layer was found,
+    #                                        replacing manual_only.
     unincorporated_check: str = "manual_only"
     incorporated_flu_values: tuple = field(default_factory=tuple)
+    city_limits_layer_url: Optional[str] = None
+    city_limits_field: Optional[str] = None
+
+    # -- Urban Service Area (USB) approximation, added 2026-07-06 for
+    # Pasco only. Pasco's own comprehensive plan (Map 2-22, "Urban
+    # Service Area / Rural Area / Expansion Area") draws a single binary
+    # boundary between Rural Area and Urban Service Area -- there's no
+    # separate USB-specific layer, but a real, Pasco_BOCC-adjacent
+    # "Rural Areas Current" FeatureServer exists (owner
+    # djohnson_pascocounty, real ordinance references like "ORD 25-15"
+    # in its `gensis` field). A parcel NOT entirely within a Rural Area
+    # polygon is treated as touching the Urban Service Area -- this is
+    # an approximation (it doesn't distinguish "just outside the Rural
+    # Area line" from "deep in the middle of a city"), not a from-the-
+    # source USB layer, so it's kept as its own distinct field rather
+    # than silently reusing usb_layer_url above (which stays reserved for
+    # a real, direct USB layer if one is ever found for any county).
+    rural_area_layer_url: Optional[str] = None
 
     # -- FLWMI (Florida Water Management Inventory, FDOH) join key
     # transform, added alongside flwmi_client.py 2026-07-06. Confirmed
@@ -315,10 +343,31 @@ COUNTIES: dict[str, CountyEndpoint] = {
         sale_year_field="SALE_YEAR",
         sale_month_field="SALE_MON",
         sale_day_field="SALE_DAY",
-        # unincorporated_check left at default "manual_only" -- see
-        # CountyEndpoint docstring: a live query disproved the assumption
-        # this county's FLUM layer is unincorporated-only by construction
-        # (confirmed 2026-07-05, Port Richey City Hall hit).
+        # RESOLVED 2026-07-06: found a real, dedicated Pasco_BOCC-owned
+        # City_Limits FeatureServer (via ArcGIS Online item search),
+        # created 2025-01-23, CITYNAME field with real per-city polygons
+        # (New Port Richey, Port Richey, San Antonio, St Leo, Dade City,
+        # etc). Confirmed live: a point built from the centroid of one of
+        # this layer's own real Port Richey polygon fragments correctly
+        # returns CITYNAME='Port Richey'; the same known-unincorporated
+        # control point used in the prior FLUM-based test (28.41, -82.66)
+        # correctly returns no hit. This is a different, independent
+        # dataset from the FLUM layer that disproved the earlier
+        # home-rule inference -- no longer manual_only.
+        unincorporated_check="city_limits_layer_join",
+        city_limits_layer_url=(
+            "https://services6.arcgis.com/Mo4MddfRHpFwT7UF/arcgis/rest/"
+            "services/City_Limits/FeatureServer/0"
+        ),
+        city_limits_field="CITYNAME",
+        # Confirmed live 2026-07-06: a point known to sit inside a real
+        # Rural Area polygon ("AREA 3") correctly returns a
+        # esriSpatialRelWithin hit; a point in downtown New Port Richey
+        # (clearly urban/incorporated) correctly returns no hit.
+        rural_area_layer_url=(
+            "https://services6.arcgis.com/Mo4MddfRHpFwT7UF/arcgis/rest/"
+            "services/RuralAreas_Current/FeatureServer/0"
+        ),
     ),
 
     "sarasota": CountyEndpoint(

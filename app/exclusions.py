@@ -11,16 +11,17 @@ The agricultural enclave pathway does not apply to property within:
   5. A military installation or range identified in s. 163.3175(2), F.S.
 
 Data source status, confirmed during research:
-  - Areas of Critical State Concern: FDEP publishes a generalized
-    boundary layer (mapdirect-fdep.opendata.arcgis.com/maps/
-    areas-of-critical-state-concern). None of the seven pilot counties
-    (Hillsborough, Orange, Pasco, Sarasota, Manatee, Brevard, Volusia)
-    fall within the five designated ACSCs (Apalachicola Bay, Green
-    Swamp, Big Cypress, Florida Keys, City of Key West), so this check
-    should return no hits for any pilot-county parcel — but the layer
-    should still be queried and not just hardcoded to "false", since a
-    parcel right at a county boundary or a future ACSC designation
-    change could break that assumption silently.
+  - Areas of Critical State Concern: RESOLVED 2026-07-06 — the Hub page
+    (mapdirect-fdep.opendata.arcgis.com/maps/areas-of-critical-state-concern)
+    is not itself a queryable endpoint, but its underlying FeatureServer is:
+    ca.dep.state.fl.us/arcgis/rest/services/Map_Direct/Program_Support/
+    MapServer/5, found via ArcGIS Online's item search API (owner
+    "FDEPMapDirect"). Confirmed live: 5 real features (Apalachicola,
+    Green Swamp, Florida Keys, Key West, Big Cypress — matching this
+    module's own long-standing citation), none listing any of the seven
+    pilot counties (Hillsborough, Orange, Pasco, Sarasota, Manatee,
+    Brevard, Volusia) in their `CNTYS` field. Now wired in as a real
+    automated check below, not a permanent manual-review note.
   - Everglades Protection Area: confirmed live 2026-07-04 — a real
     SFWMD-hosted FeatureServer layer (6 features), matching the cited
     statute (s. 373.4592(2), F.S. / Ch. 40E-63, F.A.C.). Not
@@ -77,14 +78,13 @@ WEKIVA_STUDY_AREA_LAYER_URL = (
 WEKIVA_STUDY_AREA_FIELD = "WSA"
 WEKIVA_STUDY_AREA_VALUE = "yes"
 
-# ACSC layer stays a placeholder — Hub page, not a resolved FeatureServer
-# endpoint (unchanged from the prior research pass).
-ACSC_LAYER_URL_PLACEHOLDER = (
-    "https://mapdirect-fdep.opendata.arcgis.com/maps/"
-    "areas-of-critical-state-concern"
-    # NOTE: this is a Hub page, not a raw FeatureServer endpoint. Resolve
-    # the underlying service URL (same caveat as several county FLUM
-    # layers in county_registry.py) before wiring this in for real.
+# Areas of Critical State Concern — confirmed live 2026-07-06, real FDEP
+# FeatureServer (5 real features: Apalachicola, Green Swamp, Florida Keys,
+# Key West, Big Cypress), resolved from the Hub page via ArcGIS Online's
+# item search API.
+ACSC_LAYER_URL = (
+    "https://ca.dep.state.fl.us/arcgis/rest/services/Map_Direct/"
+    "Program_Support/MapServer/5"
 )
 
 
@@ -108,26 +108,22 @@ def _with_area_sr(geometry: dict) -> dict:
 def standing_manual_notes() -> list[str]:
     """
     Permanent "not automated, always verify manually" reminders that
-    apply to every parcel regardless of geometry or query results — ACSC,
-    conservation easements, and military buffers. These are NOT exclusion
+    apply to every parcel regardless of geometry or query results —
+    conservation easements and military buffers (ACSC is now a real
+    automated check below, as of 2026-07-06). These are NOT exclusion
     hits (they don't mean the parcel fails anything), so they belong in
     needs_manual_review, not exclusion_flags.
 
-    FIXED 2026-07-06: these three lines used to be appended directly
-    inside check_exclusions()'s returned list, which meant
-    exclusion_flags was NEVER actually empty for any real parcel — even
-    when Wekiva/Everglades genuinely didn't hit. That silently broke the
-    dashboard's "clear" vs "N EXCLUDED" distinction (every parcel showed
-    as excluded) and made a "no manual review needed" confidence tier
-    impossible to reach. Split out here so exclusion_flags means what it
-    claims: a real, automated hard-exclusion hit, nothing else.
+    FIXED 2026-07-06: these lines used to be appended directly inside
+    check_exclusions()'s returned list, which meant exclusion_flags was
+    NEVER actually empty for any real parcel — even when Wekiva/
+    Everglades genuinely didn't hit. That silently broke the dashboard's
+    "clear" vs "N EXCLUDED" distinction (every parcel showed as excluded)
+    and made a "no manual review needed" confidence tier impossible to
+    reach. Split out here so exclusion_flags means what it claims: a
+    real, automated hard-exclusion hit, nothing else.
     """
     return [
-        "Area of Critical State Concern check not yet wired to a "
-        "resolved FeatureServer endpoint — none of the seven pilot "
-        "counties fall within a designated ACSC as of this research "
-        "pass, but confirm this assumption before adding counties "
-        "outside the current pilot set.",
         "Conservation easement check has no available statewide or "
         "consistent county GIS source — always verify with the county "
         "Clerk/Recorder before relying on enclave eligibility.",
@@ -184,6 +180,25 @@ def check_exclusions(parcel: CandidateParcel) -> list[str]:
             "Parcel intersects the Everglades Protection Area — the "
             "agricultural enclave pathway does not apply here per "
             "s. 373.4592(2), F.S."
+        )
+
+    acsc_hits = list(query_layer(
+        ACSC_LAYER_URL,
+        geometry=geometry,
+        geometry_type="esriGeometryPolygon",
+        spatial_rel="esriSpatialRelIntersects",
+        out_fields="NAME",
+        return_geometry=False,
+    ))
+    if acsc_hits:
+        names = ", ".join(
+            str(f.get("attributes", {}).get("NAME", "unknown"))
+            for f in acsc_hits
+        )
+        flags.append(
+            f"Parcel intersects an Area of Critical State Concern ({names}) "
+            "— the agricultural enclave pathway does not apply here per "
+            "s. 380.055 (and related sections), F.S."
         )
 
     return flags

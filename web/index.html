@@ -954,66 +954,287 @@ document.addEventListener('keydown', (e) => { if(e.key === 'Escape') closeDetail
 // ---------------------------------------------------------------------
 const HOW_TO_USE_HTML = `
   <div class="overlay-title">How to use this tool</div>
-  <div class="overlay-sub">Four steps, start to finish</div>
+  <div class="overlay-sub">A 5-minute walkthrough — start to finish</div>
   <div class="info-copy">
-    <p>Nothing here files anything or talks to a government agency — it narrows down which parcels are
-    worth your time before you or an attorney do the real verification work.</p>
-    <h3>1. Select county</h3>
-    <p>Check one or more counties in Step 1. Counties marked live are ground-truthed against real ArcGIS
-    data; shaded "coming soon" counties are reachable endpoints whose field names haven't been confirmed
-    yet — not selectable until that verification pass happens.</p>
-    <h3>2. Run scan</h3>
-    <p>Set acreage range, ownership requirement, surrounding density, and minimum encirclement percentage,
-    then click Run scan. Each county makes real, live calls to that county's own parcel and FLUM layers —
-    this can take tens of seconds per county.</p>
-    <h3>3. Review the ranked candidate list</h3>
-    <p>Results are grouped into Confident / Possible / Unlikely. Click any row to open its full detail:
-    ownership signal, water/sewer service estimate, pathway match, attractiveness score breakdown, and
-    exclusion/review flags. Sort by score, acreage, or pathway count using the column headers or dropdown.</p>
-    <h3>4. Select and export</h3>
-    <p>Check the box on any parcel worth pursuing. Move to Step 4 and export either a CSV (all data, ready
-    for a spreadsheet) or a plain-text verification checklist — the specific items a human still needs to
-    confirm before relying on this parcel qualifying.</p>
-    <h3>5. (Optional) Pull area demographics</h3>
-    <p>Inside any parcel's detail view, there's a "Pull area demographics" button. It's intentionally not
-    automatic — it only runs when clicked, for one parcel at a time, since it's a heavier lookup than the
-    initial scan. Returns population, density, income, and housing data for 5/10/15-mile rings, sourced
-    from the Census Bureau.</p>
+    <p>This tool finds Florida agricultural parcels that are plausible candidates for the SB 686 fast-track
+    entitlement pathway, then tells you exactly what still needs human verification before you rely on any
+    one of them. It does not file anything, submit anything to a county, or talk to a government agency on
+    your behalf. Think of it as a first-pass filter over public GIS data, not a legal opinion. For what it
+    can and can't actually check, see "What this does / doesn't do &amp; methodology" — this panel is just
+    the mechanics of running it.</p>
+
+    <h3>1. Select a county (Step 1)</h3>
+    <p>Check one or more county cards. A county marked <strong>live</strong> has been ground-truthed —
+    someone has confirmed its real field names and data against the county's own ArcGIS servers. A county
+    shown shaded "coming soon" is a reachable server whose field names haven't been verified yet, so it's
+    not selectable — picking it would risk silently wrong results, not a UI limitation.</p>
+
+    <h3>2. Set your filters (Step 2)</h3>
+    <p>Four things to set, all optional (defaults are the statute's own limits, not arbitrary):</p>
+    <ul>
+      <li><strong>Acreage range</strong> — defaults to the statute's 1,280-acre cap. If you believe a
+      specific parcel qualifies for the larger 4,480-acre exception (dense/rural areas — see the other
+      panel), raise this manually; the tool does not detect that exception on its own.</li>
+      <li><strong>Ownership requirement</strong> — filter to parcels that show no co-owner on record. Some
+      counties don't publish a co-owner field at all, so this can under-include, never over-include.</li>
+      <li><strong>Surrounding density</strong> — a rough rural/suburban/urban read on what land actually
+      borders the parcel, taken from the same neighboring-parcel data used for the encirclement check.</li>
+      <li><strong>Minimum encirclement %</strong> — how much of the parcel's perimeter must already touch
+      qualifying development to show up at all. Leave this at the statute's own threshold unless you
+      specifically want to see near-misses.</li>
+    </ul>
+    <p>Click <strong>Run scan</strong>. Each county call hits that county's real, live parcel and land-use
+    servers directly — expect tens of seconds per county, not instant.</p>
+
+    <h3>3. Review the ranked candidates (Step 3)</h3>
+    <p>Results are grouped into three tiers — <strong>Confident</strong>, <strong>Possible</strong>, and
+    <strong>Unlikely</strong> (the last collapsed by default; click to expand). These are a summary of
+    what's already been computed, not a fourth data source — see the other panel for exactly what each
+    tier requires. Click any row to open its full detail: ownership signal, water/sewer estimate,
+    which encirclement option(s) matched, the attractiveness score breakdown, and every exclusion or
+    manual-review flag found for that specific parcel. Sort the list by score, acreage, or pathway count
+    from the column headers.</p>
+    <p>Inside a parcel's detail view there's also a <strong>"Pull area demographics"</strong> button. It's
+    deliberately click-only, one parcel at a time — it's a heavier lookup than the scan itself. It returns
+    real population, housing, and density figures for 5/10/15-mile rings around that parcel, sourced from
+    the Census Bureau's American Community Survey.</p>
+
+    <h3>4. Select and export (Step 4)</h3>
+    <p>Check the box on any parcel you actually want to pursue (if you check none, the export covers every
+    scanned result). Export either a <strong>CSV</strong> — every field this tool computed, ready for a
+    spreadsheet — or the <strong>Manual Review Checklist</strong>, a plain-text list of the specific,
+    parcel-by-parcel items a human still needs to confirm before relying on that parcel qualifying. The
+    "Your next steps, in order" panel on this same screen is that checklist's on-screen equivalent — read
+    it before you export anything.</p>
+
+    <h3>That's it</h3>
+    <p>Nothing in this workflow requires an account, saves your search anywhere but this browser tab, or
+    contacts a county or state agency. Closing the tab loses your current results — export first if you
+    want to keep them.</p>
   </div>
 `;
 
 function buildWhatThisDoesHtml(){
   return `
   <div class="overlay-title">What this tool does / doesn't do &amp; methodology</div>
-  <div class="overlay-sub">The current, real automation status of this build</div>
+  <div class="overlay-sub">A 15-minute read — the bill, the six requirements, and this build's real automation status</div>
   <div class="info-copy">
-    <h3>Automation status — quick reference</h3>
+
+    <h3>The bill, in plain terms</h3>
+    <p>Florida makes it slow and difficult, by design, to convert agricultural land into a residential or
+    commercial development — normally an owner needs a comprehensive plan amendment, a discretionary,
+    fully-litigable process a local government can simply deny, and that can take years and isn't
+    guaranteed to succeed. Senate Bill 686 / House Bill 691 (codified at s. 163.3164(4), Florida Statutes,
+    effective 7/1/2026) creates a narrow, fast-track exception to that: if a specific agricultural parcel
+    meets every one of a fixed list of requirements, a local government loses its usual discretion to deny
+    an entitlement request under this pathway. It doesn't rezone the land automatically and it isn't a
+    building permit — it converts a normally slow, uncertain political process into a predictable
+    administrative one, for parcels that qualify.</p>
+    <p>This tool exists to answer one question at scale: across every parcel in a county, which ones are
+    even plausible candidates for this pathway, using only data that's already public? It is a screening
+    tool, not a legal determination — it narrows thousands of parcels down to a short list worth a human's
+    (ideally an attorney's) actual time, and tells you plainly which parts of that short list are backed by
+    real, live-verified data versus which parts still need a phone call or a title search.</p>
+
+    <h3>The six requirements — every one of these must be true</h3>
+    <p>Failing any single one of these disqualifies a parcel from this specific fast-track pathway (though
+    it could still pursue an ordinary comprehensive plan amendment — the slower, older process that
+    already existed before this bill).</p>
+    <table style="width:100%;border-collapse:collapse;">
+      <thead><tr style="border-bottom:1px solid var(--line-strong);"><th style="text-align:left;">#</th><th style="text-align:left;">Requirement</th><th style="text-align:left;">In plain terms</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>Single ownership/control</td><td>One person or company owns (or controls) the whole property — not several unrelated owners.</td></tr>
+        <tr><td>2</td><td>Bona fide agricultural use</td><td>It's been actually farmed, ranched, or otherwise used for real agriculture — for at least 5 years.</td></tr>
+        <tr><td>3</td><td>Encirclement test</td><td>The property must be substantially surrounded by development already, proven one of five specific ways (Options A-E, next section) — this is the core idea of an "enclave."</td></tr>
+        <tr><td>4</td><td>Public services availability</td><td>Water, sewer, roads, schools, and parks either already reach the property, or the county has funded plans to extend them there.</td></tr>
+        <tr><td>5</td><td>Acreage cap</td><td>The property can't be bigger than 1,280 acres (about 2 square miles) — unless it's in a dense/rural area the statute treats differently, where the cap rises to 4,480 acres.</td></tr>
+        <tr><td>6</td><td>County population cap</td><td>The county itself can't have more than 1.75 million people, and Miami-Dade/Broward are excluded outright regardless of population.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Requirement 3 in detail — the five ways to prove "surrounded"</h3>
+    <p>A parcel only needs to satisfy <strong>one</strong> of these five options, not all five. Each is a
+    different way of measuring how much of the property's edge already borders development. This is also
+    the single biggest gap between what this tool's UI shows and what it can actually detect today — read
+    this section closely before trusting any single result.</p>
+    <ul>
+      <li><strong>Option A</strong> — at least 75% of the parcel's perimeter already touches existing
+      houses, businesses, or industrial development. <strong>This is the only option this build can
+      currently detect as true.</strong> It's a real, live geometric calculation: the parcel's boundary is
+      buffered, intersected against the county's own future land-use map, and the qualifying share of the
+      perimeter is measured directly — not guessed.</li>
+      <li><strong>Option B</strong> — at least 75% of the perimeter touches land the county has officially
+      planned for future development, AND at least 75% of that planned-development land already has some
+      development on it. <strong>Not reachable in this build</strong> — the second half of that test (how
+      much of the planned land is already built out) isn't wired into the live scan yet, so this option can
+      never come back true today, regardless of a parcel's real-world facts. This is a real gap, not an
+      "estimate" — don't read a parcel's lack of an Option B match as evidence against it.</li>
+      <li><strong>Option C</strong> — the perimeter is a mix of running along an interstate highway and
+      touching land inside the county's "urban service area" (the zone where the county already plans to
+      provide city-level services). <strong>Reachable for Pasco only, and approximately.</strong> Interstate
+      adjacency is a real, live check (FDOT's own statewide Interstates layer) for all four pilot counties.
+      No layer named "urban service area" was found for any of them, but Pasco's own comprehensive plan
+      draws a real boundary between "Rural Area" and everything else, and a real Rural Area GIS layer exists
+      for it — a parcel not entirely inside a Rural Area polygon is treated as touching the Urban Service
+      Area. This is an approximation, not a from-the-source USB layer (Pasco's plan also references a third
+      "Expansion Area" category this can't distinguish from true USB), so any Option C/D match specifically
+      still gets flagged for manual confirmation with Pasco's Planning Department. Nassau, St. Johns, and
+      Osceola have no equivalent data at all — Option C always evaluates false there.</li>
+      <li><strong>Option D</strong> — for smaller properties (700 acres or less): half the perimeter touches
+      planned-development land, and half touches land inside the urban service area. Same status as Option
+      C's urban-service-area half: reachable, approximately, for Pasco only; not reachable for Nassau,
+      St. Johns, or Osceola.</li>
+      <li><strong>Option E</strong> — the property sits inside a "rural study area" the county has formally
+      designated in its comprehensive plan as intended for eventual residential development.
+      <strong>Not reachable in this build</strong> — no consistent statewide or per-county dataset for
+      "rural study area" boundaries was ever found during research, so this always evaluates as false.</li>
+    </ul>
+    <p>In practice, this means every "Confident" or "Possible" result you see today qualified through
+    Option A specifically. A parcel that would genuinely qualify through Options B-E has no way to show up
+    as a match right now — if you have specific knowledge that a parcel might qualify through one of those
+    four, that still needs to be checked by hand.</p>
+
+    <h3>What disqualifies a property outright</h3>
+    <p>Independent of the six requirements above, s. 163.3162(4)(i), F.S. excludes this pathway entirely
+    for property inside any of the following. Three of these five are real, live GIS checks; two are not
+    automated at all:</p>
+    <ul>
+      <li><strong>Wekiva Study Area</strong> (s. 369.316, F.S.) — automated, a real live boundary layer.
+      Worth knowing: this is legally distinct from the more commonly indexed "Wekiva River Protection Area"
+      — a different, separate zone under a nearby part of the same statute chapter. Confusing the two would
+      be a real, plausible mistake; this tool checks the correct one.</li>
+      <li><strong>Everglades Protection Area</strong> (s. 373.4592(2), F.S.) — automated, a real live South
+      Florida Water Management District layer.</li>
+      <li><strong>Any Area of Critical State Concern</strong> (s. 380.055 and related sections) — automated.
+      The state's public Hub page for this isn't itself a queryable service, but its underlying FDEP
+      FeatureServer was found and wired in — confirmed live with the real 5 designated ACSCs (Apalachicola
+      Bay, Green Swamp, Big Cypress, the Florida Keys, and the City of Key West), none of which overlap this
+      tool's current pilot counties.</li>
+      <li><strong>A recorded conservation easement</strong> (s. 704.06, F.S.) — not automated. These are
+      recorded at the county Clerk/Recorder level, parcel by parcel, with no consistent statewide schema.
+      Always requires a title search.</li>
+      <li><strong>A military installation buffer</strong> (s. 163.3175(2), F.S.) — not automated. No
+      consolidated statewide layer matching this exact statutory definition was found.</li>
+    </ul>
+    <p>Separately, this tool also flags whether a parcel has been sold on or after 1/1/2025, since a recent
+    change in ownership can undermine the "single ownership/control" requirement above. This flag is
+    automated per county, but it only reflects that parcel's own most recently recorded sale — it cannot
+    reconstruct full historical ownership before that sale, and a "No" result means only that no sale was
+    found since that date, not that ownership has been continuously stable for years.</p>
+
+    <h3>Automation status — full reference</h3>
+    <p>Three different real states get collapsed into "automated" or "not" far too easily — this build
+    distinguishes them on purpose:</p>
     <table style="width:100%;border-collapse:collapse;">
       <thead><tr style="border-bottom:1px solid var(--line-strong);"><th style="text-align:left;">Requirement</th><th style="text-align:left;">Status</th></tr></thead>
       <tbody>
-        <tr><td>Acreage cap (≤1,280 ac)</td><td>Automated — direct filter on the county's own parcel layer</td></tr>
-        <tr><td>DOR/local agricultural use code</td><td>Automated — per-county confirmed codes, not a generic range</td></tr>
-        <tr><td>Unincorporated status</td><td>Automated (Osceola/Nassau/St. Johns) — manual-only for Pasco, see below</td></tr>
-        <tr><td>Wekiva Study Area / Everglades Protection Area</td><td>Automated — real live GIS layers</td></tr>
-        <tr><td>Encirclement pathways 1 &amp; 2</td><td>Estimated — real FLUM adjacency geometry, treat as an estimate not a certified survey</td></tr>
-        <tr><td>Encirclement pathways 3, 4 &amp; 5 (Option E)</td><td>Not automated — no consistent data source found</td></tr>
+        <tr><td>Acreage cap (base 1,280 ac)</td><td>Automated — direct filter on the county's own parcel layer</td></tr>
+        <tr><td>Acreage cap exception (4,480 ac, dense/rural areas)</td><td>Not automated — the tool never raises this on its own; you must manually widen the acreage filter if you believe it applies</td></tr>
+        <tr><td>County population cap (≤1.75M)</td><td>True by construction — every county in this tool's registry is already under the cap, not a runtime check</td></tr>
+        <tr><td>DOR/local agricultural use code</td><td>Automated — per-county confirmed codes, not a generic statewide range</td></tr>
+        <tr><td>Unincorporated status</td><td>Automated for all four pilot counties — Pasco uses a separate, dedicated city-limits layer instead of the FLUM-based method used for the other three, see below</td></tr>
+        <tr><td>Wekiva Study Area / Everglades Protection Area / Areas of Critical State Concern</td><td>Automated — real live GIS layers for all three</td></tr>
+        <tr><td>Encirclement Option A</td><td>Automated — a real, live geometric calculation against each county's own future land-use map</td></tr>
+        <tr><td>Encirclement Option B</td><td>Structurally unreachable today — the additional data it needs (how much of the planned-development land is already built out) isn't wired into the live scan; can never evaluate true right now, regardless of a parcel's real facts</td></tr>
+        <tr><td>Encirclement Options C, D</td><td>Reachable, approximately, for Pasco only — interstate adjacency is a real live check for all four counties, and Pasco's own "Rural Area" comprehensive-plan layer is used as an approximate stand-in for its missing urban-service-boundary (USB) layer. Nassau, St. Johns, and Osceola have no USB data source at all, so Options C/D stay unreachable there.</td></tr>
+        <tr><td>Encirclement Option E</td><td>Structurally unreachable today — no rural-study-area dataset was found for any county</td></tr>
         <tr><td>Post-1/1/2025 sale</td><td>Automated — reflects only this parcel's own most recent recorded sale</td></tr>
-        <tr><td>Single ownership/control</td><td>Estimated — name-matching on this parcel's own record only; confirm with a title search</td></tr>
-        <tr><td>Public services — water &amp; wastewater</td><td>Estimated — real FDOH Florida Water Management Inventory, Known/Likely/Somewhat Likely confidence</td></tr>
+        <tr><td>Single ownership/control</td><td>Estimated — name-matching on this parcel's own record only; some counties have no co-owner field at all, in which case this shows "unknown," never a guessed "yes"</td></tr>
+        <tr><td>Public services — water &amp; wastewater</td><td>Estimated — real FDOH Florida Water Management Inventory record, Known/Likely/Somewhat Likely/Unknown confidence</td></tr>
         <tr><td>Public services — transportation, schools, recreation</td><td>Not automated — no equivalent parcel-level data source found</td></tr>
-        <tr><td>5-year continuous agricultural use</td><td>Not automated — this is a single point-in-time snapshot</td></tr>
-        <tr><td>Conservation easements / military buffers / ACSC</td><td>Not automated — no consistent statewide GIS source found</td></tr>
+        <tr><td>5-year continuous agricultural use</td><td>Not automated — this tool only sees a single current snapshot, not a use history</td></tr>
+        <tr><td>Conservation easements / military buffers</td><td>Not automated — no consistent statewide GIS source found for either</td></tr>
       </tbody>
     </table>
+
+    <h3>Unincorporated-status check, county by county</h3>
+    <p>Being outside any incorporated city is part of how "county population cap" and general home-rule
+    applicability work under this statute, so this tool checks it directly where it can — now automated for
+    all four pilot counties, though by two genuinely different methods:</p>
+    <ul>
+      <li><strong>Osceola, Nassau, St. Johns</strong> — automated via each county's own future-land-use
+      jurisdiction data (a field, or a pre-filtered layer) to confirm a parcel sits outside any incorporated
+      city.</li>
+      <li><strong>Pasco</strong> — automated via a different, dedicated data source, and the story behind it
+      is worth knowing because it shows why this tool doesn't guess when it isn't sure. It first seemed
+      reasonable to assume Pasco's county land-use layer only covers unincorporated land (a "home rule"
+      assumption). That assumption was tested directly, live, against each incorporated city's own City Hall
+      location — and it failed: Port Richey City Hall returned a real, substantial 266.7-acre feature from
+      that layer, meaning incorporated Port Richey land shows up in it too. Rather than silently pass
+      incorporated Pasco parcels through as unincorporated, that layer was abandoned for this purpose. A
+      separate, real, dedicated Pasco County city-limits boundary layer was found instead and is now used for
+      this check specifically — confirmed live against real incorporated and unincorporated points.</li>
+    </ul>
+
+    <h3>Attractiveness score — a business judgment, not a legal one</h3>
+    <p>Every candidate also gets a 0-100 "attractiveness" score, shown with its full breakdown, never as a
+    bare number. This score is explicitly separate from legal eligibility: a parcel can score low here and
+    still be a fully valid enclave candidate, or score high and still fail the statute (for example, if it's
+    encumbered by a conservation easement the score has no way to see). It's made of four weighted parts:</p>
+    <ul>
+      <li><strong>Encirclement strength (35%)</strong> — scales from 0 at 40% perimeter encircled up to 100
+      at a full 100%. A parcel sitting right at a pathway's minimum threshold scores adequately but with
+      little margin; a parcel well past the threshold scores higher, reflecting that extra margin reduces
+      review risk even though the statute itself only cares about clearing the threshold.</li>
+      <li><strong>Acreage fit (25%)</strong> — peaks for parcels large enough for a meaningful subdivision
+      (80-500 acres) but comfortably under the acreage cap; decays gradually outside that range rather than
+      dropping off a cliff.</li>
+      <li><strong>Access (20%)</strong> — rewards interstate and urban-service-boundary adjacency, half each.
+      The interstate half is a real, live signal for all four pilot counties (FDOT's own statewide
+      Interstates layer). The urban-service-boundary half is real for Pasco (via the same Rural Area
+      approximation noted above) and still a full placeholder for Nassau, St. Johns, and Osceola.</li>
+      <li><strong>Pathway redundancy (20%)</strong> — rewards a parcel qualifying through more than one
+      encirclement option, since that reduces the risk that one local government's interpretation of a
+      single pathway sinks an application. In this build, since only Option A can ever match, this
+      component will rarely if ever contribute beyond a single pathway's worth of credit.</li>
+    </ul>
+    <p>These weights (35/25/20/20) are explicitly a starting point, not validated against real outcomes —
+    treat the score as a rough sort order for your own review time, not a ranking to submit anywhere.</p>
+
+    <h3>Confidence tiers — how "Confident / Possible / Unlikely" is decided</h3>
+    <p>This sorting is deliberately conservative — it's meant to save you time, not tell you what to do.</p>
+    <ul>
+      <li><strong>Confident</strong> — a real encirclement match (today, only Option A), ownership looks
+      single-entity, both public water and sewer are likely available, and no registered exclusion hit.
+      Even "Confident" parcels still need the full manual-verification steps below before you rely on them.</li>
+      <li><strong>Possible</strong> — an encirclement pathway matched, but at least one other check is
+      unconfirmed, missing, or borderline. The detail view for each parcel names exactly which one.</li>
+      <li><strong>Unlikely</strong> — no encirclement pathway matched at all with today's data. Hidden by
+      default under "Show N unlikely properties" — not necessarily disqualified, since the tool's own
+      Option B-E gaps mean a real match could exist that today's build simply can't see.</li>
+    </ul>
+
+    <h3>Public services and area demographics</h3>
+    <p>Water and sewer are checked against a real, confirmed statewide layer: the Florida Water Management
+    Inventory, maintained by the Florida Department of Health. It reports each parcel's known or inferred
+    water source (private well vs. public system) and wastewater method (public sewer vs. septic), each
+    tagged with a confidence level (Known, Likely, Somewhat Likely, Unknown) baked in at the source. This is
+    a real estimate, not just a filled-in guess — but it is still an estimate, not a confirmed availability
+    letter from the utility. Transportation, schools, and recreation capacity have no equivalent parcel-level
+    data source and always need a direct check with the county.</p>
+    <p>Area demographics (population, housing units, density, for 5/10/15-mile rings) are <strong>not</strong>
+    run automatically — never as part of a bulk county scan, only on-demand when you click "Pull area
+    demographics" inside a specific parcel's detail view. This is intentional: it's a heavier lookup than the
+    initial scan and reasonable for someone doing due diligence to want a walk before triggering. The data
+    itself comes from the real U.S. Census Bureau American Community Survey 5-Year estimates. Median
+    household income and median age are shown as "not available" by design, not as a bug — combining those
+    figures correctly across multiple overlapping Census block groups requires a population-weighted
+    calculation this build doesn't yet perform, and reporting a simple average would be misleading.</p>
+
     <h3>County coverage</h3>
     <p>${counties.length ? counties.filter(c=>c.live).map(c=>c.name).join(', ') : 'Pasco, Nassau, St. Johns, Osceola, Hillsborough, Brevard, Volusia'}
-    are confirmed live against real ArcGIS data. Orange, Sarasota, and Manatee are reachable endpoints but
-    have unconfirmed field names — shown shaded until a ground-truth pass verifies them.</p>
-    <h3>Confidence tiers</h3>
-    <p><strong>Confident</strong> — a pathway matched, no real hard-exclusion hit, no co-owner on record,
-    and the water/sewer estimate has at least "Likely" confidence. <strong>Possible</strong> — a pathway
-    matched but something above isn't confirmed. <strong>Unlikely</strong> — no pathway matched at all with
-    today's data; hidden by default, not necessarily disqualified.</p>
+    are confirmed live — someone has directly verified their real field names and data against the county's
+    own ArcGIS servers, not assumed from a similar-looking county. Orange, Sarasota, and Manatee are
+    reachable endpoints but have never had that verification pass, so they're shown shaded "coming soon"
+    and can't be selected until that happens — selecting an unverified county risks silently wrong results,
+    which this tool would rather refuse to show than guess at.</p>
+
+    <h3>Bottom line</h3>
+    <p>Use this tool to go from "every agricultural parcel in a county" to a short, ranked list worth a real
+    person's time — not from "short list" to "done." Every single result, including every "Confident" one,
+    still needs the manual verification steps in the Manual Review Checklist (Step 4) before anyone should
+    rely on that parcel qualifying for this pathway. Nothing here is a substitute for a title search, a call
+    to the county Property Appraiser and Planning Department, or a real estate attorney's review.</p>
   </div>
   `;
 }

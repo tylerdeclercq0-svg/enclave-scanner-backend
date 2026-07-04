@@ -40,6 +40,7 @@ from arcgis_client import query_layer
 import exclusions
 import flu_taxonomy
 import flwmi_client
+import roads_client
 import scoring
 import statutory_checks
 
@@ -125,6 +126,8 @@ def run_county_scan(
         pct_qualifying: Optional[float] = None
         flum_character: Optional[str] = None
         surrounding_density = "unknown"
+        adjacent_to_interstate = False
+        adjacent_to_usb = False
 
         if parcel.geometry is None:
             needs_review.append(
@@ -151,11 +154,32 @@ def run_county_scan(
                     agricultural_flu_values=county.agricultural_flu_values,
                 )
                 pct_qualifying = encirclement.pct_qualifying
+                try:
+                    adjacent_to_interstate = roads_client.check_adjacent_to_interstate(
+                        parcel.geometry, county.name
+                    )
+                except Exception as exc:  # noqa: BLE001 — a roads-layer failure shouldn't sink the whole candidate
+                    adjacent_to_interstate = False
+                    needs_review.append(f"Interstate-adjacency check failed to run: {exc}")
+                try:
+                    adjacent_to_usb = roads_client.check_adjacent_to_usb(
+                        parcel.geometry, county.rural_area_layer_url
+                    )
+                except Exception as exc:  # noqa: BLE001 — a roads-layer failure shouldn't sink the whole candidate
+                    adjacent_to_usb = False
+                    needs_review.append(f"Urban-service-area adjacency check failed to run: {exc}")
+                if county.rural_area_layer_url is not None:
+                    needs_review.append(
+                        "Urban-service-area adjacency (used for encirclement Options C/D) is "
+                        "approximated from this county's own Rural Area boundary, not a direct "
+                        "USB layer — confirm with the Planning Department before relying on an "
+                        "Option C/D match."
+                    )
                 pathways = determine_pathways(
                     encirclement,
                     acreage=parcel.acreage or 0,
-                    adjacent_to_interstate=False,  # requires FDOT roads layer — not yet wired in
-                    adjacent_to_usb=False,  # requires county-specific USB layer — only confirmed for Hillsborough
+                    adjacent_to_interstate=adjacent_to_interstate,
+                    adjacent_to_usb=adjacent_to_usb,
                 )
                 if not pathways:
                     needs_review.append(
@@ -249,8 +273,8 @@ def run_county_scan(
             acreage=parcel.acreage,
             pct_perimeter_qualifying=pct_qualifying,
             pathway_count=len(pathways),
-            adjacent_to_interstate=False,
-            adjacent_to_usb=False,
+            adjacent_to_interstate=adjacent_to_interstate,
+            adjacent_to_usb=adjacent_to_usb,
         )
 
         water_sewer = flwmi_client.WaterSewerResult(

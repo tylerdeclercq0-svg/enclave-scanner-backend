@@ -38,6 +38,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from county_registry import COUNTIES, POPULATION_CAP  # noqa: E402
 import scan_orchestrator  # noqa: E402
 import ring_demographics  # noqa: E402
+import diligence_tracker  # noqa: E402
+from fastapi.responses import Response  # noqa: E402
 
 
 app = FastAPI(
@@ -296,3 +298,46 @@ def parcel_demographics(
             for r in rings
         ],
     }
+
+
+class DiligenceExportPayload(BaseModel):
+    """
+    Client sends: raw row data for each selected parcel PLUS its pre-
+    computed verification checklist (from buildVerificationChecklist() in
+    web/index.html). We do NOT recompute checklist status server-side --
+    the export must always match what the UI showed, and duplicating the
+    JS logic in Python would silently drift the moment one changes.
+    """
+    rows: list[dict]
+
+
+@app.post("/api/export/diligence-tracker")
+def export_diligence_tracker(payload: DiligenceExportPayload):
+    """
+    Generate a styled .xlsx diligence tracker for a client-selected set
+    of parcels. See app/diligence_tracker.py for the workbook layout,
+    color coding, and freeze-pane details.
+    """
+    if not payload.rows:
+        raise HTTPException(status_code=400, detail="No parcels selected for export.")
+
+    try:
+        xlsx_bytes = diligence_tracker.build_diligence_tracker_xlsx(payload.rows)
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Failed to build diligence tracker",
+                "exception_type": type(exc).__name__,
+                "exception_str": str(exc),
+                "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            },
+        )
+
+    filename = diligence_tracker.build_filename(payload.rows)
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

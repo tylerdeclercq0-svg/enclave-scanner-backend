@@ -449,9 +449,16 @@
     </div>
     <div class="panel">
       <h3 class="section-label">Export</h3>
-      <div style="display:flex;gap:10px;">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
         <button class="export" id="exportBtn">Export CSV</button>
         <button class="export" id="exportChecklistBtn">Export Manual Review Checklist</button>
+        <button class="export" id="exportDiligenceBtn" title="Select one or more parcels in Step 3 first — this export requires an explicit selection to avoid dumping the whole result set into a tracker.">Export diligence tracker (.xlsx)</button>
+      </div>
+      <div id="diligenceHelp" class="empty-note" style="margin-top:10px;font-size:12.5px;">
+        The diligence tracker is a working spreadsheet, not a snapshot — every verification-checklist item
+        for each selected parcel gets its own row with a color-coded status cell and blank <em>Confirmed
+        by</em> / <em>Date confirmed</em> columns for you to fill in as diligence progresses. Requires an
+        explicit selection in Step 3.
       </div>
     </div>
     <div class="caveats">
@@ -1587,6 +1594,72 @@ document.getElementById('exportChecklistBtn').addEventListener('click', () => {
   a.download = 'ag_enclave_manual_review_checklist.txt';
   a.click();
 });
+
+// ---------------------------------------------------------------------
+// Diligence tracker export -- server-side XLSX generation via a POST
+// with pre-computed verification checklists. We deliberately compute the
+// checklist client-side and send it in the payload so the backend never
+// re-derives status logic; the export always matches what the parcel
+// detail overlay showed.
+// ---------------------------------------------------------------------
+async function exportDiligenceTracker(){
+  const btn = document.getElementById('exportDiligenceBtn');
+  const helpEl = document.getElementById('diligenceHelp');
+  const selected = results.filter(r => selectedParcels.has(rowKey(r)));
+  if(selected.length === 0){
+    helpEl.style.color = 'var(--clay)';
+    helpEl.innerHTML = '<strong>Select at least one parcel in Step 3</strong> before running this export — the diligence tracker deliberately requires an explicit selection, unlike the CSV / manual-review-checklist exports which fall back to the full result set.';
+    return;
+  }
+  helpEl.style.color = '';
+  helpEl.textContent = `Building diligence tracker for ${selected.length} selected parcel${selected.length===1?'':'s'}...`;
+  btn.disabled = true;
+  try{
+    const payload = {
+      rows: selected.map(r => ({
+        county_id: r.county_id,
+        parcel_id: r.parcel_id,
+        acreage: r.acreage,
+        owner_name: [r.owner_name, r.owner_name_2].filter(Boolean).join(' / ') || null,
+        site_address: r.site_address || null,
+        pct_perimeter_qualifying: r.pct_perimeter_qualifying,
+        likely_pathways: r.likely_pathways || [],
+        checklist: buildVerificationChecklist(r)
+          .filter(it => !it.group)
+          .map(it => ({label: it.label, status: it.status, detail: it.detail})),
+      })),
+    };
+    const base = getApiBase();
+    const res = await fetch(`${base}/api/export/diligence-tracker`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    if(!res.ok){
+      const body = await res.text();
+      throw new Error(`HTTP ${res.status}: ${body.slice(0, 400)}`);
+    }
+    // Extract filename from Content-Disposition if present, else fall back
+    // to a client-computed one so the download still saves with a sensible name.
+    const cd = res.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const counties = [...new Set(selected.map(r => r.county_id))].sort().join('_');
+    const filename = m ? m[1] : `diligence_tracker_${counties}_${new Date().toISOString().slice(0,10)}.xlsx`;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+    helpEl.style.color = '';
+    helpEl.innerHTML = `Downloaded <strong>${filename}</strong> (${selected.length} parcel${selected.length===1?'':'s'}).`;
+  }catch(err){
+    helpEl.style.color = 'var(--clay)';
+    helpEl.textContent = 'Diligence tracker export failed: ' + err.message;
+  }finally{
+    btn.disabled = false;
+  }
+}
+document.getElementById('exportDiligenceBtn').addEventListener('click', exportDiligenceTracker);
 
 // ---------------------------------------------------------------------
 // Init

@@ -204,8 +204,10 @@
             <th data-key="owner_name">Owner</th>
             <th data-key="pct_perimeter_qualifying">Qualifying Perimeter</th>
             <th data-key="likely_pathways">Pathway(s)</th>
+            <th data-key="sold_since_2025">Sold Since 2025</th>
             <th data-key="attractiveness_score" class="num">Score</th>
-            <th data-key="flags"></th>
+            <th data-key="exclusion_flags">Exclusions</th>
+            <th data-key="needs_manual_review">Review Notes</th>
             <th>Area Demographics</th>
           </tr>
         </thead>
@@ -215,7 +217,8 @@
   </div>
 
   <div class="caveats">
-    <strong>Not automated &mdash; verify before relying on any result:</strong> 5-year continuous agricultural use history (this is a single point-in-time snapshot), Wekiva Study Area / Everglades Protection Area exclusions, public services availability, and single-owner control specifically as of 1/1/2025. Pathways 3 &amp; 4 (interstate / urban service boundary) are not yet wired to a real data source and never match. "Qualifying Perimeter" is the share of the candidate's boundary line falling inside an adjacent qualifying FLUM designation, not a certified survey. County population cap (&le;1.75M) is satisfied by county selection above. Only Pasco, Nassau, St. Johns and Osceola have been run end-to-end against live data — other counties returned by the backend are unconfirmed.
+    <strong>Automated as of July 2026:</strong> the unincorporated-status hard filter (Osceola: FLUM spatial join; Nassau: pre-filtered at the source; St. Johns: excludes incorporated-city FLU categories &mdash; see the Exclusions column), the Wekiva Study Area (s. 369.316) and Everglades Protection Area (s. 373.4592) exclusions, and a post-1/1/2025 sale flag ("Sold Since 2025" reflects only this parcel's own most recent recorded sale, not a full ownership-history reconstruction).<br><br>
+    <strong>Not automated &mdash; verify before relying on any result:</strong> 5-year continuous agricultural use history (this is a single point-in-time snapshot), public services availability, conservation easements, military installation buffers, and Pasco's unincorporated-status check specifically (a live query disproved the assumption that county's FLUM layer is unincorporated-only by construction, so it remains manual-review-only). Pathways 3 &amp; 4 (interstate / urban service boundary) are not yet wired to a real data source and never match. "Qualifying Perimeter" is the share of the candidate's boundary line falling inside an adjacent qualifying FLUM designation, not a certified survey. County population cap (&le;1.75M) is satisfied by county selection above. Only Pasco, Nassau, St. Johns and Osceola have been run end-to-end against live data — other counties returned by the backend are unconfirmed.
   </div>
 
 </div>
@@ -304,6 +307,12 @@ document.getElementById('apiBase').addEventListener('change', loadCounties);
 
 function pathwayLabel(pathways){
   return (pathways && pathways.length) ? pathways.map(p => `#${p}`).join(', ') : '—';
+}
+
+function soldSinceLabel(v){
+  if(v === true) return '<span style="color:var(--dev);font-weight:600;">Yes</span>';
+  if(v === false) return 'No';
+  return '<span class="na">unknown</span>';
 }
 
 async function scanCounty(base, countyId, minAcres, maxAcres, maxCandidates){
@@ -427,7 +436,8 @@ function renderResults(){
     tr.dataset.rowIdx = rowIdx;
     const pct = r.pct_perimeter_qualifying;
     const owner = [r.owner_name, r.owner_name_2].filter(Boolean).join(' / ');
-    const flags = (r.exclusion_flags||[]).concat(r.needs_manual_review||[]);
+    const exclusions = r.exclusion_flags || [];
+    const reviewNotes = r.needs_manual_review || [];
     tr.innerHTML = `
       <td>${r.county_id}</td>
       <td>${r.parcel_id || '—'}</td>
@@ -438,8 +448,10 @@ function renderResults(){
         `<div class="adj-cell"><div class="adj-bar"><div class="adj-fill" style="width:${pct}%"></div></div><div class="adj-pct">${pct.toFixed(0)}%</div></div>`}
       </td>
       <td>${pathwayLabel(r.likely_pathways)}</td>
+      <td>${soldSinceLabel(r.sold_since_2025)}</td>
       <td class="num">${r.attractiveness_score!=null ? r.attractiveness_score : '—'}</td>
-      <td>${flags.length ? `<span title="${flags.join('; ')}" style="color:var(--dev);font-family:'IBM Plex Mono',monospace;font-size:11px;">${flags.length} flag${flags.length>1?'s':''}</span>` : ''}</td>
+      <td>${exclusions.length ? `<span title="${exclusions.join('; ')}" style="color:var(--dev);font-weight:600;font-family:'IBM Plex Mono',monospace;font-size:11px;">${exclusions.length} EXCLUDED</span>` : '<span style="color:var(--field);font-family:\'IBM Plex Mono\',monospace;font-size:11px;">clear</span>'}</td>
+      <td>${reviewNotes.length ? `<span title="${reviewNotes.join('; ')}" style="color:var(--muted);font-family:'IBM Plex Mono',monospace;font-size:11px;">${reviewNotes.length} note${reviewNotes.length>1?'s':''}</span>` : ''}</td>
       <td class="demo-cell"></td>`;
     body.appendChild(tr);
     renderDemoCell(tr.querySelector('td.demo-cell'), r, rowIdx);
@@ -465,7 +477,7 @@ document.querySelectorAll('#resultsTable thead th').forEach(th => {
 });
 
 document.getElementById('exportBtn').addEventListener('click', () => {
-  const headers = ['county_id','parcel_id','acreage','use_code','owner_name','owner_name_2','pct_perimeter_qualifying','likely_pathways','attractiveness_score','exclusion_flags','needs_manual_review','centroid_lat','centroid_lon'];
+  const headers = ['county_id','parcel_id','acreage','use_code','owner_name','owner_name_2','pct_perimeter_qualifying','likely_pathways','sold_since_2025','attractiveness_score','exclusion_flags','needs_manual_review','centroid_lat','centroid_lon'];
   const csv = [headers.join(',')].concat(
     results.map(r => headers.map(h => {
       let v = r[h];

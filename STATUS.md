@@ -509,16 +509,46 @@ hands since 1/1/2025" flag, which is what was asked for (a flag, not full
 historical reconstruction). Not yet wired into `scan_orchestrator.py` or
 surfaced as a flag anywhere.
 
+## Dashboard updated for the new statutory-gap fields — 2026-07-05
+
+`web/index.html` updated to surface what the backend has returned since
+the statutory-gap pass above:
+- New "Sold Since 2025" column (Yes in dev-orange / No / italic "unknown"
+  for `sold_since_2025 === null`) — also added to the CSV export headers.
+- The old single merged "N flags" column (exclusion_flags concatenated
+  with needs_manual_review) split into two real columns: "Exclusions"
+  (red, bold "N EXCLUDED" badge, or green "clear" if empty — this is
+  where a hard unincorporated-filter failure or a real Wekiva/Everglades
+  hit now shows up distinctly) and "Review Notes" (muted "N notes" badge
+  for the softer manual-review items). Both are still sortable via the
+  existing `data-key` header-click mechanism (array-length sort already
+  worked generically, no new sort code needed).
+- Rewrote the caveats footer, which had gone stale — it previously told
+  users Wekiva/Everglades exclusions and the 1/1/2025 sale check were
+  "not automated," which is no longer true for 3 of 4 pilot counties.
+  Now states plainly what's automated as of July 2026 vs. what still
+  needs manual verification (Pasco's unincorporated check specifically,
+  conservation easements, military buffers, 5-year ag-use history,
+  public services availability).
+
+Verified visually via a local static preview (`.claude/launch.json`'s
+`web` config, `python -m http.server 5500 --directory web`) with mock
+result data injected via `preview_eval` (same approach as the
+demographics-button verification earlier — CORS still blocks the real
+Render backend from localhost). Confirmed: the Osceola mock row (with a
+real `exclusion_flags` entry) renders "1 EXCLUDED" in red while the other
+two mock rows render "clear" in green; "Sold Since 2025" renders
+Yes/No/unknown correctly; CSV export string includes `sold_since_2025`
+in the right column position.
+
 ## Exact next step
 
-All three statutory gaps are now implemented, live-verified, committed
-(`a6e7db8`), pushed to GitHub, and confirmed live on Render as of
-2026-07-05. Next session should:
+All three statutory gaps are implemented, live-verified, committed
+(`a6e7db8`), pushed, and confirmed live on Render (2026-07-05). The
+dashboard is now updated to match (this session, not yet committed/
+pushed — see section above). Next session should:
 
-1. Consider wiring `sold_since_2025` and the hard unincorporated
-   exclusion into `web/index.html`'s table columns/CSV export — the
-   backend now returns both, but the dashboard hasn't been updated to
-   surface them yet.
+1. Commit and push the `web/index.html` changes.
 2. Consider re-running the same live `describe_layer` + distinct-values
    spot-check that caught Pasco's wrong `flu_field` against the other
    three counties' FLUM layers, now that there's a concrete example of

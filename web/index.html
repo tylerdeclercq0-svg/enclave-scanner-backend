@@ -161,6 +161,37 @@
   .step-content{display:none;}
   .step-content.active{display:block;}
 
+  /* Primary-view tabs. Property Database is the default landing view;
+     Data Collection holds the scan workflow. Sits above the masthead
+     so the app's structural choice reads before its branding. */
+  .viewtabs{
+    display:flex;gap:0;border-bottom:1px solid var(--line-strong);margin-bottom:0;
+  }
+  .viewtabs button{
+    background:none;border:none;padding:12px 22px;cursor:pointer;
+    font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--ink-faint);border-bottom:2px solid transparent;margin-bottom:-1px;
+  }
+  .viewtabs button:hover{color:var(--ink);}
+  .viewtabs button.active{color:var(--ink);border-bottom-color:var(--brass);font-weight:600;}
+  .viewtabs .tab-sub{
+    display:block;font-size:10px;color:var(--ink-faint);letter-spacing:.04em;text-transform:none;
+    font-weight:400;margin-top:2px;
+  }
+  .viewtabs button.active .tab-sub{color:var(--ink-faint);}
+
+  .appview{display:none;}
+  .appview.active{display:block;}
+
+  /* Property-database view: the panel is inline (no longer a modal),
+     so no fixed positioning, no backdrop. Height is bounded by the
+     viewport so the scrolling table has a real container to grow into. */
+  #databaseView .db-inline-panel{
+    background:var(--paper-raised);border:1px solid var(--line-strong);border-radius:3px;
+    padding:0;height:calc(100vh - 240px);min-height:520px;
+    display:flex;flex-direction:column;overflow:hidden;
+  }
+
   /* County cards */
   .county-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;}
   .county-card{
@@ -470,23 +501,100 @@
     <div class="masthead-links">
       <button class="linklike" id="howToLink">How to use this tool</button>
       <button class="linklike" id="whatThisDoesLink">What this does / doesn't do &amp; methodology</button>
-      <button class="linklike" id="dbMapLink">Master DB map</button>
       <button class="linklike" id="settingsLink">Settings</button>
     </div>
   </header>
 
-  <div class="topnav">
-    <button class="btn-secondary" id="backBtn">&larr; Back</button>
-    <button class="btn-primary" id="continueBtn">Continue</button>
-    <span class="selection-count"><span id="selectedParcelCount">0</span> parcels selected</span>
+  <!-- Primary view tabs. Property Database is the front door -- the ranked
+       candidate list is what someone opening this tool should see first.
+       Data Collection holds the scan workflow (county picker, filters,
+       "Run scan," per-run review + export) -- reachable when you need to
+       add more data, not the default view. -->
+  <nav class="viewtabs" id="viewTabs">
+    <button class="active" data-view="database">
+      Property Database
+      <span class="tab-sub">Ranked list of every parcel scanned</span>
+    </button>
+    <button data-view="data-collection">
+      Data Collection
+      <span class="tab-sub">Run new scans &middot; per-run review &middot; export</span>
+    </button>
+  </nav>
+
+  <!-- ============ PROPERTY DATABASE VIEW (default) ============ -->
+  <div class="appview active" data-view="database" id="databaseView" style="padding-top:18px;">
+    <div class="db-inline-panel" id="dbMapPanel">
+      <div style="padding:18px 22px 12px;">
+        <div class="overlay-title">Master property database</div>
+        <div class="overlay-sub">Every parcel scanned across every county, over every run. Switch between the map (spatial overview) and the list (sortable, filterable, exportable). To add more data, use the Data Collection tab above.</div>
+        <div id="dbMapControls" style="display:flex;gap:14px;margin:14px 0;flex-wrap:wrap;align-items:center;">
+          <div class="field">
+            <label>View</label>
+            <div class="view-toggle">
+              <button data-dbview="map" id="dbViewMapBtn">Map</button>
+              <button class="active" data-dbview="list" id="dbViewListBtn">List</button>
+            </div>
+          </div>
+          <!-- Map-only controls -->
+          <div class="field db-map-only" style="min-width:220px;display:none;">
+            <label>Color by</label>
+            <select id="dbColorBy" class="mono">
+              <option value="tier">Qualification tier</option>
+              <option value="pathway">Best pathway match</option>
+              <option value="county">County</option>
+              <option value="coverage">ZIP coverage status</option>
+            </select>
+          </div>
+          <div class="field db-map-only" style="display:none;">
+            <label>Basemap</label>
+            <div class="view-toggle">
+              <button class="active" data-basemap="satellite" id="dbBasemapSat">Satellite</button>
+              <button data-basemap="street" id="dbBasemapStreet">Street</button>
+            </div>
+          </div>
+          <!-- List-only controls: county + tier filters. Populated at render time
+               from the actual loaded data so we don't hardcode a county list. -->
+          <div class="field db-list-only" style="min-width:180px;">
+            <label>County</label>
+            <select id="dbListFilterCounty" class="mono"><option value="">All counties</option></select>
+          </div>
+          <div class="field db-list-only" style="min-width:180px;">
+            <label>Tier</label>
+            <select id="dbListFilterTier" class="mono">
+              <option value="">All tiers</option>
+              <option value="confirmed_qualifying">Confirmed qualifying</option>
+              <option value="strong_candidate">Strong candidate</option>
+              <option value="watch_list">Watch list</option>
+              <option value="unlikely">Unlikely</option>
+              <option value="excluded">Excluded</option>
+            </select>
+          </div>
+          <label class="db-list-only" style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--ink-faint);display:flex;align-items:center;gap:6px;cursor:pointer;">
+            <input type="checkbox" id="dbListShowExcluded"> Show excluded
+          </label>
+          <button class="db-list-only" id="dbListExportBtn" style="padding:6px 12px;font-family:'IBM Plex Mono',monospace;font-size:12px;background:var(--ink);color:var(--paper);border:none;border-radius:3px;cursor:pointer;">Export selected (.xlsx)</button>
+          <div id="dbMapMeta" class="empty-note" style="margin-left:auto;font-size:12px;"></div>
+        </div>
+      </div>
+      <div id="dbMap" style="display:none;flex:1 1 auto;min-height:520px;border-top:1px solid var(--line);"></div>
+      <div id="dbListContainer" style="flex:1 1 auto;display:flex;flex-direction:column;overflow:auto;border-top:1px solid var(--line);padding:0 22px 22px;"></div>
+    </div>
   </div>
 
-  <div class="stepbar" id="stepBar">
-    <div class="step" data-step="1"><span class="num">1</span> Select county</div>
-    <div class="step" data-step="2"><span class="num">2</span> Run scan</div>
-    <div class="step" data-step="3"><span class="num">3</span> Review candidates</div>
-    <div class="step" data-step="4"><span class="num">4</span> Verify and export</div>
-  </div>
+  <!-- ============ DATA COLLECTION VIEW ============ -->
+  <div class="appview" data-view="data-collection" id="dataCollectionView" style="padding-top:18px;">
+    <div class="topnav">
+      <button class="btn-secondary" id="backBtn">&larr; Back</button>
+      <button class="btn-primary" id="continueBtn">Continue</button>
+      <span class="selection-count"><span id="selectedParcelCount">0</span> parcels selected</span>
+    </div>
+
+    <div class="stepbar" id="stepBar">
+      <div class="step" data-step="1"><span class="num">1</span> Select county</div>
+      <div class="step" data-step="2"><span class="num">2</span> Run scan</div>
+      <div class="step" data-step="3"><span class="num">3</span> Review candidates</div>
+      <div class="step" data-step="4"><span class="num">4</span> Verify and export</div>
+    </div>
 
   <!-- STEP 1 -->
   <div class="step-content" data-step="1">
@@ -626,70 +734,6 @@
     </div>
   </div>
 
-  <!-- MASTER DB (top-level overlay reached from the masthead).
-       One overlay hosts both the Map view and the List view -- they share
-       the same underlying _dbAllParcels data. Toggle sits at the top; the
-       inactive subview's controls are hidden so the header stays clean. -->
-  <div class="overlay-backdrop" id="dbMapBackdrop">
-    <div class="overlay-panel" id="dbMapPanel" style="max-width:1400px;">
-      <button class="overlay-close" id="dbMapClose" aria-label="Close">&times;</button>
-      <div style="padding:18px 22px 12px;">
-        <div class="overlay-title">Master property database</div>
-        <div class="overlay-sub">Every parcel scanned across every county, over every run. Switch between the map (spatial overview) and the list (sortable, filterable, exportable).</div>
-        <div id="dbMapControls" style="display:flex;gap:14px;margin:14px 0;flex-wrap:wrap;align-items:center;">
-          <div class="field">
-            <label>View</label>
-            <div class="view-toggle">
-              <button class="active" data-dbview="map" id="dbViewMapBtn">Map</button>
-              <button data-dbview="list" id="dbViewListBtn">List</button>
-            </div>
-          </div>
-          <!-- Map-only controls -->
-          <div class="field db-map-only" style="min-width:220px;">
-            <label>Color by</label>
-            <select id="dbColorBy" class="mono">
-              <option value="tier">Qualification tier</option>
-              <option value="pathway">Best pathway match</option>
-              <option value="county">County</option>
-              <option value="coverage">ZIP coverage status</option>
-            </select>
-          </div>
-          <div class="field db-map-only">
-            <label>Basemap</label>
-            <div class="view-toggle">
-              <button class="active" data-basemap="satellite" id="dbBasemapSat">Satellite</button>
-              <button data-basemap="street" id="dbBasemapStreet">Street</button>
-            </div>
-          </div>
-          <!-- List-only controls: county + tier filters. Populated at render time
-               from the actual loaded data so we don't hardcode a county list. -->
-          <div class="field db-list-only" style="min-width:180px;display:none;">
-            <label>County</label>
-            <select id="dbListFilterCounty" class="mono"><option value="">All counties</option></select>
-          </div>
-          <div class="field db-list-only" style="min-width:180px;display:none;">
-            <label>Tier</label>
-            <select id="dbListFilterTier" class="mono">
-              <option value="">All tiers</option>
-              <option value="confirmed_qualifying">Confirmed qualifying</option>
-              <option value="strong_candidate">Strong candidate</option>
-              <option value="watch_list">Watch list</option>
-              <option value="unlikely">Unlikely</option>
-              <option value="excluded">Excluded</option>
-            </select>
-          </div>
-          <label class="db-list-only" style="display:none;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--ink-faint);display:flex;align-items:center;gap:6px;cursor:pointer;">
-            <input type="checkbox" id="dbListShowExcluded"> Show excluded
-          </label>
-          <button class="db-list-only" id="dbListExportBtn" style="display:none;padding:6px 12px;font-family:'IBM Plex Mono',monospace;font-size:12px;background:var(--ink);color:var(--paper);border:none;border-radius:3px;cursor:pointer;">Export selected (.xlsx)</button>
-          <div id="dbMapMeta" class="empty-note" style="margin-left:auto;font-size:12px;"></div>
-        </div>
-      </div>
-      <div id="dbMap" style="height:calc(100% - 180px);min-height:520px;border-top:1px solid var(--line);"></div>
-      <div id="dbListContainer" style="display:none;flex:1 1 auto;overflow:auto;border-top:1px solid var(--line);padding:0 22px 22px;"></div>
-    </div>
-  </div>
-
   <!-- STEP 4 -->
   <div class="step-content" data-step="4">
     <div class="panel">
@@ -717,6 +761,13 @@
       doesn't do &amp; methodology" for the full automation-status breakdown.
     </div>
   </div>
+  </div> <!-- /#dataCollectionView -->
+
+  <!-- Hidden sentinel for legacy openDbMap/dbMapClose handlers -- the real
+       DB UI now lives inline under #databaseView (see the script that fills
+       it in on load), so any classList.add/remove('open') calls here are
+       no-ops that don't break the code path. -->
+  <div id="dbMapBackdrop" style="display:none;"></div>
 
 </div>
 
@@ -2669,7 +2720,10 @@ function _setDbBasemap(kind){
 }
 
 async function openDbMap(){
-  document.getElementById('dbMapBackdrop').classList.add('open');
+  // Kept for backward-compat with any code path that used to open the DB
+  // as a modal. The DB is now the primary landing view (see showView), so
+  // this just loads data + inits map/list without touching the sentinel
+  // backdrop. Idempotent -- safe to call from showView('database') too.
   if(!_dbMap){
     _dbMap = L.map('dbMap', {zoomControl: true});
     _dbMapSat = _makeSatLayer().addTo(_dbMap);
@@ -2694,12 +2748,41 @@ async function openDbMap(){
   }
   _renderDbLayer();
 }
-document.getElementById('dbMapLink').addEventListener('click', openDbMap);
-document.getElementById('dbMapClose').addEventListener('click', () => {
-  document.getElementById('dbMapBackdrop').classList.remove('open');
-});
-document.getElementById('dbMapBackdrop').addEventListener('click', (e) => {
-  if(e.target.id === 'dbMapBackdrop') document.getElementById('dbMapBackdrop').classList.remove('open');
+// dbMapLink and dbMapClose were removed with the modal wrapper. The DB is
+// now the primary landing view, reached via the top-level "Property
+// Database" tab (see showView / #viewTabs handlers below).
+
+// ---------------------------------------------------------------------
+// Primary view switching -- Property Database (default) vs. Data
+// Collection. The Data Collection tab still runs the same 4-step scan
+// workflow; the tab just gates whether that whole section is visible.
+// The DB list/map lives inline under #databaseView and stays initialized
+// even when the Data Collection tab is showing, so switching tabs
+// doesn't re-hit /api/property-db/all.
+// ---------------------------------------------------------------------
+let _currentView = 'database';
+let _dbInitialized = false;
+
+async function showView(kind){
+  _currentView = kind;
+  document.querySelectorAll('#viewTabs button').forEach(b =>
+    b.classList.toggle('active', b.dataset.view === kind));
+  document.querySelectorAll('.appview').forEach(el =>
+    el.classList.toggle('active', el.dataset.view === kind));
+  if(kind === 'database' && !_dbInitialized){
+    _dbInitialized = true;
+    await openDbMap();
+    _setDbView('list');  // land users on the ranked list, not the map
+  } else if(kind === 'database' && _dbMap){
+    // Coming back from Data Collection -- Leaflet needs a nudge in case
+    // the container was resized while hidden.
+    setTimeout(() => _dbMap && _dbMap.invalidateSize(), 60);
+    if(_dbView === 'map') _renderDbLayer();
+  }
+  window.scrollTo(0, 0);
+}
+document.querySelectorAll('#viewTabs button').forEach(btn => {
+  btn.addEventListener('click', () => showView(btn.dataset.view));
 });
 
 // ---------------------------------------------------------------------
@@ -2932,7 +3015,12 @@ function _setDbView(kind){
   listEl.style.flexDirection = 'column';
   document.querySelectorAll('.db-map-only').forEach(el => { el.style.display = showList ? 'none' : ''; });
   document.querySelectorAll('.db-list-only').forEach(el => {
-    el.style.display = showList ? (el.tagName === 'BUTTON' ? 'inline-block' : '') : 'none';
+    // BUTTON -> inline-block, LABEL -> flex (checkbox + text alignment),
+    // everything else -> '' to fall back to CSS defaults.
+    const show = el.tagName === 'BUTTON' ? 'inline-block'
+               : el.tagName === 'LABEL'  ? 'flex'
+               : '';
+    el.style.display = showList ? show : 'none';
   });
   if(showList){
     _populateDbCountyFilter();
@@ -2968,9 +3056,12 @@ document.getElementById('dbListExportBtn').addEventListener('click', () => {
 });
 
 // ---------------------------------------------------------------------
-// Init
+// Init -- the Property Database is the landing view. The Data Collection
+// wizard is still primed to Step 1 so switching to that tab lands the
+// user at "Select county" as before; the DB load kicks off async.
 // ---------------------------------------------------------------------
 showStep(1);
+showView('database');
 </script>
 </body>
 </html>

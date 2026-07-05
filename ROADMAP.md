@@ -32,14 +32,21 @@ the index/checklist, not the full spec.
   Master DB list view (item 6) can attach its own listener that passes
   whatever's checked there.
 
-- [ ] **3. FOUNDATION REWORK, PART 1 -- Master DB list becomes the primary landing view**
-  Restructure so the master database LIST is what the user lands on when
-  they open the tool, not the current "Step 1: select county / Step 2: run
-  scan" wizard. Scanning controls move to a secondary "Data Collection" /
-  "Admin" tab -- they're an ops function, not the primary user flow.
-  Depends conceptually on items 4-6 below existing. **Status: not
-  started.** Full detailed instructions will be provided in a separate
-  prompt when this item is actively being worked.
+- [x] **3. FOUNDATION REWORK, PART 1 -- Master DB list becomes the primary landing view** *(done 2026-07-06)*
+  Added a two-tab primary nav ("Property Database" / "Data Collection")
+  above the masthead-styled header. Property Database is the default
+  active tab and lands users on the ranked list -- the DB panel used to
+  live inside an overlay modal opened via a masthead link; that modal
+  wrapper is gone and its contents render inline under
+  `#databaseView`. Data Collection holds the existing 4-step scan
+  wizard (Back/Continue nav, stepbar, all four step-contents) untouched
+  behind the tab; nothing was removed. Redundant `dbMapLink` masthead
+  button dropped since the tab supersedes it. State survives tab
+  switches -- `_dbInitialized` flag prevents re-fetching
+  `/api/property-db/all` when returning to the DB tab. Verified with
+  10 mock parcels across pasco/nassau/st_johns + 8 counties (4 live,
+  4 coming-soon): landing shows ranked list first, Data Collection tab
+  shows full wizard with county cards, switching preserves state.
 
 - [x] **4. FOUNDATION REWORK, PART 2 -- hide Excluded-tier parcels by default** *(done 2026-07-06)*
   Master DB list view now filters `tier === 'excluded'` rows out of the

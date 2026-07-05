@@ -271,7 +271,7 @@ def parcel_demographics(
         # calculation below needs the 15-mile GEOID list. If debug=0,
         # we strip block_group_detail from the response payload before
         # returning so we don't bloat the on-the-wire size.
-        rings = ring_demographics.compute_ring_demographics(
+        rings, containing_bg_geoid = ring_demographics.compute_ring_demographics(
             parcel_centroid_lat=lat,
             parcel_centroid_lon=lon,
             census_api_key=api_key,
@@ -312,8 +312,17 @@ def parcel_demographics(
             bg["geoid"] for bg in (largest_ring.block_group_detail or [])
             if bg.get("geoid") and len(bg["geoid"]) == 12
         ]
-        state_fips = largest_geoids[0][:2] if largest_geoids else None
-        county_fips = largest_geoids[0][2:5] if largest_geoids else None
+        # FIX (2026-07-06): use the FIPS from the BG that actually
+        # contains the parcel centroid, not the first BG in the ring
+        # (which could be in an adjacent county when the ring straddles
+        # a county boundary -- e.g. a Pasco parcel with a 15-mile ring
+        # picks up Hernando/Hillsborough/Sumter BGs, and "first" was
+        # arbitrary).
+        state_fips = None
+        county_fips = None
+        if containing_bg_geoid and len(containing_bg_geoid) == 12:
+            state_fips = containing_bg_geoid[:2]
+            county_fips = containing_bg_geoid[2:5]
         if state_fips and county_fips:
             trend = ring_demographics.fetch_population_trend(
                 state_fips=state_fips,

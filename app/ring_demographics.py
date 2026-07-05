@@ -296,6 +296,9 @@ class PopulationTrend:
     baseline_year: int
     current_year: int
     # County reliable numbers
+    county_name: Optional[str]  # e.g. "Pasco County, Florida" -- keeps the county visible in the payload so a wrong-county lookup is obvious at a glance
+    county_state_fips: Optional[str]
+    county_fips: Optional[str]
     county_population_baseline: Optional[int]
     county_population_current: Optional[int]
     county_growth_pct: Optional[float]
@@ -306,8 +309,16 @@ class PopulationTrend:
     ring_note: str  # human-readable caveat about BG boundary redraw
 
 
-def fetch_county_population(state_fips: str, county_fips: str, year: int, census_api_key: str) -> Optional[int]:
-    """Query one county's total population from the specified ACS 5-year vintage."""
+def fetch_county_population(
+    state_fips: str, county_fips: str, year: int, census_api_key: str,
+) -> tuple[Optional[int], Optional[str]]:
+    """
+    Query one county's total population + display NAME from the
+    specified ACS 5-year vintage. Returns (population, name) or
+    (None, None) on failure -- callers keep names visible in payloads
+    so a wrong-county lookup shows up as e.g. "Hernando County"
+    instead of hiding behind an anonymous +10.3% growth number.
+    """
     url = (
         f"https://api.census.gov/data/{year}/acs/acs5"
         f"?get=NAME,B01003_001E&for=county:{county_fips}&in=state:{state_fips}"
@@ -323,11 +334,12 @@ def fetch_county_population(state_fips: str, county_fips: str, year: int, census
             f"Raw response start: {resp.text[:200]!r}"
         )
     if len(rows) < 2:
-        return None
+        return None, None
     header, *data_rows = rows
     col_index = {name: i for i, name in enumerate(header)}
     val = _parse_acs_value(data_rows[0][col_index["B01003_001E"]])
-    return int(val) if val is not None else None
+    name = data_rows[0][col_index["NAME"]] if "NAME" in col_index else None
+    return (int(val) if val is not None else None), name
 
 
 def fetch_ring_population_directional(
@@ -374,13 +386,23 @@ def fetch_population_trend(
     baseline = CENSUS_ACS5_TREND_BASELINE_YEAR
     current = CENSUS_ACS5_CURRENT_YEAR
 
-    # County (reliable)
+    # County (reliable) -- pull both population + display NAME so the
+    # payload identifies which county was actually looked up.
+    county_name: Optional[str] = None
     try:
-        county_baseline = fetch_county_population(state_fips, county_fips, baseline, census_api_key)
+        county_baseline, name_baseline = fetch_county_population(
+            state_fips, county_fips, baseline, census_api_key,
+        )
+        county_name = name_baseline
     except Exception:  # noqa: BLE001
         county_baseline = None
     try:
-        county_current = fetch_county_population(state_fips, county_fips, current, census_api_key)
+        county_current, name_current = fetch_county_population(
+            state_fips, county_fips, current, census_api_key,
+        )
+        # Prefer the current-vintage NAME when both are available; both
+        # should match since FIPS codes are stable.
+        county_name = name_current or county_name
     except Exception:  # noqa: BLE001
         county_current = None
 
@@ -415,6 +437,9 @@ def fetch_population_trend(
     return PopulationTrend(
         baseline_year=baseline,
         current_year=current,
+        county_name=county_name,
+        county_state_fips=state_fips,
+        county_fips=county_fips,
         county_population_baseline=county_baseline,
         county_population_current=county_current,
         county_growth_pct=county_growth_pct,
@@ -545,12 +570,47 @@ def fetch_acs_values_for_block_groups(
     return merged
 
 
+def find_bg_containing_point(features: list, lat: float, lon: float) -> Optional[str]:
+    """
+    Return the GEOID of the block-group polygon whose geometry contains
+    the given point, or -- if no polygon contains the point (rare edge
+    case at BG boundaries or if the envelope query missed one) -- the
+    GEOID of the BG whose centroid is closest to the point. Called
+    after fetch_block_groups_near to determine the parcel's county for
+    the population-trend county lookup. Fixes the "first BG in the
+    ring might be in a different county" bug (2026-07-06).
+    """
+    _require_deps()
+    p = Point(lon, lat)
+    closest_geoid: Optional[str] = None
+    closest_distance = float("inf")
+    for feat in features:
+        geom = feat.get("geometry")
+        attrs = feat.get("attributes", {})
+        if geom is None:
+            continue
+        try:
+            shape = esri_json_to_shapely(geom)
+        except (ValueError, TypeError, KeyError):
+            continue
+        if shape.contains(p):
+            return attrs.get("GEOID")
+        try:
+            d = p.distance(shape.centroid)
+            if d < closest_distance:
+                closest_distance = d
+                closest_geoid = attrs.get("GEOID")
+        except (ValueError, AttributeError):
+            continue
+    return closest_geoid
+
+
 def compute_ring_demographics(
     parcel_centroid_lat: float,
     parcel_centroid_lon: float,
     census_api_key: str,
     include_block_group_detail: bool = False,
-) -> list[RingDemographics]:
+) -> tuple[list[RingDemographics], Optional[str]]:
     """
     The actual on-demand entry point: given a parcel's centroid, return
     population/income/age/housing stats for 5, 10, and 15-mile rings.
@@ -564,6 +624,15 @@ def compute_ring_demographics(
     _require_deps()
     features = fetch_block_groups_near(
         parcel_centroid_lat, parcel_centroid_lon, max(RING_RADII_MILES), census_api_key
+    )
+    # Fix (2026-07-06): identify the block group that actually contains
+    # the parcel centroid, so the caller can use its state+county FIPS
+    # for the county-level trend lookup instead of picking whichever
+    # BG happens to be first in the ring's list (which could be in an
+    # adjacent county if the ring straddles a county boundary -- exactly
+    # the bug that made a Pasco parcel report Hernando County's trend).
+    containing_bg_geoid = find_bg_containing_point(
+        features, parcel_centroid_lat, parcel_centroid_lon,
     )
 
     results = []
@@ -764,4 +833,4 @@ def compute_ring_demographics(
             block_group_detail=block_group_detail,
         ))
 
-    return results
+    return results, containing_bg_geoid

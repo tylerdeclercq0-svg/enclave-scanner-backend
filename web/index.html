@@ -370,6 +370,64 @@
   .demo-rings .na{color:var(--ink-faint);font-style:italic;}
   .demo-error{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--clay);}
 
+  /* Phase E (2026-07-06): homebuilder/multifamily demographics section */
+  .demo-block{margin-top:6px;}
+  .demo-tabs{
+    display:flex;gap:2px;margin-bottom:14px;
+    border-bottom:1px solid var(--line-strong);
+  }
+  .demo-tab{
+    background:none;border:none;padding:8px 16px;cursor:pointer;
+    font-family:'IBM Plex Mono',monospace;font-size:11.5px;
+    color:var(--ink-faint);border-bottom:2px solid transparent;
+    margin-bottom:-1px;
+  }
+  .demo-tab:hover{color:var(--ink);}
+  .demo-tab.active{color:var(--ink);border-bottom-color:var(--brass);font-weight:600;}
+
+  .demo-grid{
+    display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));
+    gap:12px;margin-bottom:20px;
+  }
+  .demo-stat{
+    border:1px solid var(--line);border-radius:2px;padding:10px 12px;
+    background:var(--paper);
+  }
+  .demo-stat label{
+    display:block;font-family:'IBM Plex Mono',monospace;font-size:10px;
+    letter-spacing:.04em;text-transform:uppercase;color:var(--ink-faint);
+    margin-bottom:4px;line-height:1.35;
+  }
+  .demo-stat value{
+    display:block;font-family:'IBM Plex Mono',monospace;font-size:15px;
+    color:var(--ink);font-weight:600;
+  }
+  .demo-caveat{
+    color:var(--brass);font-size:9.5px;cursor:help;letter-spacing:.02em;
+    text-transform:none;font-weight:normal;font-family:'IBM Plex Mono',monospace;
+  }
+
+  .demo-chart{margin:20px 0;}
+  .demo-chart-title{
+    font-family:'IBM Plex Mono',monospace;font-size:11px;
+    letter-spacing:.06em;text-transform:uppercase;color:var(--ink-faint);
+    margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--line);
+  }
+
+  .demo-trend{
+    margin-top:24px;padding:16px;background:var(--paper);
+    border:1px solid var(--line);border-radius:2px;
+  }
+  .trend-line{margin-bottom:8px;font-size:13px;line-height:1.5;}
+  .trend-line strong{color:var(--brass);}
+  .trend-label{color:var(--ink-faint);font-family:'IBM Plex Mono',monospace;font-size:11.5px;}
+  .trend-directional-unavail{color:var(--ink-faint);}
+  .trend-note{
+    margin-top:10px;padding-top:10px;border-top:1px dashed var(--line-strong);
+    font-size:11px;color:var(--ink-faint);line-height:1.5;font-style:italic;
+  }
+  .demo-trend-error{color:var(--clay);font-size:12px;}
+
   /* Step 4 next-steps */
   .nextsteps{list-style:none;margin:0;padding:0;}
   .nextsteps li{display:flex;gap:16px;padding:14px 0;border-bottom:1px solid var(--line);}
@@ -1293,15 +1351,135 @@ function updateSelectedCount(){
 function fmtDemoValue(v, digits=0){
   return v==null ? '<span class="empty-note">not available</span>' : v.toFixed(digits);
 }
+// Format helpers for demographic values -- all null-safe.
+function _fmtCurrency(v){ return v == null ? '—' : '$' + Math.round(v).toLocaleString(); }
+function _fmtInt(v){ return v == null ? '—' : Math.round(v).toLocaleString(); }
+function _fmtPct(v, digits){ return v == null ? '—' : v.toFixed(digits || 1) + '%'; }
+function _fmtDec(v, digits){ return v == null ? '—' : v.toFixed(digits || 2); }
+
+// Human labels for the 16-bucket B19001 income distribution keys.
+const _INCOME_BUCKET_LABELS = [
+  ['income_lt_10k', '<$10K'], ['income_10_15k', '$10-15K'],
+  ['income_15_20k', '$15-20K'], ['income_20_25k', '$20-25K'],
+  ['income_25_30k', '$25-30K'], ['income_30_35k', '$30-35K'],
+  ['income_35_40k', '$35-40K'], ['income_40_45k', '$40-45K'],
+  ['income_45_50k', '$45-50K'], ['income_50_60k', '$50-60K'],
+  ['income_60_75k', '$60-75K'], ['income_75_100k', '$75-100K'],
+  ['income_100_125k', '$100-125K'], ['income_125_150k', '$125-150K'],
+  ['income_150_200k', '$150-200K'], ['income_200k_plus', '$200K+'],
+];
+const _AGE_BUCKET_LABELS = [
+  ['under_18', 'Under 18'], ['age_20_34', '20-34 (multifamily)'],
+  ['age_25_44', '25-44 (homebuyer)'], ['age_65_plus', '65+'],
+];
+
+// Lightweight inline SVG horizontal bar chart. No external deps.
+function _svgBarChart(items, opts){
+  opts = opts || {};
+  const barH = opts.barHeight || 18;
+  const gap = opts.gap || 4;
+  const labelW = opts.labelWidth || 130;
+  const valueW = opts.valueWidth || 70;
+  const chartW = opts.width || 420;
+  const barsW = chartW - labelW - valueW;
+  const height = items.length * (barH + gap) - gap;
+  const maxV = Math.max(...items.map(i => i.value || 0), 1);
+  const color = opts.color || '#8b6c3a';
+  const rows = items.map((it, i) => {
+    const y = i * (barH + gap);
+    const w = (it.value / maxV) * barsW;
+    const displayVal = it.display != null ? it.display : (it.value != null ? it.value.toLocaleString() : '—');
+    return `
+      <text x="0" y="${y + barH * 0.68}" font-size="11.5" fill="#4a4a4a" font-family="'IBM Plex Mono',monospace">${it.label}</text>
+      <rect x="${labelW}" y="${y + 2}" width="${w}" height="${barH - 4}" rx="1" fill="${color}"/>
+      <text x="${chartW - 2}" y="${y + barH * 0.68}" font-size="11.5" text-anchor="end" fill="#1e2a24" font-family="'IBM Plex Mono',monospace">${displayVal}</text>`;
+  }).join('');
+  return `<svg width="${chartW}" height="${height}" xmlns="http://www.w3.org/2000/svg">${rows}</svg>`;
+}
+
+// Render a single ring's full stats + charts.
+function _renderRing(ring, totalPop){
+  const wtNote = '<span class="demo-caveat" title="Population-weighted average of per-block-group medians. NOT a true aggregate-ring median (would require full per-BG distributions). Reliable when constituent BG medians are similar; treat as approximation when spread is wide.">(pop-wt avg)</span>';
+  const statsGrid = `
+    <div class="demo-grid">
+      <div class="demo-stat"><label>Population</label><value>${_fmtInt(ring.total_population)}${ring.population_moe ? ` <span class="empty-note">±${_fmtInt(ring.population_moe)}</span>` : ''}</value></div>
+      <div class="demo-stat"><label>Median age ${wtNote}</label><value>${_fmtDec(ring.median_age, 1)}</value></div>
+      <div class="demo-stat"><label>Median HH income ${wtNote}</label><value>${_fmtCurrency(ring.median_household_income)}${ring.income_moe ? ` <span class="empty-note">±${_fmtCurrency(ring.income_moe)}</span>` : ''}</value></div>
+      <div class="demo-stat"><label>Median home value ${wtNote}</label><value>${_fmtCurrency(ring.median_home_value)}</value></div>
+      <div class="demo-stat"><label>Homeownership rate</label><value>${_fmtPct(ring.homeownership_rate_pct)}</value></div>
+      <div class="demo-stat"><label>Renter-occupied</label><value>${_fmtPct(ring.renter_occupied_pct)}</value></div>
+      <div class="demo-stat"><label>Median gross rent ${wtNote}</label><value>${_fmtCurrency(ring.median_gross_rent)}</value></div>
+      <div class="demo-stat"><label>Rent burden ${wtNote}</label><value>${_fmtPct(ring.rent_burden_pct)} of income</value></div>
+      <div class="demo-stat"><label>Avg household size</label><value>${_fmtDec(ring.avg_household_size, 2)}</value></div>
+      <div class="demo-stat"><label>Family households</label><value>${_fmtPct(ring.family_household_pct)}</value></div>
+      <div class="demo-stat"><label>Total housing units</label><value>${_fmtInt(ring.total_housing_units)}</value></div>
+      <div class="demo-stat"><label>Density</label><value>${_fmtInt(ring.density_per_sqmi)}/mi²</value></div>
+    </div>`;
+
+  const ageItems = _AGE_BUCKET_LABELS.map(([k, label]) => {
+    const count = (ring.age_distribution || {})[k] || 0;
+    const pct = totalPop > 0 ? (count / totalPop * 100).toFixed(1) : '0.0';
+    return {label, value: count, display: `${count.toLocaleString()} (${pct}%)`};
+  });
+  const ageChart = ring.age_distribution
+    ? `<div class="demo-chart"><div class="demo-chart-title">Age distribution</div>${_svgBarChart(ageItems, {color: '#8b6c3a'})}</div>`
+    : '';
+
+  const incomeItems = _INCOME_BUCKET_LABELS.map(([k, label]) => {
+    const count = (ring.income_distribution || {})[k] || 0;
+    return {label, value: count, display: count.toLocaleString()};
+  });
+  const incomeChart = ring.income_distribution
+    ? `<div class="demo-chart"><div class="demo-chart-title">Household income distribution</div>${_svgBarChart(incomeItems, {color: '#6b5218'})}</div>`
+    : '';
+
+  return statsGrid + ageChart + incomeChart;
+}
+
+function _renderTrend(trend){
+  if(!trend) return '';
+  if(trend.error) return `<div class="demo-trend-error">Trend fetch failed: ${trend.error}</div>`;
+  const countyPct = trend.county_growth_pct;
+  const ringPct = trend.ring_growth_pct_directional;
+  const arrow = (v) => v == null ? '' : (v >= 0 ? '↑' : '↓');
+  const countyName = trend.county_name || (trend.county_state_fips && trend.county_fips ? `County FIPS ${trend.county_state_fips}${trend.county_fips}` : 'County');
+  const countyLine = countyPct != null
+    ? `<div class="trend-line"><span class="trend-label">${countyName} ${trend.baseline_year}→${trend.current_year} (reliable):</span> ${_fmtInt(trend.county_population_baseline)} → ${_fmtInt(trend.county_population_current)} <strong>${arrow(countyPct)} ${countyPct >= 0 ? '+' : ''}${countyPct.toFixed(1)}%</strong></div>`
+    : `<div class="trend-line"><em>${countyName} trend unavailable.</em></div>`;
+  const ringLine = ringPct != null
+    ? `<div class="trend-line"><span class="trend-label">15-mile ring ${trend.baseline_year}→${trend.current_year} (directional only):</span> ${_fmtInt(trend.ring_population_baseline_directional)} → ${_fmtInt(trend.ring_population_current)} <strong>${arrow(ringPct)} ${ringPct >= 0 ? '+' : ''}${ringPct.toFixed(1)}%</strong></div>`
+    : '<div class="trend-line trend-directional-unavail"><em>Ring directional trend unavailable — 2018 ACS block-group GEOIDs from the 2023 vintage did not resolve. See note below.</em></div>';
+  return `
+    <div class="demo-trend">
+      <div class="demo-chart-title">Population trend ${trend.baseline_year} → ${trend.current_year}</div>
+      ${countyLine}
+      ${ringLine}
+      <div class="trend-note">${trend.ring_note}</div>
+    </div>`;
+}
+
 function renderDemoCell(td, r, key){
-  if(r._demoRings){
-    td.innerHTML = `<div class="demo-rings">${r._demoRings.map(ring => `
-      <div><strong>${ring.radius_miles}mi:</strong>
-        pop ${fmtDemoValue(ring.total_population)}${ring.population_moe!=null ? ` (&plusmn;${ring.population_moe.toFixed(0)})` : ''},
-        ${fmtDemoValue(ring.total_housing_units)} units,
-        ${fmtDemoValue(ring.density_per_sqmi)}/mi&sup2;,
-        inc ${fmtDemoValue(ring.median_household_income)}, age ${fmtDemoValue(ring.median_age)}
-      </div>`).join('')}</div>`;
+  if(r._demoData){
+    const rings = r._demoData.rings || [];
+    const trend = r._demoData.trend;
+    const selectedRadius = r._demoSelectedRadius || rings[0]?.radius_miles || 5;
+    const selectedRing = rings.find(x => x.radius_miles === selectedRadius) || rings[0];
+    const tabsHtml = rings.map(ring => `
+      <button class="demo-tab${ring.radius_miles === selectedRadius ? ' active' : ''}" data-radius="${ring.radius_miles}">${ring.radius_miles} mi</button>
+    `).join('');
+    td.innerHTML = `
+      <div class="demo-block">
+        <div class="demo-tabs">${tabsHtml}</div>
+        <div class="demo-body">${_renderRing(selectedRing, selectedRing.total_population || 0)}</div>
+        ${_renderTrend(trend)}
+      </div>`;
+    // Wire the tab-switch click handlers.
+    td.querySelectorAll('.demo-tab').forEach(b => {
+      b.addEventListener('click', () => {
+        r._demoSelectedRadius = parseInt(b.dataset.radius);
+        renderDemoCell(td, r, key);
+      });
+    });
     return;
   }
   if(r._demoError){
@@ -1350,7 +1528,8 @@ async function pullDemographics(r, key){
       const msg = (detail && detail.message) ? `${detail.message}: ${detail.exception_str}` : (detail || `HTTP ${res.status}`);
       throw new Error(msg);
     }
-    r._demoRings = data.rings;
+    r._demoData = data;        // full response: rings + trend
+    r._demoRings = data.rings; // kept for backward compat with anything reading r._demoRings
     r._demoError = null;
   }catch(err){
     r._demoError = err.message;

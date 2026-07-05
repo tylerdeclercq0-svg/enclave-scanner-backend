@@ -77,6 +77,53 @@
   button.btn-secondary:disabled{border-color:var(--line-strong);color:var(--ink-faint);cursor:not-allowed;}
   .selection-count{font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:var(--ink-faint);}
 
+  /* Plain-text "field" for values the user can't actually change (e.g.
+     DOR use code range) -- rendering these as disabled <select>s makes
+     them look like broken controls. */
+  .field-static{
+    font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--ink);
+    padding:9px 0 6px 0;line-height:1.35;
+  }
+  .field-static-note{color:var(--ink-faint);font-size:11.5px;}
+
+  /* Primary scan action -- big, obvious, morphs contextually. */
+  .btn-primary.scan-primary{
+    width:100%;padding:14px 20px;font-size:15px;
+  }
+  .btn-primary.scan-primary-stop{
+    background:var(--clay);border-color:var(--clay);color:#fff;
+  }
+  .btn-primary.scan-primary-stop:hover{background:#7a3128;}
+
+  /* Advanced-controls disclosure -- collapsed by default, houses the
+     power-user overrides + per-ZCTA table so they don't compete with
+     the primary "Scan entire county" action. */
+  .advanced-panel{
+    margin-top:20px;border:1px solid var(--line);border-radius:3px;
+    background:var(--paper);
+  }
+  .advanced-panel > summary{
+    padding:10px 14px;cursor:pointer;font-family:'IBM Plex Mono',monospace;
+    font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--ink-faint);user-select:none;
+  }
+  .advanced-panel > summary:hover{color:var(--ink);}
+  .advanced-panel[open] > summary{
+    border-bottom:1px solid var(--line);color:var(--ink);
+  }
+  .advanced-panel-body{padding:16px;}
+  .advanced-note{
+    margin:0 0 14px 0;font-size:12.5px;color:var(--ink-faint);line-height:1.5;
+  }
+
+  /* Default coverage view: one-line summary, sits above the disclosure. */
+  .coverage-summary{
+    font-family:'IBM Plex Mono',monospace;font-size:12.5px;
+    color:var(--ink-faint);letter-spacing:.03em;
+    padding:8px 0;
+  }
+  .coverage-summary strong{color:var(--ink);}
+
   /* Step bar */
   .stepbar{display:flex;border:1px solid var(--line-strong);border-radius:3px;overflow:hidden;margin-bottom:24px;}
   .stepbar .step{
@@ -405,9 +452,7 @@
         </div>
         <div class="field">
           <label>DOR use code range</label>
-          <select id="dorRange" disabled title="Each county's own confirmed agricultural use codes are always applied — this is the only supported range right now.">
-            <option>000–069 (Agricultural)</option>
-          </select>
+          <div class="field-static" title="Each county's own confirmed agricultural use codes are always applied — this is the only supported range right now.">000–069 (Agricultural)<span class="field-static-note"> · applied automatically per county</span></div>
         </div>
         <div class="field">
           <label>Ownership</label>
@@ -424,12 +469,16 @@
     </div>
 
     <div class="panel">
-      <h3 class="section-label">Character &amp; density</h3>
+      <h3 class="section-label">Encirclement &amp; density</h3>
       <div class="filter-grid">
         <div class="field">
-          <label>FLUM character</label>
-          <select id="flumCharacterFilter">
+          <label>Min. encirclement %</label>
+          <select id="minEncirclementFilter">
             <option value="">Any</option>
+            <option value="25">25%+</option>
+            <option value="50">50%+</option>
+            <option value="75">75%+</option>
+            <option value="90">90%+</option>
           </select>
         </div>
         <div class="field">
@@ -441,29 +490,35 @@
             <option value="urban">Urban</option>
           </select>
         </div>
-        <div class="field">
-          <label>Min. encirclement %</label>
-          <select id="minEncirclementFilter">
-            <option value="">Any</option>
-            <option value="25">25%+</option>
-            <option value="50">50%+</option>
-            <option value="75">75%+</option>
-            <option value="90">90%+</option>
-          </select>
-        </div>
       </div>
-      <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap;">
-        <button class="btn-primary" id="runBtn">Advance coverage (next ZIP section)</button>
-        <button class="btn-primary" id="scanEntireBtn" title="Loop through every remaining ZIP section for this county automatically, using the same per-parcel ledger and batch logic. Runs as a background job -- close this tab and come back, your progress is preserved.">Scan entire county</button>
-        <button class="export" id="cancelJobBtn" style="display:none;background:var(--clay);color:#fff;border-color:var(--clay);">Stop background scan</button>
-        <button class="export" id="resetCoverageBtn" title="Wipe this county's coverage ledger (start fresh).">Reset coverage</button>
+      <!-- Primary action: one big contextual button that morphs
+           "Scan entire county" <-> "Stop scan" <-> "Resume scan"
+           depending on the background job's state. -->
+      <div style="margin-top:20px;">
+        <button class="btn-primary scan-primary" id="scanEntireBtn" title="Loop through every remaining ZIP section for this county automatically. Runs as a background job -- close this tab and come back, your progress is preserved.">Scan entire county</button>
       </div>
       <div id="jobStatusBar" style="display:none;margin-top:12px;padding:10px 14px;border:1px solid var(--line-strong);border-radius:3px;background:var(--brass-dim);font-family:'IBM Plex Mono',monospace;font-size:12.5px;">
         <span id="jobStatusText"></span>
       </div>
       <div class="status" id="status"></div>
       <div class="bar-outer"><div class="bar-inner" id="progressBar"></div></div>
-      <div id="coveragePanel" style="margin-top:16px;"></div>
+
+      <!-- Default coverage view is a one-line summary. Full per-ZCTA
+           table + manual controls (Advance one section, Reset ledger)
+           live inside the Advanced disclosure below. -->
+      <div id="coverageSummaryLine" class="coverage-summary" style="margin-top:16px;">Select a county to see coverage.</div>
+
+      <details class="advanced-panel" id="advancedCoverage">
+        <summary>Advanced coverage controls</summary>
+        <div class="advanced-panel-body">
+          <p class="advanced-note">These are power-user overrides. The "Scan entire county" button above already loops through every ZIP section automatically -- most runs won't need anything in here.</p>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+            <button class="btn-secondary" id="runBtn">Advance one ZIP section</button>
+            <button class="export" id="resetCoverageBtn" title="Wipe this county's coverage ledger (start fresh).">Reset coverage</button>
+          </div>
+          <div id="coveragePanel"></div>
+        </div>
+      </details>
     </div>
   </div>
 
@@ -573,6 +628,7 @@
 // State
 // ---------------------------------------------------------------------
 const API_BASE_KEY = "ag_enclave_api_base";
+const MAX_PARCELS_KEY = "ag_enclave_max_parcels";
 let counties = [];
 const selectedCounties = new Set();
 let currentStep = 1;
@@ -614,6 +670,12 @@ function showStep(n){
     el.classList.toggle('done', s < n);
   });
   document.getElementById('backBtn').disabled = n === 1;
+  // Selection count only means something once real results are visible
+  // (Steps 3-4). On Steps 1-2 it's misleading -- there's nothing to
+  // select yet -- so hide it entirely rather than showing "0 parcels
+  // selected" on a screen with no parcels to see.
+  const selEl = document.querySelector('.selection-count');
+  if(selEl) selEl.style.display = (n >= 3) ? 'inline-block' : 'none';
   const continueBtn = document.getElementById('continueBtn');
   if(n === 4){
     continueBtn.textContent = 'Done';
@@ -731,6 +793,19 @@ document.getElementById('apiBase').addEventListener('change', loadCounties);
   loadCounties();
 })();
 
+// Persist "Max parcels per run" across sessions the same way the API
+// base URL persists -- this is a per-user config value, not something
+// that should reset to 25 on every page reload.
+(function initMaxParcels(){
+  const el = document.getElementById('maxCandidates');
+  const saved = localStorage.getItem(MAX_PARCELS_KEY);
+  if(saved){ el.value = saved; }
+  el.addEventListener('change', () => {
+    const v = parseInt(el.value);
+    if(Number.isFinite(v) && v > 0) localStorage.setItem(MAX_PARCELS_KEY, String(v));
+  });
+})();
+
 // ---------------------------------------------------------------------
 // Step 2 — run scan
 // ---------------------------------------------------------------------
@@ -756,15 +831,27 @@ async function scanCounty(base, countyId, params){
 
 async function refreshCoveragePanel(base, countyId){
   const panel = document.getElementById('coveragePanel');
+  const summaryLine = document.getElementById('coverageSummaryLine');
   try{
     const res = await fetch(`${base}/api/coverage/${countyId}/status`);
     if(!res.ok){
       panel.innerHTML = `<div class="empty-note">Could not load coverage status: HTTP ${res.status}</div>`;
+      summaryLine.textContent = 'Could not load coverage status.';
       return null;
     }
     const state = await res.json();
     const s = state.summary;
     const nextZ = state.next_incomplete_zcta;
+    const countyLabel = COUNTY_INFO[countyId]?.name || countyId;
+
+    // Default (always visible) view: one-line summary in the panel above.
+    let summaryText = `<strong>${countyLabel}</strong>: ${s.zctas_complete} of ${s.zcta_count} ZIP sections complete`;
+    summaryText += ` &middot; ${s.total_processed_parcels} of ${s.total_candidate_parcels != null ? '~' + s.total_candidate_parcels : '—'} parcels processed`;
+    if(s.county_complete) summaryText += ` &middot; <strong style="color:var(--brass-800);">COUNTY SCAN COMPLETE</strong>`;
+    summaryLine.innerHTML = summaryText;
+
+    // Detailed view: full per-ZCTA table -- lives inside the Advanced
+    // disclosure, only rendered when the disclosure is open (or hidden).
     const rows = state.zctas.map(z => {
       const status = z.complete
         ? '<span style="color:var(--brass-800);">Complete</span>'
@@ -776,15 +863,7 @@ async function refreshCoveragePanel(base, countyId){
       const highlight = (z.zcta5 === nextZ) ? 'style="background:var(--brass-dim);"' : '';
       return `<tr ${highlight}><td class="mono">${z.zcta5}</td><td>${status}</td></tr>`;
     }).join('');
-    const countyLabel = COUNTY_INFO[countyId]?.name || countyId;
     panel.innerHTML = `
-      <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--ink-faint);letter-spacing:.04em;text-transform:uppercase;margin-bottom:8px;">
-        <strong style="color:var(--ink);">${countyLabel} coverage</strong>
-        &middot; ${s.zctas_complete} of ${s.zcta_count} ZIP sections complete
-        &middot; ${s.total_processed_parcels} parcels processed
-        ${s.total_candidate_parcels != null ? ' of ~' + s.total_candidate_parcels : ''}
-        ${s.county_complete ? '&middot; <strong style="color:var(--brass-800);">COUNTY SCAN COMPLETE</strong>' : ''}
-      </div>
       <table style="width:100%;border-collapse:collapse;font-size:12px;">
         <thead><tr style="border-bottom:1px solid var(--line-strong);"><th style="text-align:left;padding:4px 8px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-faint);">ZCTA</th><th style="text-align:left;padding:4px 8px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-faint);">Status</th></tr></thead>
         <tbody>${rows}</tbody>
@@ -806,8 +885,8 @@ async function runScan(){
   const maxAcres = parseFloat(document.getElementById('maxAcres').value) || 4480;
   const maxCandidates = parseInt(document.getElementById('maxCandidates').value) || 25;
   const requireSingleOwner = document.getElementById('ownershipFilter').value === 'single';
-  const density = document.getElementById('densityFilter').value;
   const minEncirclement = document.getElementById('minEncirclementFilter').value;
+  const density = document.getElementById('densityFilter').value;
 
   const activeCounties = counties.filter(c => selectedCounties.has(c.id));
   if(activeCounties.length !== 1){ setStatus('Pick exactly one county in Step 1 (single-county scan lock).', true); btn.disabled = false; return; }
@@ -890,27 +969,36 @@ function _pillLabel(status){
 
 function _renderJobStatus(job){
   const bar = document.getElementById('jobStatusBar');
-  const cancelBtn = document.getElementById('cancelJobBtn');
-  const startBtn = document.getElementById('scanEntireBtn');
+  const btn = document.getElementById('scanEntireBtn');
+  // The single primary button morphs based on job state instead of
+  // having two separate Start / Stop buttons compete for attention.
   if(!job){
     bar.style.display = 'none';
-    cancelBtn.style.display = 'none';
-    startBtn.disabled = false;
-    startBtn.textContent = 'Scan entire county';
+    btn.disabled = false;
+    btn.textContent = 'Scan entire county';
+    btn.dataset.mode = 'start';
+    btn.classList.remove('scan-primary-stop');
     return;
   }
   bar.style.display = 'block';
   const isRunning = (job.status === 'running' || job.status === 'queued');
-  cancelBtn.style.display = isRunning ? 'inline-block' : 'none';
-  startBtn.disabled = isRunning;
-  if(job.status === 'interrupted'){
-    startBtn.textContent = 'Resume scan';
-    startBtn.disabled = false;
+  btn.disabled = false;
+  if(isRunning){
+    btn.textContent = 'Stop scan';
+    btn.dataset.mode = 'stop';
+    btn.classList.add('scan-primary-stop');
+  } else if(job.status === 'interrupted'){
+    btn.textContent = 'Resume scan';
+    btn.dataset.mode = 'start';
+    btn.classList.remove('scan-primary-stop');
   } else if(job.status === 'error'){
-    startBtn.textContent = 'Retry / resume scan';
-    startBtn.disabled = false;
+    btn.textContent = 'Retry / resume scan';
+    btn.dataset.mode = 'start';
+    btn.classList.remove('scan-primary-stop');
   } else {
-    startBtn.textContent = 'Scan entire county';
+    btn.textContent = 'Scan entire county';
+    btn.dataset.mode = 'start';
+    btn.classList.remove('scan-primary-stop');
   }
 
   // Tint the bar per status
@@ -961,9 +1049,21 @@ function _startPolling(base, countyId){
 
 document.getElementById('scanEntireBtn').addEventListener('click', async () => {
   const base = getApiBase();
+  const btn = document.getElementById('scanEntireBtn');
+  const mode = btn.dataset.mode || 'start';
   const activeCounties = counties.filter(c => selectedCounties.has(c.id));
   if(activeCounties.length !== 1){ setStatus('Pick exactly one county in Step 1.', true); return; }
   const county = activeCounties[0];
+
+  if(mode === 'stop'){
+    if(!confirm('Stop the background scan? The ledger keeps whatever progress made it to disk; you can restart later.')) return;
+    try{
+      const res = await fetch(`${base}/api/coverage/${county.id}/job-cancel`, {method: 'POST'});
+      if(!res.ok) throw new Error(`HTTP ${res.status}`);
+      await _pollJobOnce(base, county.id);
+    }catch(err){ setStatus('Cancel failed: ' + err.message, true); }
+    return;
+  }
 
   const payload = {
     max_parcels_per_run: parseInt(document.getElementById('maxCandidates').value) || 25,
@@ -987,18 +1087,6 @@ document.getElementById('scanEntireBtn').addEventListener('click', async () => {
     setStatus(`Started full-county background scan for ${county.name}. Progress updates below.`);
     _startPolling(base, county.id);
   }catch(err){ setStatus('Failed to start job: ' + err.message, true); }
-});
-
-document.getElementById('cancelJobBtn').addEventListener('click', async () => {
-  const base = getApiBase();
-  const countyId = _jobPollCountyId;
-  if(!countyId) return;
-  if(!confirm('Stop the background scan? The ledger keeps whatever progress made it to disk; you can restart later.')) return;
-  try{
-    const res = await fetch(`${base}/api/coverage/${countyId}/job-cancel`, {method: 'POST'});
-    if(!res.ok) throw new Error(`HTTP ${res.status}`);
-    await _pollJobOnce(base, countyId);
-  }catch(err){ setStatus('Cancel failed: ' + err.message, true); }
 });
 
 // On page load / after a county switch, check whether a job is already

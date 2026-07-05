@@ -95,7 +95,7 @@ def _normalize_parcel_id(county: CountyEndpoint, parcel_id: str) -> str:
     return parcel_id
 
 
-def _query_flwmi(where: str, out_fields: str) -> list[dict[str, Any]]:
+def _query_flwmi(where: str, out_fields: str, result_record_count: int = 5) -> list[dict[str, Any]]:
     """
     Direct GET against the FLWMI layer, deliberately NOT using
     arcgis_client.query_layer's POST-based request. Confirmed live
@@ -116,7 +116,7 @@ def _query_flwmi(where: str, out_fields: str) -> list[dict[str, Any]]:
             "outFields": out_fields,
             "f": "json",
             "returnGeometry": "false",
-            "resultRecordCount": 5,
+            "resultRecordCount": result_record_count,
         },
         timeout=30,
     )
@@ -185,3 +185,85 @@ def lookup_water_sewer(county: CountyEndpoint, parcel_id: str) -> WaterSewerResu
         confidence=overall_confidence,
         found=True,
     )
+
+
+def _decode_ww_dw(attrs: dict[str, Any]) -> WaterSewerResult:
+    """Shared WW/DW decoder used by both single and batch lookup paths."""
+    ww_code = attrs.get("WW")
+    dw_code = attrs.get("DW")
+    ww_label = _WW_LABELS.get(ww_code)
+    dw_label = _DW_LABELS.get(dw_code)
+    ww_confidence = _confidence_for_code(ww_code)
+    dw_confidence = _confidence_for_code(dw_code)
+    overall_confidence = min(
+        (ww_confidence, dw_confidence),
+        key=lambda tier: _CONFIDENCE_RANK[tier],
+    )
+    return WaterSewerResult(
+        water_source=dw_label,
+        wastewater_method=ww_label,
+        confidence=overall_confidence,
+        found=True,
+    )
+
+
+# Batch chunk size -- keep well under any SQL/URL length limits. At 50
+# IDs per query the WHERE clause runs ~1300 chars, GET URL ~1500 chars,
+# comfortably below the 4096-char practical limit for query params.
+_BATCH_CHUNK = 50
+
+
+def lookup_water_sewer_batch(
+    county: CountyEndpoint,
+    parcel_ids: list[str],
+) -> dict[str, WaterSewerResult]:
+    """
+    Fix B (2026-07-06): batched FLWMI lookup. Replaces N per-parcel
+    GETs (each ~1.6 s in profiling) with one GET per <=50 parcels,
+    keyed on `PARCELNO IN (...)`. For a typical 25-parcel scan run,
+    that's 1 remote call instead of 25.
+
+    Returns a dict keyed by the ORIGINAL parcel_id (pre-normalization)
+    so callers can look up results in O(1). IDs missing from the FLWMI
+    inventory get a found=False sentinel result -- consistent with the
+    single-parcel path's behavior.
+
+    Empty input -> empty dict, no remote call.
+    """
+    if not parcel_ids:
+        return {}
+
+    co_no = f"{county.fips:02d}"
+    # Map normalized -> original so we can associate FLWMI responses
+    # back to the caller's original IDs. Preserve input parcel_ids that
+    # happen to be blank/None as "not found" defaults.
+    original_by_normalized: dict[str, str] = {}
+    valid_originals: list[str] = []
+    for pid in parcel_ids:
+        if not pid:
+            continue
+        original_by_normalized[_normalize_parcel_id(county, pid)] = pid
+        valid_originals.append(pid)
+
+    default_result = WaterSewerResult(
+        water_source=None, wastewater_method=None, confidence="Unknown", found=False,
+    )
+    results: dict[str, WaterSewerResult] = {pid: default_result for pid in valid_originals}
+
+    normalized_list = list(original_by_normalized.keys())
+    for i in range(0, len(normalized_list), _BATCH_CHUNK):
+        chunk = normalized_list[i:i + _BATCH_CHUNK]
+        escaped = ",".join("'" + s.replace("'", "''") + "'" for s in chunk)
+        features = _query_flwmi(
+            where=f"CO_NO='{co_no}' AND PARCELNO IN ({escaped})",
+            out_fields="PARCELNO,WW,DW",
+            result_record_count=len(chunk),
+        )
+        for f in features:
+            attrs = f.get("attributes", {})
+            norm_pid = attrs.get("PARCELNO")
+            original = original_by_normalized.get(norm_pid)
+            if original is not None:
+                results[original] = _decode_ww_dw(attrs)
+
+    return results

@@ -50,10 +50,36 @@ Data source status, confirmed during research:
 
 from __future__ import annotations
 
+import threading
 from typing import Optional
 
 from arcgis_client import query_layer
 from parcel_fetcher import CandidateParcel, AREA_SR
+
+
+# ---------------------------------------------------------------------
+# Fix A (2026-07-06 pass): cache the three statewide exclusion-layer
+# geometries once per Python process, then do point-in-polygon locally.
+# Rationale from the profiling data: pre-fix, each of Wekiva/Everglades/
+# ACSC was ~800 ms per parcel of remote-query latency, contributing 60 s
+# per 25-parcel batch (~30% of total wall clock) for what are three
+# fixed, statute-defined boundary sets (Wekiva 5, Everglades 6, ACSC 5
+# polygons total, statewide, stable over the life of the statute).
+# Post-fix, we hit each remote once per process, then check every parcel
+# with local shapely `.intersects()` for microseconds. The FDEP ACSC
+# server -- the flakiest of the three, source of transient ReadTimeouts
+# elsewhere in this project -- gets hit exactly once instead of once
+# per parcel.
+#
+# Cache scope: module-level, protected by a lock so concurrent workers
+# don't race the warm-up. Persistent for the lifetime of the process;
+# if the underlying statute-defined boundaries ever change, a redeploy
+# refreshes the cache. No TTL (data isn't time-sensitive at that scale).
+# ---------------------------------------------------------------------
+_CACHE_LOCK = threading.Lock()
+_wekiva_polys_cache: Optional[list] = None
+_everglades_polys_cache: Optional[list] = None
+_acsc_polys_cache: Optional[list] = None  # each entry: (shapely_poly, name)
 
 
 # Confirmed live 2026-07-04: SFWMD-hosted, 6 real features, matches
@@ -133,72 +159,143 @@ def standing_manual_notes() -> list[str]:
     ]
 
 
+def _fetch_polygons_from_layer(
+    layer_url: str,
+    where: str = "1=1",
+    out_fields: str = "OBJECTID",
+) -> list[dict]:
+    """
+    Fetch every polygon feature from a layer as a list of dicts with
+    geometry (in AREA_SR / WKID 3086) + attributes. Used by the three
+    warm-up helpers below. Kept as a plain list of Esri-shape dicts so
+    the shapely conversion happens once (in the cache-populate step),
+    not per-parcel.
+    """
+    return list(query_layer(
+        layer_url, where=where, out_fields=out_fields,
+        return_geometry=True, out_sr=AREA_SR,
+    ))
+
+
+def _to_shapely(feature: dict):
+    from encirclement import esri_json_to_shapely
+    return esri_json_to_shapely(feature["geometry"])
+
+
+def _warm_wekiva_cache() -> list:
+    """Load + parse WSA='yes' polygons once; return the cached list."""
+    global _wekiva_polys_cache
+    with _CACHE_LOCK:
+        if _wekiva_polys_cache is None:
+            feats = _fetch_polygons_from_layer(
+                WEKIVA_STUDY_AREA_LAYER_URL,
+                where=f"{WEKIVA_STUDY_AREA_FIELD}='{WEKIVA_STUDY_AREA_VALUE}'",
+                out_fields=WEKIVA_STUDY_AREA_FIELD,
+            )
+            polys = []
+            for f in feats:
+                try:
+                    polys.append(_to_shapely(f))
+                except (ValueError, TypeError):
+                    continue
+            _wekiva_polys_cache = polys
+        return _wekiva_polys_cache
+
+
+def _warm_everglades_cache() -> list:
+    global _everglades_polys_cache
+    with _CACHE_LOCK:
+        if _everglades_polys_cache is None:
+            feats = _fetch_polygons_from_layer(EVERGLADES_PROTECTION_AREA_LAYER_URL)
+            polys = []
+            for f in feats:
+                try:
+                    polys.append(_to_shapely(f))
+                except (ValueError, TypeError):
+                    continue
+            _everglades_polys_cache = polys
+        return _everglades_polys_cache
+
+
+def _warm_acsc_cache() -> list:
+    global _acsc_polys_cache
+    with _CACHE_LOCK:
+        if _acsc_polys_cache is None:
+            feats = _fetch_polygons_from_layer(ACSC_LAYER_URL, out_fields="NAME")
+            polys = []
+            for f in feats:
+                try:
+                    name = str(f.get("attributes", {}).get("NAME") or "unknown")
+                    polys.append((_to_shapely(f), name))
+                except (ValueError, TypeError):
+                    continue
+            _acsc_polys_cache = polys
+        return _acsc_polys_cache
+
+
+def _reset_exclusion_caches() -> None:
+    """Test helper: reset the three module-level caches to None."""
+    global _wekiva_polys_cache, _everglades_polys_cache, _acsc_polys_cache
+    with _CACHE_LOCK:
+        _wekiva_polys_cache = None
+        _everglades_polys_cache = None
+        _acsc_polys_cache = None
+
+
 def check_exclusions(parcel: CandidateParcel) -> list[str]:
     """
     Return a list of human-readable HARD exclusion flags for a candidate
-    parcel — real, automated hits only (Wekiva/Everglades intersection).
-    An empty list means "no automated exclusion hit" — NOT "definitely
-    clear." See standing_manual_notes() for the separate, always-present
-    manual-verification reminders (ACSC/easements/military) that used to
-    be merged into this list.
+    parcel — real, automated hits only (Wekiva/Everglades/ACSC
+    intersection). An empty list means "no automated exclusion hit" —
+    NOT "definitely clear." See standing_manual_notes() for the separate,
+    always-present manual-verification reminders (easements/military)
+    that used to be merged into this list.
+
+    Per Fix A (2026-07-06): the three statewide layers get fetched once
+    per process, then every parcel is checked locally with shapely
+    intersects(). See the cache-warming helpers above for the rationale.
     """
     flags: list[str] = []
 
     if parcel.geometry is None:
         return flags
 
-    geometry = _with_area_sr(parcel.geometry)
+    # Sub-instrumentation (2026-07-06): so profiling can see the cached
+    # exclusions check's real cost (should be effectively zero-remote
+    # after the first parcel warms the caches).
+    from scan_orchestrator import _time_block
+    from encirclement import esri_json_to_shapely
 
-    wekiva_hits = list(query_layer(
-        WEKIVA_STUDY_AREA_LAYER_URL,
-        geometry=geometry,
-        geometry_type="esriGeometryPolygon",
-        spatial_rel="esriSpatialRelIntersects",
-        out_fields=WEKIVA_STUDY_AREA_FIELD,
-        return_geometry=False,
-    ))
-    if any(
-        str(f.get("attributes", {}).get(WEKIVA_STUDY_AREA_FIELD, "")).lower()
-        == WEKIVA_STUDY_AREA_VALUE
-        for f in wekiva_hits
-    ):
+    parcel_shape = esri_json_to_shapely(parcel.geometry)
+
+    with _time_block("exclusions_wekiva"):
+        wekiva_polys = _warm_wekiva_cache()
+        wekiva_hit = any(parcel_shape.intersects(p) for p in wekiva_polys)
+    if wekiva_hit:
         flags.append(
             "Parcel intersects the Wekiva Study Area (WSA='yes') — the "
             "agricultural enclave pathway does not apply here per "
             "s. 163.3162(4)(i)1., F.S."
         )
 
-    everglades_hits = list(query_layer(
-        EVERGLADES_PROTECTION_AREA_LAYER_URL,
-        geometry=geometry,
-        geometry_type="esriGeometryPolygon",
-        spatial_rel="esriSpatialRelIntersects",
-        return_geometry=False,
-    ))
-    if everglades_hits:
+    with _time_block("exclusions_everglades"):
+        everglades_polys = _warm_everglades_cache()
+        everglades_hit = any(parcel_shape.intersects(p) for p in everglades_polys)
+    if everglades_hit:
         flags.append(
             "Parcel intersects the Everglades Protection Area — the "
             "agricultural enclave pathway does not apply here per "
             "s. 373.4592(2), F.S."
         )
 
-    acsc_hits = list(query_layer(
-        ACSC_LAYER_URL,
-        geometry=geometry,
-        geometry_type="esriGeometryPolygon",
-        spatial_rel="esriSpatialRelIntersects",
-        out_fields="NAME",
-        return_geometry=False,
-    ))
+    with _time_block("exclusions_acsc"):
+        acsc_polys = _warm_acsc_cache()
+        acsc_hits = [name for poly, name in acsc_polys if parcel_shape.intersects(poly)]
     if acsc_hits:
-        names = ", ".join(
-            str(f.get("attributes", {}).get("NAME", "unknown"))
-            for f in acsc_hits
-        )
         flags.append(
-            f"Parcel intersects an Area of Critical State Concern ({names}) "
-            "— the agricultural enclave pathway does not apply here per "
-            "s. 380.055 (and related sections), F.S."
+            f"Parcel intersects an Area of Critical State Concern "
+            f"({', '.join(acsc_hits)}) — the agricultural enclave pathway "
+            "does not apply here per s. 380.055 (and related sections), F.S."
         )
 
     return flags

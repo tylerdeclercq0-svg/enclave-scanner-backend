@@ -1465,3 +1465,101 @@ No regressions. Ready for review.
 For every candidate the tool surfaces, the parcel detail overlay's
 verification checklist tells the user, in one table, which of the
 above categories each check falls into for that specific parcel.
+
+## Pipeline profiling + 3x speedup (2026-07-06)
+
+Instrumented the per-parcel scan pipeline with a zero-cost-when-disabled
+timing sink (`_PROFILE_SINK` in scan_orchestrator + `_time_block`
+context manager). Profiled the full pipeline against a real 25-parcel
+Pasco batch, then applied three fixes justified by the data. Results
+banked; correctness verified identical to baseline across all 25
+parcels (same tier / pct / pathways / score for every row, reference
+parcel `35-24-16-0000-00100-0011` still `confirmed_qualifying, 100%,
+pathways=[1,4], score=75`).
+
+### Baseline profile (25 Pasco parcels, no fixes)
+
+Wall clock: **196.88 s = 7.87 s/parcel.** Entirely I/O-bound -- 11
+sequential network calls per parcel, each 600-900 ms of HTTPS RTT +
+server processing. Compute is 0.2% of total.
+
+Top slices:
+- Water/sewer FLWMI: 41.1 s / 20.9%
+- ACSC exclusion (FDEP): 21.6 s / 11.0%
+- USB adjacency (Pasco Rural Area): 20.3 s / 10.3%
+- Wekiva exclusion (Seminole County): 20.2 s / 10.3%
+- Unincorporated (Pasco City Limits): 19.4 s / 9.9%
+- USB perimeter (Pasco Rural Area again): 19.1 s / 9.7%
+- Everglades exclusion (SFWMD): 19.1 s / 9.7%
+- Interstate adjacency (FDOT): 18.0 s / 9.1%
+- FLUM neighbor fetch (Pasco): 16.5 s / 8.4%
+- Encirclement math + buffer + everything else: <0.4 s / 0.2%
+
+### Fix A -- statewide-exclusion caching. Saved ~56 s / batch.
+
+Wekiva (5 polys), Everglades (6 polys), ACSC (5 polys) are statute-
+defined statewide boundaries that don't change between statute
+amendments. Fetch each once per Python process, keep the parsed
+shapely polygons in a module-level cache guarded by a threading lock,
+then per-parcel do a local `.intersects()` check.
+
+Result: exclusions (all 3 subs combined) went 60.9 s -> 5.0 s
+(mostly first-parcel warm-up now; subsequent parcels hit them in
+microseconds). Bonus: the flaky FDEP ACSC server gets hit exactly
+once per process instead of once per parcel -- eliminates a whole
+category of transient ReadTimeout failures.
+
+### Fix B -- batch the FLWMI water/sewer lookup. Saved ~39 s / batch.
+
+FLWMI supports `PARCELNO IN ('id1', 'id2', ...)`. Fetch every
+candidate's record in one 2 s query up front (chunked to 50 IDs per
+call as a URL-length safety cap), then the per-parcel lookup is an
+O(1) dict access. Missing IDs default to `found=False`, consistent
+with the single-parcel path.
+
+Result: water/sewer went 41.1 s / 25 GETs (mean 1.64 s, one 30 s
+outlier) -> 2.1 s / 1 GET. Per-parcel dict lookup: 0 ms.
+
+### Fix C -- concurrent per-parcel I/O phase. Saved ~39 s / batch.
+
+Smoke test first: 12 parcels x 4 concurrent calls (FLUM, interstate,
+USB, unincorporated) via ThreadPoolExecutor(max_workers=4). 48 total
+requests fired, zero errors. Sequential wall clock 34.47 s vs.
+concurrent 14.16 s = 2.43x speedup. `services6.arcgis.com` (shared
+host for USB + City Limits) handled the doubled-up load with no
+rate-limiting.
+
+Implementation: per-parcel ThreadPoolExecutor around the 4
+independent I/O calls; the two conditional follow-ups
+(interstate_frontage if adjacent, usb_perimeter if county has a
+rural-area layer) stay serialized to avoid speculative work.
+
+Result: FLUM + interstate + USB + unincorporated went from 73.5 s
+sequential to 34.5 s concurrent = ~39 s saved. The concurrent phase's
+1380 ms mean is very close to `max(individual call)` -- 4-way
+parallelism was almost perfectly utilized.
+
+### Combined result
+
+| Step | Baseline | + Fix A | + Fix B | + Fix C |
+| --- | --- | --- | --- | --- |
+| Wall clock | 196.88 s | 178.20 s | 101.58 s | **64.45 s** |
+| Per-parcel | 7.87 s | 7.13 s | 4.06 s | **2.58 s** |
+| Exclusions (3 subs) | 60.9 s | 5.0 s | 5.0 s | 5.0 s |
+| Water/sewer | 41.1 s | 41.1 s | 2.1 s | 2.5 s |
+| FLUM + roads + unincorp | 74.9 s | 73.5 s | 73.5 s | 34.5 s (parallel) |
+
+**Overall: 3.05x faster, 67% wall-clock reduction, correctness preserved.**
+
+Remaining time budget at 64 s / 25 parcels:
+- Concurrent I/O phase: 34.5 s (54%)
+- USB perimeter (serialized follow-up, Pasco-only, ~always fires): 19.5 s (30%)
+- Cached exclusions (warm-up + local intersects): 6.1 s (9%)
+- Water/sewer batch call: 2.5 s (4%)
+- Compute steps + everything else: ~2 s (3%)
+
+Not doing a Fix D at this time. Candidate future work: moving USB
+perimeter into the concurrent phase as speculative work (would save
+another ~19 s per batch, dropping wall clock to ~45 s = 1.8 s/parcel);
+worth revisiting if scans need to be faster than the current
+2.58 s/parcel headroom allows.

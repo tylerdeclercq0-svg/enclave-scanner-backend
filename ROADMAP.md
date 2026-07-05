@@ -138,6 +138,32 @@ the index/checklist, not the full spec.
   be provided in a separate prompt when this item is actively being
   worked.
 
+- [ ] **10. VERIFY BACKGROUND SCAN JOB POST-RESTRUCTURING**
+  Confirm the "Scan entire county" background-job flow (`background_jobs.py`,
+  the polling UI in Data Collection) still works correctly end-to-end after
+  this session's Property Database restructuring (two-tab primary nav,
+  list-as-home, Data Collection moved behind a tab). Quick regression check,
+  not a rebuild -- just confirm the job kicks off from the Data Collection
+  tab, the progress polling still updates the UI while the tab isn't
+  visible, results flow into the master DB, and the Property Database tab
+  reflects the newly-scanned parcels after completion. **Status: not
+  started.** Full detailed instructions will be provided in a separate
+  prompt when this item is actively being worked.
+
+- [ ] **11. POPULATE REAL DATA -- FULL SCANS ACROSS ALL ACTIVE COUNTIES**
+  Once every other roadmap item is complete (including item 8's pipeline
+  reordering and item 9's expansion to 30+ confirmed-live counties), run
+  real "Scan entire county" background jobs across every confirmed-live
+  county to populate the Property Database with real data. **Deliberately
+  sequenced last**: no point generating a real dataset before the pipeline
+  computation itself (exclusion order, county count, metro-proximity
+  fields) is finalized -- would mean re-scanning every parcel later
+  anyway. This is the point where the Property Database home screen
+  actually becomes populated with the real, usable candidate list instead
+  of test/mock data. **Blocked on items 5, 7, 8, 9, and 10.** **Status:
+  not started.** Full detailed instructions will be provided in a
+  separate prompt when this item is actively being worked.
+
 ## How to use this file
 
 - Mark items complete by changing `- [ ]` to `- [x]` and committing.

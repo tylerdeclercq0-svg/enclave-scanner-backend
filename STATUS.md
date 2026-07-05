@@ -1563,3 +1563,211 @@ perimeter into the concurrent phase as speculative work (would save
 another ~19 s per batch, dropping wall clock to ~45 s = 1.8 s/parcel);
 worth revisiting if scans need to be faster than the current
 2.58 s/parcel headroom allows.
+
+## Demographics upgrade Phases A-E + county-attribution fix (2026-07-06)
+
+Closed a long-standing gap in ring_demographics.py: median household
+income and median age were hardcoded to `None` with a comment
+explaining medians can't be simply averaged across block groups.
+Screenshot Tyler shared confirmed those were still showing "not
+available" in the UI. Also expanded the metric set for homebuilder /
+multifamily site selection. All Render deploys verified with real
+Pasco data before moving on.
+
+### Phase A -- population-weighted median income + age
+
+Implemented via new `_pop_weighted_avg` helper in
+`app/ring_demographics.py`: `sum(median_i * pop_i) / sum(pop_i)`.
+Standard pragmatic approximation Esri and similar services use for
+the ring/radius problem when only per-BG medians are available (not
+full distributions). Frontend labels the result as "(pop-wt avg)"
+with a hover tooltip explaining it's not a true aggregate-ring
+median. Income MOE also aggregated via a pop-weighted average of
+per-BG MOEs -- not strictly-correct propagation but gives a rough
+uncertainty sense.
+
+Hand-verified live against the reference Pasco parcel
+(28.41, -82.66): backend returned income $55,397.43 for the 5-mile
+ring; hand-computed from the same 28 per-BG values in a script:
+$55,397.43. Delta $0.00. Same match for median age (51.8087 vs
+51.8087). Test used the `?debug=1` query param added to
+`/api/parcels/{id}/demographics` which surfaces per-BG raw ACS
+values so any pop-weighted aggregation can be verified against
+first-principles arithmetic.
+
+### Phase B -- ACS variable-code confirmation via /api/debug/acs-probe
+
+Skipped local CENSUS_API_KEY setup after Windows env-var inheritance
+issues (Option A blocked -- setx-User-scope didn't propagate to the
+Claude Code harness even after restart) and pivoted to Option B:
+built a new ad-hoc `/api/debug/acs-probe` endpoint that takes
+arbitrary ACS variable codes + state/county/tract/BG + year, hits the
+real ACS API from Render (where the key IS set), and returns the raw
+response. Confirms exact variable codes and BG-level availability
+without needing local API access.
+
+Every code below tested live against Pasco tract 030901:
+
+| Variable | Meaning |
+| --- | --- |
+| `B25077_001E` / `_001M` | Median home value + MOE |
+| `B25064_001E` / `_001M` | Median gross rent + MOE |
+| `B25071_001E` | Rent burden (median gross rent as % of income) |
+| `B25003_001E` / `_002E` / `_003E` | Tenure total / owner / renter |
+| `B25010_001E` / `_002E` / `_003E` | Avg household size (all / owner / renter) |
+| `B11001_001E` / `_002E` / `_007E` | Households total / family / nonfamily |
+| `B19001_001E` -- `_017E` | Income distribution, 16 buckets + total (sum-verified: 801 = 801 for Pasco BG 1) |
+| `B01001_003-006 / 027-030` | Under-18 age brackets (male + female) |
+| `B01001_008-012 / 032-036` | 20-34 age brackets (multifamily focus) |
+| `B01001_011-014 / 035-038` | 25-44 age brackets (homebuilder focus) |
+| `B01001_020-025 / 044-049` | 65+ age brackets |
+| `B01003_001E` @ year=2018 | 5-year lookback population, PLUS a real finding: 2018-vs-2023 shows BG 1 population jumping from 284 to 1,538 (~5x). Block-group boundaries were redrawn 2020 (2010 Census geometry -> 2020 Census geometry), so per-BG comparisons across the 2020 divide are silently misleading. County FIPS are stable. |
+
+### Phase C -- wire in all 48 new ACS variables
+
+Full variable set now hits ~70. Since the ACS API caps a single query
+at 50 variables, split `ACS_VARIABLES` into 4 logical groups (base +
+housing + composition, income buckets, male age, female age) and
+loop over them per tract. `fetch_acs_values_for_block_groups` merges
+per-group results. Adds `<tracts_touched> * 4` requests per
+demographics pull vs. the pre-C `<tracts_touched> * 1` -- still
+on-demand only, never in the scan pipeline.
+
+New `RingDemographics` fields (all committed):
+
+- **Pop-weighted medians:** `median_home_value` (+ MOE),
+  `median_gross_rent` (+ MOE), `rent_burden_pct`,
+  `avg_household_size`.
+- **Count-summed then percented:** `homeownership_rate_pct`,
+  `renter_occupied_pct`, `family_household_pct`.
+- **Count-summed dicts:** `income_distribution` (16 buckets from
+  B19001), `age_distribution` (4 target bins: `under_18`, `age_20_34`,
+  `age_25_44`, `age_65_plus`, summed from B01001 M+F brackets;
+  20-34/25-44 intentionally overlap since one is multifamily-relevant
+  and the other homebuyer-relevant).
+
+Live verification against Pasco reference parcel (5-mile ring): pop
+35,266 * income $55,397 * home value $222,554 * rent $1,273 * rent
+burden 33.7% * ownership 79.0% * family HHs 59.5% * median age 51.8 *
+25-44 = 19.6% * 65+ = 34.1%. Suburbanization pattern visible in the
+15-mi values (younger, higher incomes, higher home values further
+from central Pasco).
+
+### Phase D -- population trend split (county reliable + ring directional)
+
+Per Tyler's B+C combined choice:
+
+- **County-level (reliable):** `fetch_county_population(state, county,
+  year, key) -> (pop, name)` queries B01003_001E at the county level
+  for 2018 and 2023. County FIPS are stable across ACS vintages so
+  this is a clean 5-year apples-to-apples growth number.
+- **Ring-level (directional-only, flagged):** same GEOIDs from the
+  15-mi ring queried against ACS 2018. Comes back `null` in
+  practice because 2023-vintage GEOIDs don't resolve in
+  2018 ACS geography -- exactly the boundary-redraw effect
+  the `ring_note` field explains. That's the "honest" outcome; when
+  it fails we surface "not available due to boundary redraw" instead
+  of fabricating a number.
+
+New `PopulationTrend` dataclass carries `baseline_year`,
+`current_year`, `county_name` (+ `county_state_fips`, `county_fips`,
+also new -- see the bug section below for why), county populations
++ growth %, ring directional numbers + growth %, and the ring_note.
+
+### Real bug caught during Phase E live verification + fix
+
+Tyler asked me to confirm the county-level trend was actually
+displaying correctly and wasn't affected by the same GEOID
+mismatch. County FIPS ARE stable -- but my Phase D code was picking
+the WRONG county. It grabbed `state+county` from
+`largest_geoids[0]` (literally the first BG in the 15-mile ring's
+list), and BG list order isn't guaranteed to correlate with the
+parcel's county. A 15-mile ring around a Pasco parcel extends into
+Hernando (north), Hillsborough (south), and Sumter; "first" landed
+on a Hernando BG.
+
+Symptom: reference Pasco parcel was reporting county growth
+182,696 -> 201,512 (+10.3%). Those are Hernando County's actual
+2018/2023 ACS numbers. Pasco was 561,691 in the 2020 Census and
+~633K in 2023.
+
+Fix (committed as `44277a5`, Option 2 from the design review):
+
+- New `find_bg_containing_point(features, lat, lon)` in
+  `ring_demographics.py`: returns the GEOID of the BG whose polygon
+  actually contains the parcel centroid, defensively falls back to
+  closest-centroid BG if no polygon contains the point. Uses
+  features already fetched by `fetch_block_groups_near` -- zero
+  extra remote calls.
+- `compute_ring_demographics` now returns
+  `(rings, containing_bg_geoid)`. Main.py uses the containing GEOID's
+  state+county prefix for the trend county lookup.
+- `PopulationTrend.county_name` and the raw
+  `county_state_fips` / `county_fips` are now in every payload, so
+  a wrong-county lookup surfaces as "Hernando County, Florida" in
+  the UI immediately instead of hiding behind an anonymous
+  percentage.
+
+Live verification post-fix (same parcel, same coordinates): county
+correctly reports "Pasco County, Florida" FIPS 12101,
+510,593 -> 588,758 = +15.3% growth. That's Pasco's actual 5-year
+suburbanization pattern, not Hernando's.
+
+### Phase E -- frontend charts + demographics UI
+
+`web/index.html`: new `renderDemoCell` that renders 12 stat cards
+per ring (population, median age, median HH income, median home
+value, homeownership, renter %, median rent, rent burden, avg HH
+size, family HHs, total housing units, density), then two inline
+SVG bar charts (4-bucket age distribution, 16-bucket income
+distribution -- lightweight, no external chart library), then the
+trend section with county-name-prefixed reliable line and
+boundary-caveat note for the ring-directional line. 5/10/15-mile
+tab switch verified working (tab switch renders new ring's cards
++ charts + preserves selected radius on re-render).
+
+Pop-weighted median fields all labeled "(pop-wt avg)" with a
+hover tooltip explaining the aggregation caveat. No external
+chart lib -- everything is inline `<svg>` via a small `_svgBarChart`
+helper.
+
+### Files touched, all committed and pushed
+
+- `app/ring_demographics.py` (biggest -- +~470 lines)
+- `app/main.py` (`/api/parcels/{id}/demographics` extended, new
+  `/api/debug/acs-probe` endpoint)
+- `web/index.html` (Phase E frontend, ~200 lines added)
+
+### Commits on `origin/main`
+
+`6d93046` Phase A + debug endpoints * `28c4f58` add year param to
+acs-probe * `9e651b5` Phase C+D * `44277a5` Phase E + county-FIPS
+fix. All pushed and verified live against Render (`code_version`
+returns each commit's SHA in turn).
+
+### Outstanding / Part 1 not started yet
+
+Part 1 -- Master DB list view companion to the existing Master DB
+map view -- is NOT started. Includes:
+
+- Sortable/filterable list of every parcel ever scanned (same
+  data source as the master DB map).
+- Columns: tier, score, driving pathway, county, parcel_id, acres,
+  owner, ZIP section, date last scanned.
+- Default sort by tier + score (same order as main results table:
+  confirmed_qualifying > strong_candidate > watch_list > unlikely >
+  excluded).
+- Filter by county + tier at minimum.
+- Checkbox selection + export button that reuses the exact same
+  merged diligence tracker export logic already built. This
+  requires refactoring `exportDiligenceTracker` in
+  `web/index.html` (currently hardcoded to read the current-scan
+  `results` array) to accept an arbitrary parcels array, so both
+  the current-scan export and the master-DB export use the same
+  underlying function.
+- Layout: Map / List toggle inside the existing Master DB overlay
+  (same pattern as Step 3's List/Map toggle).
+
+Also outstanding: the `/api/debug/acs-probe` endpoint is
+deliberately ad-hoc and should be moved behind an auth check or
+removed entirely before this ships to real users beyond Tyler.

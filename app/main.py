@@ -548,6 +548,27 @@ _TIER_SORT_ORDER = {
 }
 
 
+@app.get("/api/property-db/all")
+def property_db_all():
+    """
+    Every parcel ever scanned across every county, unsorted -- for the
+    master-database map view. Callers filter and color client-side
+    (tier/pathway/county/coverage-status). Each parcel row includes
+    `geometry_wgs84` (WGS84 lat/lon polygon coords) when available so
+    Leaflet can render real shapes, not just centroid pins.
+    """
+    parcels = coverage_ledger.list_all_parcels_all_counties()
+    tier_totals: dict[str, int] = {}
+    for r in parcels:
+        t = r.get("tier") or r.get("confidence_tier") or "unlikely"
+        tier_totals[t] = tier_totals.get(t, 0) + 1
+    return {
+        "total": len(parcels),
+        "tier_distribution": tier_totals,
+        "parcels": parcels,
+    }
+
+
 @app.get("/api/property-db/{county_id}/ranked")
 def property_db_ranked(county_id: str):
     """

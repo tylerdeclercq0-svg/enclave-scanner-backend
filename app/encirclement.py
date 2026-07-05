@@ -186,6 +186,93 @@ def get_centroid_lat_lon(esri_geom: dict, source_wkid: int = 3086) -> Optional[t
     return (lat, lon)
 
 
+def esri_rings_to_wgs84_geojson(esri_geom: dict) -> Optional[list[list[list[list[float]]]]]:
+    """
+    Convert an ArcGIS 'rings' geometry (in Florida Albers / AREA_SR 3086)
+    into GeoJSON-style polygon coordinates in WGS84 lat/lon. Returned
+    shape is compatible with GeoJSON MultiPolygon: outer list = parts,
+    each part = list of rings (first = exterior, rest = holes), each
+    ring = list of [lon, lat] pairs. Leaflet's L.geoJSON accepts this
+    directly.
+
+    Ring winding: Esri uses clockwise=exterior, CCW=hole (opposite of
+    GeoJSON's canonical CCW=exterior). Leaflet is lenient here -- it
+    renders either winding correctly -- so we don't rewind, we just
+    reproject. If a stricter GeoJSON consumer is added later, flip
+    winding based on `_signed_ring_area()` (already used elsewhere).
+
+    Returns None if the geometry has no rings. Optimized by precomputing
+    the Albers projection constants once per call rather than per point.
+    """
+    import math
+
+    rings = esri_geom.get("rings") if esri_geom else None
+    if not rings:
+        return None
+
+    # Precompute the projection constants once (same math as
+    # _florida_albers_to_latlon but hoisted out of the per-point loop).
+    a = 6378137.0
+    f = 1 / 298.257222101
+    e2 = 2 * f - f * f
+    e = math.sqrt(e2)
+    lat0 = math.radians(24.0)
+    lon0 = math.radians(-84.0)
+    lat1 = math.radians(24.0)
+    lat2 = math.radians(31.5)
+    false_easting = 400000.0
+    false_northing = 0.0
+
+    def m(lat):
+        sin_lat = math.sin(lat)
+        return math.cos(lat) / math.sqrt(1 - e2 * sin_lat * sin_lat)
+
+    def q(lat):
+        sin_lat = math.sin(lat)
+        return (1 - e2) * (
+            sin_lat / (1 - e2 * sin_lat * sin_lat)
+            - (1 / (2 * e)) * math.log((1 - e * sin_lat) / (1 + e * sin_lat))
+        )
+
+    m1, m2 = m(lat1), m(lat2)
+    q0, q1, q2 = q(lat0), q(lat1), q(lat2)
+    n = (m1 * m1 - m2 * m2) / (q2 - q1)
+    c = m1 * m1 + n * q1
+    rho0 = a * math.sqrt(c - n * q0) / n
+    log_e_denom = math.log((1 - e) / (1 + e))
+    q_val_denominator = 1 - (1 - e2) / (2 * e) * log_e_denom
+
+    def reproject(x, y):
+        x_adj = x - false_easting
+        y_adj = rho0 - (y - false_northing)
+        rho = math.sqrt(x_adj * x_adj + y_adj * y_adj)
+        theta = math.atan2(x_adj, y_adj)
+        q_val = (c - (rho * n / a) ** 2) / n
+        lat = math.asin(max(-1.0, min(1.0, q_val / q_val_denominator)))
+        for _ in range(5):
+            sin_lat = math.sin(lat)
+            lat = lat + ((1 - e2 * sin_lat * sin_lat) ** 2 / (2 * math.cos(lat))) * (
+                q_val / (1 - e2) - sin_lat / (1 - e2 * sin_lat * sin_lat)
+                + (1 / (2 * e)) * math.log((1 - e * sin_lat) / (1 + e * sin_lat))
+            )
+        lon = lon0 + theta / n
+        return [math.degrees(lon), math.degrees(lat)]
+
+    # Group rings into MultiPolygon parts using winding direction --
+    # exterior rings (clockwise, signed_area<0) start new parts; hole
+    # rings (CCW, signed_area>0) attach to the last exterior.
+    parts: list[list[list[list[float]]]] = []
+    for ring in rings:
+        reprojected = [reproject(pt[0], pt[1]) for pt in ring]
+        if _signed_ring_area(ring) < 0:
+            parts.append([reprojected])  # new exterior
+        elif parts:
+            parts[-1].append(reprojected)  # hole on last exterior
+        else:
+            parts.append([reprojected])  # degenerate fallback
+    return parts
+
+
 def _florida_albers_to_latlon(x: float, y: float) -> tuple[float, float]:
     """
     Inverse Albers Equal-Area Conic projection: converts Florida

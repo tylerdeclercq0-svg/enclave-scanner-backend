@@ -35,7 +35,7 @@ from typing import Optional
 
 from county_registry import COUNTIES
 from parcel_fetcher import fetch_candidate_parcels, CandidateParcel, AREA_SR
-from encirclement import compute_encirclement, determine_pathways, EncirclementResult, get_centroid_lat_lon
+from encirclement import compute_encirclement, determine_pathways, EncirclementResult, get_centroid_lat_lon, esri_rings_to_wgs84_geojson
 from arcgis_client import query_layer
 import exclusions
 import flu_taxonomy
@@ -77,6 +77,13 @@ class ScanResultRow:
     # keeps working while the new tier-driven UI is being wired in.
     tier: str = "unlikely"  # excluded / confirmed_qualifying / strong_candidate / watch_list / unlikely
     driving_pathways: list[str] = field(default_factory=list)
+    # Parcel geometry reprojected to WGS84 lat/lon for map rendering,
+    # populated 2026-07-06 for the two Leaflet views. Same shape as
+    # GeoJSON MultiPolygon coordinates: list[part], part=list[ring],
+    # ring=list[[lon, lat]]. Empty list when no geometry was available
+    # from the county's parcel layer (rare). Adds ~1-3 KB per parcel to
+    # the persisted ledger row -- deliberate trade for a map-ready DB.
+    geometry_wgs84: list = field(default_factory=list)
     # Kept on the row so tier can be recomputed later without re-running
     # the pipeline (persisted in coverage_ledger as part of the
     # master property database).
@@ -378,6 +385,7 @@ def run_county_scan(
 
         centroid_lat: Optional[float] = None
         centroid_lon: Optional[float] = None
+        geometry_wgs84: list = []
         if parcel.geometry is not None:
             try:
                 centroid = get_centroid_lat_lon(parcel.geometry, source_wkid=3086)
@@ -388,6 +396,15 @@ def run_county_scan(
                     "pyproj not installed — map coordinates could not be "
                     "computed for this parcel. Run: pip install pyproj"
                 )
+            # Reproject the full parcel polygon(s) to WGS84 for map
+            # rendering. Never a fatal error -- if reprojection fails,
+            # the map view falls back to a centroid marker.
+            try:
+                reprojected = esri_rings_to_wgs84_geojson(parcel.geometry)
+                if reprojected is not None:
+                    geometry_wgs84 = reprojected
+            except Exception:  # noqa: BLE001 -- map fallback is centroid-only
+                geometry_wgs84 = []
 
         score, breakdown = scoring.score_candidate(
             acreage=parcel.acreage,
@@ -469,6 +486,7 @@ def run_county_scan(
             usb_perimeter_pct=usb_perimeter_pct,
             adjacent_to_interstate=adjacent_to_interstate,
             adjacent_to_usb=adjacent_to_usb,
+            geometry_wgs84=geometry_wgs84,
         ))
 
     rows.sort(key=lambda r: (r.attractiveness_score or 0), reverse=True)

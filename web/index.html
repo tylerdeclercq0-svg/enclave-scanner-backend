@@ -4,6 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Enclave Scanner — Falcone Group</title>
+<!-- Leaflet CSS + JS via unpkg. Free, no API key required. Enables the
+     Step 3 scan-map and top-level master-DB map added 2026-07-06. -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+        crossorigin=""></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap');
 
@@ -226,6 +234,11 @@
     box-shadow:0 2px 10px rgba(30,42,36,.18);
     max-width:700px;width:100%;padding:32px;position:relative;
   }
+  /* Master DB map takes the full overlay -- override the parcel-detail
+     overlay's tight padding + width for a real map surface. */
+  #dbMapPanel{padding:0;height:calc(100vh - 100px);display:flex;flex-direction:column;overflow:hidden;}
+  #dbMapPanel .overlay-close{z-index:5;background:var(--paper-raised);border:1px solid var(--line-strong);}
+  #dbMap{flex:1 1 auto;}
   .overlay-close{
     position:absolute;top:16px;right:16px;background:none;border:none;
     font-size:22px;line-height:1;color:var(--ink-faint);cursor:pointer;padding:4px 8px;
@@ -339,6 +352,7 @@
     <div class="masthead-links">
       <button class="linklike" id="howToLink">How to use this tool</button>
       <button class="linklike" id="whatThisDoesLink">What this does / doesn't do &amp; methodology</button>
+      <button class="linklike" id="dbMapLink">Master DB map</button>
       <button class="linklike" id="settingsLink">Settings</button>
     </div>
   </header>
@@ -456,7 +470,7 @@
         <div class="results-controls">
           <div class="view-toggle">
             <button class="active" id="listViewBtn">List</button>
-            <button disabled title="Map view is a planned follow-up feature.">Map</button>
+            <button id="mapViewBtn" title="See the current scan's parcels on the map.">Map</button>
           </div>
           <select id="sortSelect" class="mono">
             <option value="score_desc">Attractiveness, high to low</option>
@@ -467,6 +481,48 @@
         </div>
       </div>
       <div id="tiersContainer"></div>
+      <div id="scanMapPanel" style="display:none;">
+        <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;">
+          <span class="checklist-summary" style="margin:0;">Basemap:</span>
+          <div class="view-toggle">
+            <button class="active" data-basemap="satellite" id="scanBasemapSat">Satellite</button>
+            <button data-basemap="street" id="scanBasemapStreet">Street</button>
+          </div>
+          <span id="scanMapMeta" class="empty-note" style="margin-left:auto;font-size:12px;"></span>
+        </div>
+        <div id="scanMap" style="height:560px;border:1px solid var(--line-strong);border-radius:3px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MASTER DB MAP (top-level overlay reached from the masthead) -->
+  <div class="overlay-backdrop" id="dbMapBackdrop">
+    <div class="overlay-panel" id="dbMapPanel" style="max-width:1400px;">
+      <button class="overlay-close" id="dbMapClose" aria-label="Close">&times;</button>
+      <div style="padding:18px 22px 12px;">
+        <div class="overlay-title">Master property database — map view</div>
+        <div class="overlay-sub">Every parcel scanned across every county, over every run. Click a parcel for quick-hit facts; click through to the full detail overlay from there.</div>
+        <div id="dbMapControls" style="display:flex;gap:14px;margin:14px 0;flex-wrap:wrap;align-items:center;">
+          <div class="field" style="min-width:220px;">
+            <label>Color by</label>
+            <select id="dbColorBy" class="mono">
+              <option value="tier">Qualification tier</option>
+              <option value="pathway">Best pathway match</option>
+              <option value="county">County</option>
+              <option value="coverage">ZIP coverage status</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Basemap</label>
+            <div class="view-toggle">
+              <button class="active" data-basemap="satellite" id="dbBasemapSat">Satellite</button>
+              <button data-basemap="street" id="dbBasemapStreet">Street</button>
+            </div>
+          </div>
+          <div id="dbMapMeta" class="empty-note" style="margin-left:auto;font-size:12px;"></div>
+        </div>
+      </div>
+      <div id="dbMap" style="height:calc(100% - 180px);min-height:520px;border-top:1px solid var(--line);"></div>
     </div>
   </div>
 
@@ -1900,6 +1956,279 @@ async function exportDiligenceTracker(){
   }
 }
 document.getElementById('exportDiligenceBtn').addEventListener('click', exportDiligenceTracker);
+
+// ---------------------------------------------------------------------
+// Leaflet map views (2026-07-06)
+// ---------------------------------------------------------------------
+// TIER_COLORS mirrors the master-tier-pill CSS in the results table so
+// the map speaks the same visual language. Don't introduce a second
+// color scheme for the same concept.
+const TIER_COLORS = {
+  confirmed_qualifying: '#4EAE64',
+  strong_candidate:     '#B58A2A',
+  watch_list:           '#DBB800',
+  unlikely:             '#8A8574',
+  excluded:             '#8B3A2F',
+  // Legacy fallbacks so pre-migration rows still color sensibly.
+  confident: '#4EAE64', possible: '#B58A2A', watch: '#DBB800',
+};
+const _COUNTY_HUES = {
+  pasco:'#8b3a2f', st_johns:'#6b5218', nassau:'#4EAE64', osceola:'#2A62B5',
+  hillsborough:'#B58A2A', orange:'#8A8574', sarasota:'#DBB800',
+  manatee:'#4a4a4a', brevard:'#6a3d3d', volusia:'#3d5c6a',
+};
+function _stableColorFromString(s){
+  let h = 0;
+  for(let i=0;i<s.length;i++) h = ((h<<5) - h + s.charCodeAt(i)) | 0;
+  const hue = Math.abs(h) % 360;
+  return `hsl(${hue}, 55%, 45%)`;
+}
+
+// Best pathway match = highest option number in likely_pathways, else -1.
+function _bestPathway(r){
+  const p = r.likely_pathways || [];
+  return p.length ? Math.min(...p) : null;
+}
+
+function _colorForParcel(r, mode){
+  if(mode === 'tier'){
+    const t = r.tier || r.confidence_tier || 'unlikely';
+    return TIER_COLORS[t] || TIER_COLORS.unlikely;
+  }
+  if(mode === 'pathway'){
+    const bp = _bestPathway(r);
+    if(bp === null) return '#8A8574';
+    return ['#4EAE64','#7DB84E','#B58A2A','#DBB800','#8B3A2F'][bp-1] || '#8A8574';
+  }
+  if(mode === 'county'){
+    return _COUNTY_HUES[r.county_id] || _stableColorFromString(r.county_id || '');
+  }
+  if(mode === 'coverage'){
+    // Coverage status: any parcel in the DB has been processed, but
+    // color by first vs. recent to give a sense of scan freshness.
+    // Distinction here is "coverage exists" (colored) vs. absent (not
+    // drawn) -- ZIP sections not yet processed simply aren't in the DB.
+    return r.zcta5 ? '#4EAE64' : '#8A8574';
+  }
+  return '#8A8574';
+}
+
+// A shared registry mapping parcel keys to rows, so map popups can open
+// the full parcel-detail overlay for parcels that came from the DB map
+// (i.e. not in the current scan `results` array). Populated by both
+// renderScanMap and _renderDbLayer.
+const _PARCEL_REGISTRY = new Map();
+window.openDetailFromMap = function(key){
+  const r = _PARCEL_REGISTRY.get(key);
+  if(!r) return;
+  // Merge into results so buildOverlayContent's lookup succeeds, then
+  // open the overlay via the standard path.
+  if(!results.find(row => rowKey(row) === key)) results.push(r);
+  openDetail(key);
+};
+
+function _quickPopupHtml(r){
+  const key = rowKey(r);
+  _PARCEL_REGISTRY.set(key, r);
+  const owner = [r.owner_name, r.owner_name_2].filter(Boolean).join(' / ') || '—';
+  const legacyMap = {confident:'confirmed_qualifying', possible:'strong_candidate', watch:'watch_list'};
+  const tier = r.tier || legacyMap[r.confidence_tier] || r.confidence_tier || 'unlikely';
+  const tierLabel = {
+    confirmed_qualifying:'Confirmed qualifying', strong_candidate:'Strong candidate',
+    watch_list:'Watch list', unlikely:'Unlikely', excluded:'Excluded',
+  }[tier] || tier;
+  const bp = _bestPathway(r);
+  const pctStr = r.pct_perimeter_qualifying != null ? `${r.pct_perimeter_qualifying.toFixed(0)}%` : '—';
+  const bestLine = bp !== null
+    ? `<div>Best pathway: <strong>Option ${bp}</strong> at ${pctStr} qualifying</div>`
+    : `<div>Best pathway: <em>none matched</em>${pctStr==='—'?'':`; ${pctStr} qualifying`}</div>`;
+  return `
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#8a8574;letter-spacing:.04em;text-transform:uppercase;margin-bottom:4px;">${r.county_id} · ${r.zcta5 || 'no ZCTA'}</div>
+    <div style="font-weight:600;font-size:14px;margin-bottom:2px;">${r.parcel_id || '—'}</div>
+    <div style="font-size:12.5px;line-height:1.4;">
+      <div>${owner}</div>
+      <div>${r.acreage != null ? r.acreage.toFixed(1) + ' ac' : 'acreage —'}</div>
+      <div style="margin-top:4px;"><span style="display:inline-block;padding:1px 8px;border-radius:2px;background:${TIER_COLORS[tier]||'#8A8574'};color:#fff;font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;">${tierLabel}</span></div>
+      ${bestLine}
+      <button style="margin-top:8px;font-size:11.5px;padding:5px 10px;font-family:'IBM Plex Mono',monospace;cursor:pointer;background:var(--ink);color:#fff;border:none;border-radius:2px;" onclick="openDetailFromMap('${key.replace(/'/g, "\\'")}');">Open full detail</button>
+    </div>`;
+}
+
+// Basemap layer factories. Esri World Imagery for satellite (free, no
+// key required); OpenStreetMap raster tiles for the street basemap.
+function _makeSatLayer(){
+  return L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    {maxZoom: 19, attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'}
+  );
+}
+function _makeStreetLayer(){
+  return L.tileLayer('https://tile.openstreetmap.org/{z}/{y}/{x}.png',
+    {maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'});
+}
+
+// ------- View 1: current scan / ZIP section map -------
+let _scanMap = null, _scanMapLayerSat = null, _scanMapLayerStreet = null;
+let _scanMapFeatures = null;
+
+function renderScanMap(){
+  const panel = document.getElementById('scanMapPanel');
+  panel.style.display = 'block';
+  if(!_scanMap){
+    _scanMap = L.map('scanMap', {zoomControl: true});
+    _scanMapLayerSat = _makeSatLayer().addTo(_scanMap);
+    _scanMapLayerStreet = _makeStreetLayer();
+    _scanMap.setView([28.5, -82.0], 8);  // Florida default
+    document.getElementById('scanBasemapSat').addEventListener('click', () => _setScanBasemap('satellite'));
+    document.getElementById('scanBasemapStreet').addEventListener('click', () => _setScanBasemap('street'));
+  }
+  if(_scanMapFeatures){ _scanMap.removeLayer(_scanMapFeatures); _scanMapFeatures = null; }
+
+  const withGeom = results.filter(r => (r.geometry_wgs84 || []).length);
+  const withoutGeom = results.filter(r => !(r.geometry_wgs84 || []).length && r.centroid_lat != null);
+  document.getElementById('scanMapMeta').innerText =
+    `${results.length} parcel${results.length===1?'':'s'} in scan; ` +
+    `${withGeom.length} with polygon, ${withoutGeom.length} centroid-only.`;
+
+  const layers = [];
+  withGeom.forEach(r => {
+    // MultiPolygon: geometry_wgs84 is a list of parts, each part =
+    // list of rings, each ring = list of [lon, lat]. Leaflet wants
+    // [lat, lon] though -- swap here.
+    const partsLL = r.geometry_wgs84.map(part => part.map(ring => ring.map(([lon, lat]) => [lat, lon])));
+    const poly = L.polygon(partsLL, {
+      color: _colorForParcel(r, 'tier'),
+      weight: 1.5, fillOpacity: 0.35,
+    });
+    poly.bindPopup(_quickPopupHtml(r), {maxWidth: 300});
+    layers.push(poly);
+  });
+  withoutGeom.forEach(r => {
+    const m = L.circleMarker([r.centroid_lat, r.centroid_lon], {
+      radius: 6, color: _colorForParcel(r, 'tier'),
+      fillColor: _colorForParcel(r, 'tier'), fillOpacity: 0.75, weight: 1,
+    });
+    m.bindPopup(_quickPopupHtml(r), {maxWidth: 300});
+    layers.push(m);
+  });
+  if(!layers.length) return;
+  _scanMapFeatures = L.featureGroup(layers).addTo(_scanMap);
+  _scanMap.fitBounds(_scanMapFeatures.getBounds(), {padding: [24, 24]});
+}
+function _setScanBasemap(kind){
+  document.querySelectorAll('#scanMapPanel .view-toggle button').forEach(b =>
+    b.classList.toggle('active', b.dataset.basemap === kind));
+  if(kind === 'satellite'){ _scanMap.removeLayer(_scanMapLayerStreet); _scanMapLayerSat.addTo(_scanMap); }
+  else { _scanMap.removeLayer(_scanMapLayerSat); _scanMapLayerStreet.addTo(_scanMap); }
+}
+document.getElementById('listViewBtn').addEventListener('click', () => {
+  document.getElementById('listViewBtn').classList.add('active');
+  document.getElementById('mapViewBtn').classList.remove('active');
+  document.getElementById('tiersContainer').style.display = '';
+  document.getElementById('scanMapPanel').style.display = 'none';
+});
+document.getElementById('mapViewBtn').addEventListener('click', () => {
+  document.getElementById('mapViewBtn').classList.add('active');
+  document.getElementById('listViewBtn').classList.remove('active');
+  document.getElementById('tiersContainer').style.display = 'none';
+  renderScanMap();
+  // Leaflet needs a nudge after being un-hidden or bounds compute wrong.
+  setTimeout(() => _scanMap && _scanMap.invalidateSize(), 100);
+});
+
+// ------- View 2: master DB map -------
+// Performance: full parcel polygons at zoom 13 and higher, centroid
+// markers below that. Rationale: at zoom 13 each tile spans ~2.4 km, so
+// a 40-acre parcel (~400 m across) is still recognizable but the total
+// polygon count in view stays manageable. Below zoom 13, polygons
+// collapse into visual noise anyway.
+const _DB_POLYGON_ZOOM = 13;
+let _dbMap = null, _dbMapSat = null, _dbMapStreet = null, _dbLayerGroup = null;
+let _dbAllParcels = [], _dbColorMode = 'tier';
+
+async function _loadDbParcels(){
+  const base = getApiBase();
+  const meta = document.getElementById('dbMapMeta');
+  meta.innerText = 'Loading master property database…';
+  try {
+    const res = await fetch(`${base}/api/property-db/all`);
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    _dbAllParcels = data.parcels || [];
+    const withGeom = _dbAllParcels.filter(r => (r.geometry_wgs84 || []).length).length;
+    meta.innerText = `${_dbAllParcels.length} parcels in database; ${withGeom} with polygon geometry.`;
+    return true;
+  } catch(err){
+    meta.innerText = 'Could not load database: ' + err.message;
+    return false;
+  }
+}
+
+function _renderDbLayer(){
+  if(_dbLayerGroup){ _dbMap.removeLayer(_dbLayerGroup); _dbLayerGroup = null; }
+  const bounds = _dbMap.getBounds();
+  const useFullPolygons = _dbMap.getZoom() >= _DB_POLYGON_ZOOM;
+  const layers = [];
+  _dbAllParcels.forEach(r => {
+    if(r.centroid_lat == null) return;
+    if(!bounds.contains([r.centroid_lat, r.centroid_lon])) return;
+    const color = _colorForParcel(r, _dbColorMode);
+    if(useFullPolygons && (r.geometry_wgs84 || []).length){
+      const partsLL = r.geometry_wgs84.map(part => part.map(ring => ring.map(([lon, lat]) => [lat, lon])));
+      const poly = L.polygon(partsLL, {color, weight: 1.5, fillOpacity: 0.35});
+      poly.bindPopup(_quickPopupHtml(r), {maxWidth: 300});
+      layers.push(poly);
+    } else {
+      const m = L.circleMarker([r.centroid_lat, r.centroid_lon], {
+        radius: useFullPolygons ? 4 : 3, color, fillColor: color, fillOpacity: 0.7, weight: 1,
+      });
+      m.bindPopup(_quickPopupHtml(r), {maxWidth: 300});
+      layers.push(m);
+    }
+  });
+  _dbLayerGroup = L.featureGroup(layers).addTo(_dbMap);
+}
+
+function _setDbBasemap(kind){
+  document.querySelectorAll('#dbMapControls .view-toggle button').forEach(b =>
+    b.classList.toggle('active', b.dataset.basemap === kind));
+  if(kind === 'satellite'){ _dbMap.removeLayer(_dbMapStreet); _dbMapSat.addTo(_dbMap); }
+  else { _dbMap.removeLayer(_dbMapSat); _dbMapStreet.addTo(_dbMap); }
+}
+
+async function openDbMap(){
+  document.getElementById('dbMapBackdrop').classList.add('open');
+  if(!_dbMap){
+    _dbMap = L.map('dbMap', {zoomControl: true});
+    _dbMapSat = _makeSatLayer().addTo(_dbMap);
+    _dbMapStreet = _makeStreetLayer();
+    _dbMap.setView([28.5, -82.0], 7);  // Florida default
+    document.getElementById('dbBasemapSat').addEventListener('click', () => _setDbBasemap('satellite'));
+    document.getElementById('dbBasemapStreet').addEventListener('click', () => _setDbBasemap('street'));
+    document.getElementById('dbColorBy').addEventListener('change', (e) => {
+      _dbColorMode = e.target.value;
+      _renderDbLayer();
+    });
+    _dbMap.on('moveend zoomend', _renderDbLayer);
+  }
+  setTimeout(() => _dbMap && _dbMap.invalidateSize(), 60);
+  const ok = await _loadDbParcels();
+  if(!ok) return;
+  // Fit map to whatever's in the DB.
+  const withCentroid = _dbAllParcels.filter(r => r.centroid_lat != null);
+  if(withCentroid.length){
+    const bounds = L.latLngBounds(withCentroid.map(r => [r.centroid_lat, r.centroid_lon]));
+    _dbMap.fitBounds(bounds, {padding: [40, 40]});
+  }
+  _renderDbLayer();
+}
+document.getElementById('dbMapLink').addEventListener('click', openDbMap);
+document.getElementById('dbMapClose').addEventListener('click', () => {
+  document.getElementById('dbMapBackdrop').classList.remove('open');
+});
+document.getElementById('dbMapBackdrop').addEventListener('click', (e) => {
+  if(e.target.id === 'dbMapBackdrop') document.getElementById('dbMapBackdrop').classList.remove('open');
+});
 
 // ---------------------------------------------------------------------
 // Init

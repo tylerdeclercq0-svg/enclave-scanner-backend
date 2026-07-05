@@ -247,6 +247,7 @@ def parcel_demographics(
     parcel_id: str,
     lat: float = Query(..., description="Parcel centroid latitude"),
     lon: float = Query(..., description="Parcel centroid longitude"),
+    debug: int = Query(0, description="If 1, include per-block-group raw ACS values for hand-verification."),
 ):
     """
     On-demand 5/10/15-mile Census ring demographics for a single parcel.
@@ -270,6 +271,7 @@ def parcel_demographics(
             parcel_centroid_lat=lat,
             parcel_centroid_lon=lon,
             census_api_key=api_key,
+            include_block_group_detail=bool(debug),
         )
     except NotImplementedError as exc:
         raise HTTPException(
@@ -302,13 +304,60 @@ def parcel_demographics(
                 "total_population": r.total_population,
                 "population_moe": r.population_moe,
                 "median_household_income": r.median_household_income,
+                "income_moe": r.income_moe,
                 "median_age": r.median_age,
                 "total_housing_units": r.total_housing_units,
                 "density_per_sqmi": r.density_per_sqmi,
+                "block_groups_included": r.block_groups_included,
+                "block_group_detail": r.block_group_detail,
             }
             for r in rings
         ],
     }
+
+
+@app.get("/api/debug/acs-probe")
+def acs_probe(
+    variables: str = Query(..., description="Comma-separated ACS variable codes to probe, e.g. B25077_001E,B25008_001E"),
+    state: str = Query("12", description="Two-digit FIPS, default 12=Florida"),
+    county: str = Query("101", description="Three-digit FIPS, default 101=Pasco"),
+    tract: str = Query("030901", description="Six-digit tract code, default one in Pasco"),
+    block_group: str = Query("*", description="Block group number (default * = all)"),
+):
+    """
+    Ad-hoc ACS variable probe for Phase B (2026-07-06 pass): confirms
+    exact variable codes, availability at block-group vs. tract level,
+    and margin-of-error suffixes for new metrics we're adding to the
+    demographics pull. Renders a raw response so a caller can eyeball
+    it before wiring the variable in. Deliberately unscoped to any
+    parcel -- just proves the code returns data.
+    """
+    api_key = os.environ.get("CENSUS_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="CENSUS_API_KEY not set")
+    import requests
+    var_list = ",".join(v.strip() for v in variables.split(",") if v.strip())
+    url = (
+        f"{ring_demographics.CENSUS_ACS5_BASE}?get=NAME,{var_list}"
+        f"&for=block%20group:{block_group}"
+        f"&in=state:{state}+county:{county}+tract:{tract}"
+        f"&key={api_key}"
+    )
+    try:
+        resp = requests.get(url, timeout=30)
+        # Preserve non-JSON responses (e.g. the "Invalid Key" HTML page)
+        # so the caller sees exactly what the ACS API returned.
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = {"raw_text_start": resp.text[:400]}
+        return {
+            "url": url.replace(api_key, "***"),
+            "status": resp.status_code,
+            "payload": payload,
+        }
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
 
 
 class DiligenceExportPayload(BaseModel):

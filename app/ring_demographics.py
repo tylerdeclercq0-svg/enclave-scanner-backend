@@ -102,6 +102,13 @@ class RingDemographics:
     density_per_sqmi: Optional[float]
     block_groups_included: int
     block_groups_partial: int
+    # Debug-only: per-block-group raw ACS values used to compute the
+    # aggregated ring stats. Populated when compute_ring_demographics is
+    # called with include_block_group_detail=True. Used by the
+    # /api/parcels/{id}/demographics?debug=1 endpoint for hand-
+    # verification. Never populated during normal front-end calls to
+    # avoid bloating the response.
+    block_group_detail: Optional[list[dict]] = None
 
 
 def _require_deps():
@@ -144,6 +151,20 @@ def fetch_block_groups_near(lat: float, lon: float, max_radius_miles: float, cen
     if "error" in data:
         raise RuntimeError(f"TIGERweb query error: {data['error']}")
     return data.get("features", [])
+
+
+def _pop_weighted_avg(pairs: list[tuple[float, float]]) -> Optional[float]:
+    """
+    Population-weighted average: sum(value_i * pop_i) / sum(pop_i).
+    Returns None if the input list is empty or the total weight is 0.
+    Used for per-block-group median aggregation across a ring.
+    """
+    if not pairs:
+        return None
+    total_weight = sum(p for _, p in pairs)
+    if total_weight <= 0:
+        return None
+    return sum(v * p for v, p in pairs) / total_weight
 
 
 def _parse_acs_value(raw) -> Optional[float]:
@@ -233,6 +254,7 @@ def compute_ring_demographics(
     parcel_centroid_lat: float,
     parcel_centroid_lon: float,
     census_api_key: str,
+    include_block_group_detail: bool = False,
 ) -> list[RingDemographics]:
     """
     The actual on-demand entry point: given a parcel's centroid, return
@@ -293,17 +315,64 @@ def compute_ring_demographics(
         pop_moes = [v["total_population_moe"] for v in acs_data.values() if v.get("total_population_moe") is not None]
         pop_moe = math.sqrt(sum(m ** 2 for m in pop_moes)) if pop_moes else None
 
+        # Population-weighted average of per-block-group medians (2026-
+        # 07-06 Phase A). This is NOT a true median of the aggregate
+        # ring's income/age distribution -- that would require the full
+        # distributions per block group, not just the medians. It IS a
+        # defensible approximation when the constituent block-group
+        # medians are similar; when they're not, the weighted average
+        # can differ meaningfully from a true median. The frontend
+        # labels this as "pop.-weighted avg. of block-group medians"
+        # rather than "median" for exactly this reason.
+        income_pairs: list[tuple[float, float]] = []
+        income_moe_pairs: list[tuple[float, float]] = []
+        age_pairs: list[tuple[float, float]] = []
+        for v in acs_data.values():
+            pop = v.get("total_population") or 0
+            if pop <= 0:
+                continue
+            if v.get("median_household_income") is not None:
+                income_pairs.append((v["median_household_income"], pop))
+            if v.get("median_household_income_moe") is not None:
+                income_moe_pairs.append((v["median_household_income_moe"], pop))
+            if v.get("median_age") is not None:
+                age_pairs.append((v["median_age"], pop))
+        income_est = _pop_weighted_avg(income_pairs)
+        age_est = _pop_weighted_avg(age_pairs)
+        # Income MOE across block groups: population-weighted average
+        # of per-BG MOEs. NOT strictly correct (true propagation for a
+        # weighted median has no closed form given only per-BG medians),
+        # but gives the caller a rough sense of the estimate's
+        # uncertainty rather than nothing.
+        income_moe_est = _pop_weighted_avg(income_moe_pairs)
+
+        block_group_detail = None
+        if include_block_group_detail:
+            block_group_detail = [
+                {
+                    "geoid": geoid,
+                    "total_population": v.get("total_population"),
+                    "total_population_moe": v.get("total_population_moe"),
+                    "median_household_income": v.get("median_household_income"),
+                    "median_household_income_moe": v.get("median_household_income_moe"),
+                    "median_age": v.get("median_age"),
+                    "total_housing_units": v.get("total_housing_units"),
+                }
+                for geoid, v in acs_data.items()
+            ]
+
         results.append(RingDemographics(
             radius_miles=radius,
             total_population=total_pop if acs_data else None,
             population_moe=pop_moe,
-            median_household_income=None,  # medians cannot be simply averaged across block groups; needs a population-weighted approach or reporting a range
-            income_moe=None,
-            median_age=None,  # same caveat as median income
+            median_household_income=income_est,
+            income_moe=income_moe_est,
+            median_age=age_est,
             total_housing_units=sum(v.get("total_housing_units", 0) or 0 for v in acs_data.values()) if acs_data else None,
             density_per_sqmi=(total_pop / area_sqmi) if acs_data and area_sqmi else None,
             block_groups_included=full_count,
             block_groups_partial=partial_count,
+            block_group_detail=block_group_detail,
         ))
 
     return results

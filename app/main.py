@@ -267,11 +267,15 @@ def parcel_demographics(
         )
 
     try:
+        # Always populate block_group_detail internally -- the trend
+        # calculation below needs the 15-mile GEOID list. If debug=0,
+        # we strip block_group_detail from the response payload before
+        # returning so we don't bloat the on-the-wire size.
         rings = ring_demographics.compute_ring_demographics(
             parcel_centroid_lat=lat,
             parcel_centroid_lon=lon,
             census_api_key=api_key,
-            include_block_group_detail=bool(debug),
+            include_block_group_detail=True,
         )
     except NotImplementedError as exc:
         raise HTTPException(
@@ -296,6 +300,32 @@ def parcel_demographics(
             },
         )
 
+    # Phase D: population trend. Uses the county the parcel sits in
+    # (from any included BG's 12-digit GEOID) for the reliable county
+    # trend, and the 15-mile ring's block groups for the directional
+    # ring trend. Trend fetch failures are non-fatal -- the trend
+    # response fields go None with a note.
+    trend_response = None
+    try:
+        largest_ring = max(rings, key=lambda r: r.radius_miles)
+        largest_geoids = [
+            bg["geoid"] for bg in (largest_ring.block_group_detail or [])
+            if bg.get("geoid") and len(bg["geoid"]) == 12
+        ]
+        state_fips = largest_geoids[0][:2] if largest_geoids else None
+        county_fips = largest_geoids[0][2:5] if largest_geoids else None
+        if state_fips and county_fips:
+            trend = ring_demographics.fetch_population_trend(
+                state_fips=state_fips,
+                county_fips=county_fips,
+                ring_block_group_geoids=largest_geoids,
+                ring_current_population=int(largest_ring.total_population or 0),
+                census_api_key=api_key,
+            )
+            trend_response = asdict(trend)
+    except Exception as exc:  # noqa: BLE001 -- trend is optional context, don't sink the main response
+        trend_response = {"error": f"Trend fetch failed: {type(exc).__name__}: {exc}"}
+
     return {
         "parcel_id": parcel_id,
         "rings": [
@@ -309,10 +339,25 @@ def parcel_demographics(
                 "total_housing_units": r.total_housing_units,
                 "density_per_sqmi": r.density_per_sqmi,
                 "block_groups_included": r.block_groups_included,
-                "block_group_detail": r.block_group_detail,
+                # Phase C metrics
+                "median_home_value": r.median_home_value,
+                "home_value_moe": r.home_value_moe,
+                "median_gross_rent": r.median_gross_rent,
+                "gross_rent_moe": r.gross_rent_moe,
+                "rent_burden_pct": r.rent_burden_pct,
+                "homeownership_rate_pct": r.homeownership_rate_pct,
+                "renter_occupied_pct": r.renter_occupied_pct,
+                "avg_household_size": r.avg_household_size,
+                "family_household_pct": r.family_household_pct,
+                "income_distribution": r.income_distribution,
+                "age_distribution": r.age_distribution,
+                # Debug detail: only surfaced to the wire when the
+                # caller opts in via ?debug=1.
+                "block_group_detail": r.block_group_detail if bool(debug) else None,
             }
             for r in rings
         ],
+        "trend": trend_response,
     }
 
 

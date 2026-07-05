@@ -51,6 +51,17 @@ import requests
 
 
 CENSUS_ACS5_BASE = "https://api.census.gov/data/2023/acs/acs5"
+# Baseline vintage for the population-trend comparison. 2018 vs 2023 =
+# 5-year gap. Confirmed via Phase B probe that the 2018 endpoint works
+# and returns real numbers -- BUT block-group boundaries were redrawn
+# between the 2010 Census (used by ACS 2018 5-year) and the 2020 Census
+# (used by ACS 2023 5-year), so per-BG comparisons are silently
+# misleading. County FIPS are stable, so a county-level 2018 vs 2023
+# comparison is the ONLY reliable trend. Ring-level trend is offered as
+# a secondary "directional-only" number with an explicit boundary-
+# redraw flag; see fetch_population_trend below.
+CENSUS_ACS5_TREND_BASELINE_YEAR = 2018
+CENSUS_ACS5_CURRENT_YEAR = 2023
 # Layer 10 ("Census Block Groups") of the ACS2023 vintage MapServer —
 # confirmed live via describe_layer against the real service 2026-07-04.
 # The previously-used "TIGERweb/State_County/MapServer" service has NO
@@ -62,20 +73,113 @@ TIGERWEB_BLOCKGROUP_URL = (
     "TIGERweb/tigerWMS_ACS2023/MapServer/10"
 )
 
-# ACS variables pulled for each ring. Population and housing units are
-# base counts; income and age come with their own margin-of-error
-# companions (the M-suffixed variables), which should be surfaced
-# alongside the estimate in the UI rather than dropped, since ACS
-# 5-year block-group estimates can carry wide margins in low-population
-# areas — exactly the rural areas this tool spends most of its time in.
-ACS_VARIABLES = {
+# ACS variables pulled per block group. Split into 4 groups because the
+# Census ACS API caps a single request at 50 variables and our full set
+# now hits ~70 (per Phase B code-table confirmation, 2026-07-06):
+#   Group 1 -- base ring metrics + housing + household composition (20)
+#   Group 2 -- income distribution B19001 (17)
+#   Group 3 -- male age brackets from B01001 (17)
+#   Group 4 -- female age brackets from B01001 (17)
+# fetch_acs_values_for_block_groups() calls the ACS API once per (tract,
+# group) pair and merges the per-BG rows across groups. So a scan pull
+# for one parcel does <tracts touched> * 4 requests instead of 1, all
+# in the on-demand demographics endpoint, never in the scan pipeline.
+
+ACS_VARIABLES_BASE = {
+    # Population + median income + median age + total housing units
     "B01003_001E": "total_population",
     "B01003_001M": "total_population_moe",
     "B19013_001E": "median_household_income",
     "B19013_001M": "median_household_income_moe",
     "B01002_001E": "median_age",
     "B25001_001E": "total_housing_units",
+    # Housing values + rent (homebuilder / multifamily inputs)
+    "B25077_001E": "median_home_value",
+    "B25077_001M": "median_home_value_moe",
+    "B25064_001E": "median_gross_rent",
+    "B25064_001M": "median_gross_rent_moe",
+    "B25071_001E": "rent_burden_pct",  # median gross rent as % of household income
+    # Tenure (owner vs renter)
+    "B25003_001E": "tenure_total",
+    "B25003_002E": "owner_occupied",
+    "B25003_003E": "renter_occupied",
+    # Household size + family composition
+    "B25010_001E": "avg_hh_size",
+    "B25010_002E": "avg_hh_size_owner",
+    "B25010_003E": "avg_hh_size_renter",
+    "B11001_001E": "households_total",
+    "B11001_002E": "households_family",
+    "B11001_007E": "households_nonfamily",
 }
+
+# Income distribution -- 17 buckets. `_001E` is the total households
+# denominator (matches B25003 minus vacant, close to B11001_001E); the
+# 16 bucket variables sum to it exactly (confirmed live via Phase B
+# probe against Pasco BG 1, 801 = 801).
+ACS_VARIABLES_INCOME = {
+    "B19001_001E": "income_bucket_total",
+    "B19001_002E": "income_lt_10k",
+    "B19001_003E": "income_10_15k",
+    "B19001_004E": "income_15_20k",
+    "B19001_005E": "income_20_25k",
+    "B19001_006E": "income_25_30k",
+    "B19001_007E": "income_30_35k",
+    "B19001_008E": "income_35_40k",
+    "B19001_009E": "income_40_45k",
+    "B19001_010E": "income_45_50k",
+    "B19001_011E": "income_50_60k",
+    "B19001_012E": "income_60_75k",
+    "B19001_013E": "income_75_100k",
+    "B19001_014E": "income_100_125k",
+    "B19001_015E": "income_125_150k",
+    "B19001_016E": "income_150_200k",
+    "B19001_017E": "income_200k_plus",
+}
+
+# Age distribution from B01001. ACS splits by sex; we pull only the age
+# brackets needed for the four target bins and sum male+female at
+# aggregation time. Bracket-to-code mapping per official ACS 2023
+# variable dictionary:
+#   003 M / 027 F : under 5           014 M / 038 F : 40 to 44
+#   004 M / 028 F : 5 to 9            020 M / 044 F : 65 and 66
+#   005 M / 029 F : 10 to 14          021 M / 045 F : 67 to 69
+#   006 M / 030 F : 15 to 17          022 M / 046 F : 70 to 74
+#   008 M / 032 F : 20                023 M / 047 F : 75 to 79
+#   009 M / 033 F : 21                024 M / 048 F : 80 to 84
+#   010 M / 034 F : 22 to 24          025 M / 049 F : 85 and over
+#   011 M / 035 F : 25 to 29
+#   012 M / 036 F : 30 to 34
+#   013 M / 037 F : 35 to 39
+ACS_VARIABLES_AGE_MALE = {
+    "B01001_003E": "m_u5",   "B01001_004E": "m_5_9",  "B01001_005E": "m_10_14",
+    "B01001_006E": "m_15_17","B01001_008E": "m_20",   "B01001_009E": "m_21",
+    "B01001_010E": "m_22_24","B01001_011E": "m_25_29","B01001_012E": "m_30_34",
+    "B01001_013E": "m_35_39","B01001_014E": "m_40_44","B01001_020E": "m_65_66",
+    "B01001_021E": "m_67_69","B01001_022E": "m_70_74","B01001_023E": "m_75_79",
+    "B01001_024E": "m_80_84","B01001_025E": "m_85_plus",
+}
+ACS_VARIABLES_AGE_FEMALE = {
+    "B01001_027E": "f_u5",   "B01001_028E": "f_5_9",  "B01001_029E": "f_10_14",
+    "B01001_030E": "f_15_17","B01001_032E": "f_20",   "B01001_033E": "f_21",
+    "B01001_034E": "f_22_24","B01001_035E": "f_25_29","B01001_036E": "f_30_34",
+    "B01001_037E": "f_35_39","B01001_038E": "f_40_44","B01001_044E": "f_65_66",
+    "B01001_045E": "f_67_69","B01001_046E": "f_70_74","B01001_047E": "f_75_79",
+    "B01001_048E": "f_80_84","B01001_049E": "f_85_plus",
+}
+
+# All 4 groups combined -- the master mapping. Kept for backward
+# compatibility with any external caller reading ACS_VARIABLES.
+ACS_VARIABLES = {
+    **ACS_VARIABLES_BASE,
+    **ACS_VARIABLES_INCOME,
+    **ACS_VARIABLES_AGE_MALE,
+    **ACS_VARIABLES_AGE_FEMALE,
+}
+
+_ACS_VARIABLE_GROUPS = [
+    ACS_VARIABLES_BASE, ACS_VARIABLES_INCOME,
+    ACS_VARIABLES_AGE_MALE, ACS_VARIABLES_AGE_FEMALE,
+]
 
 RING_RADII_MILES = (5, 10, 15)
 
@@ -102,6 +206,31 @@ class RingDemographics:
     density_per_sqmi: Optional[float]
     block_groups_included: int
     block_groups_partial: int
+    # Phase C (2026-07-06): homebuilder/multifamily metrics.
+    # Home value / rent are pop-weighted averages of per-BG medians
+    # (same caveat as median_household_income). Homeownership/renter
+    # percentages are computed from summed owner/renter counts (no
+    # median weirdness for shares).
+    median_home_value: Optional[float] = None
+    home_value_moe: Optional[float] = None
+    median_gross_rent: Optional[float] = None
+    gross_rent_moe: Optional[float] = None
+    rent_burden_pct: Optional[float] = None  # median gross rent as % of household income
+    homeownership_rate_pct: Optional[float] = None  # 0-100
+    renter_occupied_pct: Optional[float] = None  # 0-100
+    avg_household_size: Optional[float] = None  # pop-weighted average across BGs
+    family_household_pct: Optional[float] = None  # 0-100
+    # Income distribution: dict of bucket -> count summed across BGs.
+    # Bucket keys use the same friendly names as ACS_VARIABLES_INCOME
+    # (e.g. "income_lt_10k", "income_75_100k").
+    income_distribution: Optional[dict] = None
+    # Age distribution collapsed into the 4 target bins Tyler asked for:
+    #   under_18, age_20_34, age_25_44, age_65_plus
+    # Values are counts (sum male + female sum across BGs). Overlap
+    # between age_20_34 and age_25_44 (both include 25-29 and 30-34)
+    # is intentional -- 20-34 is multifamily-relevant, 25-44 is home-
+    # buyer-relevant.
+    age_distribution: Optional[dict] = None
     # Debug-only: per-block-group raw ACS values used to compute the
     # aggregated ring stats. Populated when compute_ring_demographics is
     # called with include_block_group_detail=True. Used by the
@@ -153,6 +282,149 @@ def fetch_block_groups_near(lat: float, lon: float, max_radius_miles: float, cen
     return data.get("features", [])
 
 
+@dataclass
+class PopulationTrend:
+    """
+    Phase D (2026-07-06): population-trend metric split into two parts
+    per Tyler's B+C combined direction --
+      1. County-level: reliable (FIPS codes stable across vintages).
+      2. Ring-level: directional-only. Uses the same block-group GEOIDs
+         from the 2023 vintage against the 2018 ACS -- BG boundaries
+         were redrawn 2020, so the 2018 numbers for a "2023 BG" may
+         reflect entirely different physical geography. Flagged.
+    """
+    baseline_year: int
+    current_year: int
+    # County reliable numbers
+    county_population_baseline: Optional[int]
+    county_population_current: Optional[int]
+    county_growth_pct: Optional[float]
+    # Ring directional-only numbers
+    ring_population_baseline_directional: Optional[int]
+    ring_population_current: Optional[int]
+    ring_growth_pct_directional: Optional[float]
+    ring_note: str  # human-readable caveat about BG boundary redraw
+
+
+def fetch_county_population(state_fips: str, county_fips: str, year: int, census_api_key: str) -> Optional[int]:
+    """Query one county's total population from the specified ACS 5-year vintage."""
+    url = (
+        f"https://api.census.gov/data/{year}/acs/acs5"
+        f"?get=NAME,B01003_001E&for=county:{county_fips}&in=state:{state_fips}"
+        f"&key={census_api_key}"
+    )
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    try:
+        rows = resp.json()
+    except ValueError:
+        raise RuntimeError(
+            f"Census {year} ACS county query did not return JSON. "
+            f"Raw response start: {resp.text[:200]!r}"
+        )
+    if len(rows) < 2:
+        return None
+    header, *data_rows = rows
+    col_index = {name: i for i, name in enumerate(header)}
+    val = _parse_acs_value(data_rows[0][col_index["B01003_001E"]])
+    return int(val) if val is not None else None
+
+
+def fetch_ring_population_directional(
+    block_group_geoids: list[str],
+    year: int,
+    census_api_key: str,
+) -> Optional[int]:
+    """
+    Sum B01003_001E from the specified vintage across the given BG
+    GEOIDs. Directional only: 2018 ACS uses 2010 Census BG geometry,
+    so the same numeric GEOIDs from 2023 (Phase B confirmed this
+    silently misleading) may not represent the same physical area.
+    """
+    if not block_group_geoids:
+        return None
+    partial = _fetch_acs_group_for_block_groups(
+        block_group_geoids,
+        {"B01003_001E": "total_population"},
+        census_api_key,
+        acs5_base=f"https://api.census.gov/data/{year}/acs/acs5",
+    )
+    total = 0
+    for values in partial.values():
+        pop = values.get("total_population")
+        if pop is not None:
+            total += int(pop)
+    return total if partial else None
+
+
+def fetch_population_trend(
+    state_fips: str,
+    county_fips: str,
+    ring_block_group_geoids: list[str],
+    ring_current_population: int,
+    census_api_key: str,
+) -> PopulationTrend:
+    """
+    Compute the two-part population trend for the demographics response.
+    County-level uses stable FIPS; ring-level is directional-only with
+    a flag. Both fetches fail gracefully -- an unreachable Census
+    endpoint yields None fields rather than blowing up the parent
+    demographics response.
+    """
+    baseline = CENSUS_ACS5_TREND_BASELINE_YEAR
+    current = CENSUS_ACS5_CURRENT_YEAR
+
+    # County (reliable)
+    try:
+        county_baseline = fetch_county_population(state_fips, county_fips, baseline, census_api_key)
+    except Exception:  # noqa: BLE001
+        county_baseline = None
+    try:
+        county_current = fetch_county_population(state_fips, county_fips, current, census_api_key)
+    except Exception:  # noqa: BLE001
+        county_current = None
+
+    county_growth_pct = None
+    if county_baseline and county_current:
+        county_growth_pct = (county_current - county_baseline) / county_baseline * 100.0
+
+    # Ring (directional-only)
+    try:
+        ring_baseline_directional = fetch_ring_population_directional(
+            ring_block_group_geoids, baseline, census_api_key,
+        )
+    except Exception:  # noqa: BLE001
+        ring_baseline_directional = None
+
+    ring_growth_pct_directional = None
+    if ring_baseline_directional and ring_current_population:
+        ring_growth_pct_directional = (
+            (ring_current_population - ring_baseline_directional) / ring_baseline_directional * 100.0
+        )
+
+    ring_note = (
+        f"Directional only: 2018 ACS uses 2010 Census block-group geometry; "
+        f"2023 ACS uses 2020 Census geometry. The same 12-digit GEOIDs from "
+        f"the current ring were queried against the 2018 vintage -- some may "
+        f"resolve to different physical areas or return no data. Trust the "
+        f"county-level trend as the reliable number; treat the ring-level "
+        f"trend as a rough sense of neighborhood momentum, not a precise "
+        f"apples-to-apples growth rate."
+    )
+
+    return PopulationTrend(
+        baseline_year=baseline,
+        current_year=current,
+        county_population_baseline=county_baseline,
+        county_population_current=county_current,
+        county_growth_pct=county_growth_pct,
+        ring_population_baseline_directional=ring_baseline_directional,
+        ring_population_current=ring_current_population,
+        ring_growth_pct_directional=ring_growth_pct_directional,
+        ring_note=ring_note,
+    )
+
+
 def _pop_weighted_avg(pairs: list[tuple[float, float]]) -> Optional[float]:
     """
     Population-weighted average: sum(value_i * pop_i) / sum(pop_i).
@@ -180,24 +452,22 @@ def _parse_acs_value(raw) -> Optional[float]:
     return value
 
 
-def fetch_acs_values_for_block_groups(block_group_geoids: list[str], census_api_key: str) -> dict[str, dict]:
+def _fetch_acs_group_for_block_groups(
+    block_group_geoids: list[str],
+    variable_group: dict[str, str],
+    census_api_key: str,
+    acs5_base: str = CENSUS_ACS5_BASE,
+) -> dict[str, dict]:
     """
-    Batch-fetch ACS 5-year values for a list of block group GEOIDs.
-
-    The ACS API's `&for=block group:` geography predicate only accepts
-    multiple block group codes within a SINGLE tract per call — it has
-    no way to span tracts in one request. So GEOIDs (12-digit:
-    state[2]+county[3]+tract[6]+block group[1]) are grouped by their
-    (state, county, tract) prefix, and one request is issued per group,
-    each requesting every block group in that tract at once (there's no
-    documented cap on block groups per call within one tract, and a
-    single tract only ever has a handful of block groups, so no further
-    chunking is needed there).
+    Fetch one variable-group's values for a list of block group GEOIDs.
+    See ACS_VARIABLES_BASE / _INCOME / _AGE_* for group definitions.
+    Split into groups because the ACS API caps a single request at 50
+    variables and the full set now hits ~70 per Phase B.
     """
-    if not block_group_geoids:
+    if not block_group_geoids or not variable_group:
         return {}
 
-    variables = ",".join(ACS_VARIABLES.keys())
+    variables = ",".join(variable_group.keys())
 
     by_tract: dict[tuple[str, str, str], list[str]] = {}
     for geoid in block_group_geoids:
@@ -215,7 +485,7 @@ def fetch_acs_values_for_block_groups(block_group_geoids: list[str], census_api_
         # literal separator between state/county/tract clauses, which
         # `params=` would percent-encode into `%2B` and break.
         url = (
-            f"{CENSUS_ACS5_BASE}?get=NAME,{variables}"
+            f"{acs5_base}?get=NAME,{variables}"
             f"&for=block%20group:{','.join(block_groups)}"
             f"&in=state:{state}+county:{county}+tract:{tract}"
             f"&key={census_api_key}"
@@ -228,8 +498,7 @@ def fetch_acs_values_for_block_groups(block_group_geoids: list[str], census_api_
             # Confirmed live: an invalid/expired census_api_key returns
             # HTTP 200 with an HTML "Invalid Key" error page, not JSON
             # or a 4xx — surface this clearly instead of a raw
-            # JSONDecodeError, since a bad key is the single most likely
-            # real-world failure here.
+            # JSONDecodeError.
             raise RuntimeError(
                 "Census ACS API did not return JSON — likely an invalid "
                 f"CENSUS_API_KEY. Raw response start: {resp.text[:200]!r}"
@@ -242,12 +511,38 @@ def fetch_acs_values_for_block_groups(block_group_geoids: list[str], census_api_
                 f"{row[col_index['state']]}{row[col_index['county']]}"
                 f"{row[col_index['tract']]}{row[col_index['block group']]}"
             )
-            results[row_geoid] = {
+            entry = results.setdefault(row_geoid, {})
+            entry.update({
                 friendly_name: _parse_acs_value(row[col_index[var_code]])
-                for var_code, friendly_name in ACS_VARIABLES.items()
-            }
+                for var_code, friendly_name in variable_group.items()
+            })
 
     return results
+
+
+def fetch_acs_values_for_block_groups(
+    block_group_geoids: list[str],
+    census_api_key: str,
+) -> dict[str, dict]:
+    """
+    Fetch every ACS variable in every group for the given block groups.
+    Merges the per-group results so callers get one dict per BG with
+    every friendly-name key populated.
+
+    Makes <tracts_touched> * 4 requests (one per variable group). This
+    is on-demand only, not per-scan, and the scan pipeline never calls
+    ring_demographics at all.
+    """
+    if not block_group_geoids:
+        return {}
+    merged: dict[str, dict] = {}
+    for group in _ACS_VARIABLE_GROUPS:
+        partial = _fetch_acs_group_for_block_groups(
+            block_group_geoids, group, census_api_key,
+        )
+        for geoid, values in partial.items():
+            merged.setdefault(geoid, {}).update(values)
+    return merged
 
 
 def compute_ring_demographics(
@@ -327,6 +622,26 @@ def compute_ring_demographics(
         income_pairs: list[tuple[float, float]] = []
         income_moe_pairs: list[tuple[float, float]] = []
         age_pairs: list[tuple[float, float]] = []
+        # Phase C additions: home value / rent / rent burden / avg HH
+        # size get the same pop-weighted-average-of-medians treatment.
+        home_value_pairs: list[tuple[float, float]] = []
+        home_value_moe_pairs: list[tuple[float, float]] = []
+        gross_rent_pairs: list[tuple[float, float]] = []
+        gross_rent_moe_pairs: list[tuple[float, float]] = []
+        rent_burden_pairs: list[tuple[float, float]] = []
+        avg_hh_size_pairs: list[tuple[float, float]] = []
+        # Phase C count-based aggregates: tenure (owner/renter),
+        # family/nonfamily, income buckets, age buckets. Counts are
+        # simply summed across BGs since block groups partition the ring
+        # (roughly) and we're not double-counting anyone.
+        sum_tenure_total = 0.0
+        sum_owner = 0.0
+        sum_renter = 0.0
+        sum_hh_total = 0.0
+        sum_hh_family = 0.0
+        income_bucket_sums: dict[str, float] = {}
+        age_bin_sums = {"under_18": 0.0, "age_20_34": 0.0,
+                        "age_25_44": 0.0, "age_65_plus": 0.0}
         for v in acs_data.values():
             pop = v.get("total_population") or 0
             if pop <= 0:
@@ -337,6 +652,50 @@ def compute_ring_demographics(
                 income_moe_pairs.append((v["median_household_income_moe"], pop))
             if v.get("median_age") is not None:
                 age_pairs.append((v["median_age"], pop))
+            if v.get("median_home_value") is not None:
+                home_value_pairs.append((v["median_home_value"], pop))
+            if v.get("median_home_value_moe") is not None:
+                home_value_moe_pairs.append((v["median_home_value_moe"], pop))
+            if v.get("median_gross_rent") is not None:
+                gross_rent_pairs.append((v["median_gross_rent"], pop))
+            if v.get("median_gross_rent_moe") is not None:
+                gross_rent_moe_pairs.append((v["median_gross_rent_moe"], pop))
+            if v.get("rent_burden_pct") is not None:
+                rent_burden_pairs.append((v["rent_burden_pct"], pop))
+            if v.get("avg_hh_size") is not None:
+                avg_hh_size_pairs.append((v["avg_hh_size"], pop))
+            sum_tenure_total += v.get("tenure_total") or 0
+            sum_owner += v.get("owner_occupied") or 0
+            sum_renter += v.get("renter_occupied") or 0
+            sum_hh_total += v.get("households_total") or 0
+            sum_hh_family += v.get("households_family") or 0
+            for bucket_key in ACS_VARIABLES_INCOME.values():
+                if bucket_key == "income_bucket_total":
+                    continue
+                income_bucket_sums[bucket_key] = (
+                    income_bucket_sums.get(bucket_key, 0.0)
+                    + (v.get(bucket_key) or 0)
+                )
+            # Sum male + female age bracket counts into the 4 target bins.
+            def _sum_bracket(*keys) -> float:
+                return sum((v.get(k) or 0) for k in keys)
+            age_bin_sums["under_18"] += _sum_bracket(
+                "m_u5", "m_5_9", "m_10_14", "m_15_17",
+                "f_u5", "f_5_9", "f_10_14", "f_15_17",
+            )
+            age_bin_sums["age_20_34"] += _sum_bracket(
+                "m_20", "m_21", "m_22_24", "m_25_29", "m_30_34",
+                "f_20", "f_21", "f_22_24", "f_25_29", "f_30_34",
+            )
+            age_bin_sums["age_25_44"] += _sum_bracket(
+                "m_25_29", "m_30_34", "m_35_39", "m_40_44",
+                "f_25_29", "f_30_34", "f_35_39", "f_40_44",
+            )
+            age_bin_sums["age_65_plus"] += _sum_bracket(
+                "m_65_66", "m_67_69", "m_70_74", "m_75_79", "m_80_84", "m_85_plus",
+                "f_65_66", "f_67_69", "f_70_74", "f_75_79", "f_80_84", "f_85_plus",
+            )
+
         income_est = _pop_weighted_avg(income_pairs)
         age_est = _pop_weighted_avg(age_pairs)
         # Income MOE across block groups: population-weighted average
@@ -345,6 +704,25 @@ def compute_ring_demographics(
         # but gives the caller a rough sense of the estimate's
         # uncertainty rather than nothing.
         income_moe_est = _pop_weighted_avg(income_moe_pairs)
+        home_value_est = _pop_weighted_avg(home_value_pairs)
+        home_value_moe_est = _pop_weighted_avg(home_value_moe_pairs)
+        gross_rent_est = _pop_weighted_avg(gross_rent_pairs)
+        gross_rent_moe_est = _pop_weighted_avg(gross_rent_moe_pairs)
+        rent_burden_est = _pop_weighted_avg(rent_burden_pairs)
+        avg_hh_size_est = _pop_weighted_avg(avg_hh_size_pairs)
+
+        homeownership_pct = (
+            (sum_owner / sum_tenure_total * 100.0)
+            if sum_tenure_total > 0 else None
+        )
+        renter_pct = (
+            (sum_renter / sum_tenure_total * 100.0)
+            if sum_tenure_total > 0 else None
+        )
+        family_hh_pct = (
+            (sum_hh_family / sum_hh_total * 100.0)
+            if sum_hh_total > 0 else None
+        )
 
         block_group_detail = None
         if include_block_group_detail:
@@ -372,6 +750,17 @@ def compute_ring_demographics(
             density_per_sqmi=(total_pop / area_sqmi) if acs_data and area_sqmi else None,
             block_groups_included=full_count,
             block_groups_partial=partial_count,
+            median_home_value=home_value_est,
+            home_value_moe=home_value_moe_est,
+            median_gross_rent=gross_rent_est,
+            gross_rent_moe=gross_rent_moe_est,
+            rent_burden_pct=rent_burden_est,
+            homeownership_rate_pct=homeownership_pct,
+            renter_occupied_pct=renter_pct,
+            avg_household_size=avg_hh_size_est,
+            family_household_pct=family_hh_pct,
+            income_distribution=income_bucket_sums if income_bucket_sums else None,
+            age_distribution=age_bin_sums if any(age_bin_sums.values()) else None,
             block_group_detail=block_group_detail,
         ))
 

@@ -323,6 +323,7 @@ def acs_probe(
     county: str = Query("101", description="Three-digit FIPS, default 101=Pasco"),
     tract: str = Query("030901", description="Six-digit tract code, default one in Pasco"),
     block_group: str = Query("*", description="Block group number (default * = all)"),
+    year: int = Query(2023, description="ACS 5-year vintage (endpoint year). Used for pop-trend probes."),
 ):
     """
     Ad-hoc ACS variable probe for Phase B (2026-07-06 pass): confirms
@@ -337,8 +338,9 @@ def acs_probe(
         raise HTTPException(status_code=500, detail="CENSUS_API_KEY not set")
     import requests
     var_list = ",".join(v.strip() for v in variables.split(",") if v.strip())
+    base = f"https://api.census.gov/data/{year}/acs/acs5"
     url = (
-        f"{ring_demographics.CENSUS_ACS5_BASE}?get=NAME,{var_list}"
+        f"{base}?get=NAME,{var_list}"
         f"&for=block%20group:{block_group}"
         f"&in=state:{state}+county:{county}+tract:{tract}"
         f"&key={api_key}"

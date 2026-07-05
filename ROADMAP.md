@@ -10,14 +10,16 @@ the index/checklist, not the full spec.
 
 ## Priority order
 
-- [ ] **1. SECURITY -- lock down `/api/debug/acs-probe`**
-  The endpoint at `app/main.py:373` is currently unauthenticated -- it only
-  checks that `CENSUS_API_KEY` is set on the server and then proxies
-  arbitrary ACS queries out through Render's Census key. Needs to be
-  auth-gated (shared secret header or similar) or removed entirely before
-  anyone besides Tyler touches this deployment. Quick fix; do this one
-  soon. **Status: not started.** Full detailed instructions will be
-  provided in a separate prompt when this item is actively being worked.
+- [x] **1. SECURITY -- lock down `/api/debug/acs-probe`** *(done 2026-07-06)*
+  Gated behind a `DEBUG_API_KEY` shared-secret via `_require_debug_key()`
+  in `app/main.py`. Accepts the secret via `X-Debug-Key` header (preferred)
+  or `?debug_key=` query param, uses `hmac.compare_digest` for timing-safe
+  compare, and **fails closed with 503** if `DEBUG_API_KEY` isn't set on
+  the server (a missing env var cannot accidentally re-expose the
+  endpoint). Verified locally across all six cases: correct key via header
+  or query -> 200; missing/wrong key -> 401; env var unset -> 503
+  regardless of what the caller sends. Set `DEBUG_API_KEY` on Render the
+  same way `CENSUS_API_KEY` is set before the next deploy.
 
 - [ ] **2. EXPORT REFACTOR -- generalize `exportDiligenceTracker`**
   The function at `web/index.html:2297` is hardcoded to

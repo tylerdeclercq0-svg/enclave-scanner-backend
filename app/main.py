@@ -29,7 +29,7 @@ import os
 import sys
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -370,6 +370,28 @@ def parcel_demographics(
     }
 
 
+def _require_debug_key(header_key: Optional[str], query_key: Optional[str]) -> None:
+    """
+    Shared-secret gate for /api/debug/* endpoints. Fails CLOSED: if
+    DEBUG_API_KEY isn't configured on the server at all, the endpoint
+    refuses every request rather than silently going public. Accepts
+    the key via the X-Debug-Key header (preferred) or a ?debug_key=
+    query param (fallback for quick curl tests).
+    """
+    import hmac
+    expected = os.environ.get("DEBUG_API_KEY")
+    if not expected:
+        # Fail closed. This is deliberate -- a missing env var must not
+        # accidentally re-expose the endpoint (roadmap item 1, 2026-07).
+        raise HTTPException(
+            status_code=503,
+            detail="Debug endpoints disabled: DEBUG_API_KEY not configured",
+        )
+    provided = header_key or query_key
+    if not provided or not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="Invalid or missing debug key")
+
+
 @app.get("/api/debug/acs-probe")
 def acs_probe(
     variables: str = Query(..., description="Comma-separated ACS variable codes to probe, e.g. B25077_001E,B25008_001E"),
@@ -378,6 +400,8 @@ def acs_probe(
     tract: str = Query("030901", description="Six-digit tract code, default one in Pasco"),
     block_group: str = Query("*", description="Block group number (default * = all)"),
     year: int = Query(2023, description="ACS 5-year vintage (endpoint year). Used for pop-trend probes."),
+    debug_key: Optional[str] = Query(None, description="Shared secret (fallback to X-Debug-Key header)"),
+    x_debug_key: Optional[str] = Header(None, description="Shared secret matching DEBUG_API_KEY env var"),
 ):
     """
     Ad-hoc ACS variable probe for Phase B (2026-07-06 pass): confirms
@@ -386,7 +410,12 @@ def acs_probe(
     demographics pull. Renders a raw response so a caller can eyeball
     it before wiring the variable in. Deliberately unscoped to any
     parcel -- just proves the code returns data.
+
+    Gated behind DEBUG_API_KEY (roadmap item 1) -- fails closed if that
+    env var is unset. Pass the secret via the X-Debug-Key header or a
+    ?debug_key= query param.
     """
+    _require_debug_key(x_debug_key, debug_key)
     api_key = os.environ.get("CENSUS_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="CENSUS_API_KEY not set")

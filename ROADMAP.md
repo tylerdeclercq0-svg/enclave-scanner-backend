@@ -41,15 +41,18 @@ the index/checklist, not the full spec.
   started.** Full detailed instructions will be provided in a separate
   prompt when this item is actively being worked.
 
-- [ ] **4. FOUNDATION REWORK, PART 2 -- hide Excluded-tier parcels by default**
-  Excluded-tier parcels are currently ranked last in the list, but still
-  visible. Change so they're filtered OUT by default, with an explicit
-  "Show N excluded" toggle to reveal them -- keeps the primary list a
-  workable candidate set, not a review pile. **Blocked on item 2**
-  (shared export must be able to respect the visible/hidden filter
-  correctly). **Status: not started.** Full detailed instructions will
-  be provided in a separate prompt when this item is actively being
-  worked.
+- [x] **4. FOUNDATION REWORK, PART 2 -- hide Excluded-tier parcels by default** *(done 2026-07-06)*
+  Master DB list view now filters `tier === 'excluded'` rows out of the
+  default view. A "Show excluded" checkbox in the list controls reveals
+  them; explicitly selecting "Excluded" in the Tier filter dropdown also
+  overrides the hide so the user can pull them up without touching the
+  toggle. Summary line shows a clay-colored "N excluded hidden" note
+  whose count is filter-aware -- if county=pasco is active, only pasco
+  excluded rows count toward that note, matching what the toggle would
+  reveal. Verified in preview across 5 cases (default hides / toggle
+  reveals all / tier-filter overrides / county+hide / county+show).
+  Export from item 2 automatically respects the current filter since
+  it reads from `_dbListFilteredRows()`.
 
 - [ ] **5. FOUNDATION REWORK, PART 3 -- metro-proximity signal**
   New "metro pull" secondary sort signal. Pull FL Census place-level

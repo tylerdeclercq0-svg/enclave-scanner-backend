@@ -678,6 +678,9 @@
               <option value="excluded">Excluded</option>
             </select>
           </div>
+          <label class="db-list-only" style="display:none;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--ink-faint);display:flex;align-items:center;gap:6px;cursor:pointer;">
+            <input type="checkbox" id="dbListShowExcluded"> Show excluded
+          </label>
           <button class="db-list-only" id="dbListExportBtn" style="display:none;padding:6px 12px;font-family:'IBM Plex Mono',monospace;font-size:12px;background:var(--ink);color:var(--paper);border:none;border-radius:3px;cursor:pointer;">Export selected (.xlsx)</button>
           <div id="dbMapMeta" class="empty-note" style="margin-left:auto;font-size:12px;"></div>
         </div>
@@ -2776,14 +2779,40 @@ let _dbListSort = { key: 'tier', dir: 'asc', secondary: { key: 'attractiveness_s
 const _dbSelectedKeys = new Set();
 
 function _dbListFilteredRows(){
+  // Excluded-tier parcels are hidden by default (roadmap item 4). The
+  // "Show excluded" toggle reveals them; explicitly filtering the tier
+  // dropdown to "excluded" also overrides the hide rule so the user can
+  // still pull them up on demand without touching the toggle.
+  const showExcluded = document.getElementById('dbListShowExcluded')?.checked;
+  const tierFilterEl = document.getElementById('dbListFilterTier');
+  const tierFilterVal = tierFilterEl && tierFilterEl.value;
   return _dbAllParcels.filter(r => {
     for(const f of DB_LIST_FILTERS){
       const el = document.getElementById(f.elementId);
       const val = el && el.value;
       if(val && f.accessor(r) !== val) return false;
     }
+    if(!showExcluded && tierFilterVal !== 'excluded' && _dbTier(r) === 'excluded') return false;
     return true;
   });
+}
+
+function _dbListHiddenExcludedCount(){
+  const showExcluded = document.getElementById('dbListShowExcluded')?.checked;
+  const tierFilterEl = document.getElementById('dbListFilterTier');
+  const tierFilterVal = tierFilterEl && tierFilterEl.value;
+  if(showExcluded || tierFilterVal === 'excluded') return 0;
+  // Count excluded rows that would otherwise satisfy the other filters.
+  return _dbAllParcels.filter(r => {
+    if(_dbTier(r) !== 'excluded') return false;
+    for(const f of DB_LIST_FILTERS){
+      if(f.key === 'tier') continue;
+      const el = document.getElementById(f.elementId);
+      const val = el && el.value;
+      if(val && f.accessor(r) !== val) return false;
+    }
+    return true;
+  }).length;
 }
 
 function _dbListSortedRows(rows){
@@ -2823,8 +2852,13 @@ function _renderDbList(){
   const filtered = _dbListFilteredRows();
   const sorted = _dbListSortedRows(filtered);
 
+  const hiddenExcluded = _dbListHiddenExcludedCount();
+  const excludedNote = hiddenExcluded > 0
+    ? ` &middot; <span style="color:var(--clay);">${hiddenExcluded} excluded hidden</span>`
+    : '';
   const summary = `<div class="db-list-summary">`
     + `Showing <strong>${sorted.length}</strong> of ${_dbAllParcels.length} parcels`
+    + excludedNote
     + ` &middot; ${_dbSelectedKeys.size} selected`
     + ` &middot; sort: ${_dbListSort.key} ${_dbListSort.dir}`
     + (_dbListSort.secondary ? `, then ${_dbListSort.secondary.key} ${_dbListSort.secondary.dir}` : '')
@@ -2915,6 +2949,7 @@ DB_LIST_FILTERS.forEach(f => {
   const el = document.getElementById(f.elementId);
   if(el) el.addEventListener('change', _renderDbList);
 });
+document.getElementById('dbListShowExcluded').addEventListener('change', _renderDbList);
 
 document.getElementById('dbListExportBtn').addEventListener('click', () => {
   // Reuse the roadmap-item-2 refactored export function -- pass ONLY the

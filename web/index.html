@@ -159,6 +159,30 @@
   }
   .tier-confident .tier-badge{background:var(--brass-dim);color:var(--brass-800);}
   .tier-watch .tier-badge{background:#FFEB9C;color:var(--brass-800);}
+  .tier-confirmed_qualifying .tier-badge{background:var(--brass-dim);color:var(--brass-800);}
+  .tier-strong_candidate .tier-badge{background:#EEE3C2;color:var(--brass-800);}
+  .tier-watch_list .tier-badge{background:#FFEB9C;color:var(--brass-800);}
+  .tier-excluded .tier-badge{background:var(--clay-dim);color:var(--clay);}
+  .tier-excluded{border-color:var(--clay);}
+  .tier-excluded .tier-header{color:var(--clay);}
+
+  /* Tier cell in the results table -- the primary decision signal
+     lives here now, with the driving-pathway detail below. */
+  .master-tier-pill{
+    display:inline-block;padding:2px 10px;border-radius:2px;
+    font-family:'IBM Plex Mono',monospace;font-size:10.5px;font-weight:600;
+    letter-spacing:.04em;text-transform:uppercase;margin-bottom:6px;
+    border:1px solid transparent;
+  }
+  .master-tier-pill.tier-confirmed_qualifying{background:#C6EFCE;color:var(--brass-800);border-color:#8FCFA0;}
+  .master-tier-pill.tier-strong_candidate{background:#EEE3C2;color:var(--brass-800);border-color:var(--brass);}
+  .master-tier-pill.tier-watch_list{background:#FFEB9C;color:var(--brass-800);border-color:#DBB800;}
+  .master-tier-pill.tier-unlikely{background:var(--line);color:var(--ink-faint);border-color:var(--line-strong);}
+  .master-tier-pill.tier-excluded{background:#FFC7CE;color:var(--clay);border-color:var(--clay);}
+  .tier-cell{max-width:340px;}
+  .driver-line{font-size:11.5px;color:var(--ink-faint);line-height:1.35;margin-top:2px;}
+  .driver-line + .driver-line{margin-top:1px;}
+  .driver-more{font-size:11px;color:var(--ink-faint);font-style:italic;margin-top:2px;}
   .tier-hint{font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--ink-faint);font-style:italic;margin-left:auto;}
   .tier-toggle{
     font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:var(--brass);background:none;border:none;cursor:pointer;
@@ -807,6 +831,30 @@ function sortResults(rows){
 }
 document.getElementById('sortSelect').addEventListener('change', renderResults);
 
+// Human labels + one-cell driving-pathway readout for the Tier column
+// added 2026-07-06. Each parcel's tier is the primary sort/decision
+// signal; the drivers below tell the user WHY it landed there.
+function tierLabelText(t){
+  return {
+    confirmed_qualifying: 'Confirmed',
+    strong_candidate: 'Strong',
+    watch_list: 'Watch',
+    unlikely: 'Unlikely',
+    excluded: 'Excluded',
+  }[t] || t || 'Unlikely';
+}
+function tierCellHtml(r){
+  const legacyMap = {confident: 'confirmed_qualifying', possible: 'strong_candidate', watch: 'watch_list'};
+  const t = r.tier || legacyMap[r.confidence_tier] || r.confidence_tier || 'unlikely';
+  const drivers = (r.driving_pathways || []).slice(0, 2);
+  const extra = (r.driving_pathways || []).length - drivers.length;
+  const driverText = drivers.length
+    ? drivers.map(d => `<div class="driver-line">${d}</div>`).join('')
+      + (extra > 0 ? `<div class="driver-more">+${extra} more</div>` : '')
+    : '<div class="driver-line empty-note">No pathway drivers</div>';
+  return `<span class="master-tier-pill tier-${t}">${tierLabelText(t)}</span>${driverText}`;
+}
+
 function buildRowHtml(r){
   const owner = [r.owner_name, r.owner_name_2].filter(Boolean).join(' / ') || '—';
   const key = rowKey(r);
@@ -816,8 +864,8 @@ function buildRowHtml(r){
     <td>${r.county_id}</td>
     <td class="num">${r.acreage!=null ? r.acreage.toFixed(0) : '—'}</td>
     <td class="owner" title="${owner}">${owner}</td>
+    <td class="tier-cell">${tierCellHtml(r)}</td>
     <td class="mono">${r.flum_character || '—'}</td>
-    <td><span class="density-pill">${(r.surrounding_density||'unknown').toUpperCase()}</span></td>
     <td><span class="pathway-pill">${pathwayLabel(r.likely_pathways)}</span></td>
     <td class="num"><span class="${scoreClass(r.attractiveness_score)}">${r.attractiveness_score!=null ? r.attractiveness_score : '—'} /100</span></td>
   `;
@@ -834,11 +882,26 @@ function renderResults(){
   }
 
   const sorted = sortResults(results);
-  const tiers = { confident: [], possible: [], watch: [], unlikely: [] };
-  sorted.forEach(r => (tiers[r.confidence_tier] || tiers.unlikely).push(r));
+  // Master tier grouping (2026-07-06 pass). `tier` is the new primary
+  // signal from assign_master_tier server-side. Fall back to the legacy
+  // `confidence_tier` for any older rows that predate the migration.
+  const tiers = {
+    confirmed_qualifying: [], strong_candidate: [], watch_list: [],
+    unlikely: [], excluded: [],
+  };
+  const legacyMap = {confident: 'confirmed_qualifying', possible: 'strong_candidate', watch: 'watch_list'};
+  sorted.forEach(r => {
+    const t = r.tier || legacyMap[r.confidence_tier] || r.confidence_tier || 'unlikely';
+    (tiers[t] || tiers.unlikely).push(r);
+  });
 
   const countyNames = [...new Set(results.map(r => r.county_id))].join(', ');
-  summary.innerHTML = `<strong>${tiers.confident.length}</strong> confident · <strong>${tiers.possible.length}</strong> possible · <strong>${tiers.watch.length}</strong> watch list · <strong>${tiers.unlikely.length}</strong> unlikely (hidden) in ${countyNames}`;
+  summary.innerHTML =
+    `<strong>${tiers.confirmed_qualifying.length}</strong> confirmed qualifying · ` +
+    `<strong>${tiers.strong_candidate.length}</strong> strong · ` +
+    `<strong>${tiers.watch_list.length}</strong> watch list · ` +
+    `<strong>${tiers.unlikely.length}</strong> unlikely (hidden) · ` +
+    `<strong>${tiers.excluded.length}</strong> excluded in ${countyNames}`;
 
   const headerRow = `
     <tr>
@@ -847,8 +910,8 @@ function renderResults(){
       <th data-key="county_id">County</th>
       <th data-key="acreage" class="num">Acres</th>
       <th>Owner</th>
+      <th data-key="tier">Tier &amp; drivers</th>
       <th>FLUM</th>
-      <th>Density</th>
       <th>Pathway</th>
       <th class="num">Score</th>
     </tr>`;
@@ -867,17 +930,27 @@ function renderResults(){
   }
 
   let html = '';
-  html += renderTier('confident', 'Confident — ready to move forward', 'Every automated signal checks out', tiers.confident);
-  html += renderTier('possible', 'Possible — conditions apply', 'A pathway matches, but see each parcel\'s detail view for what still needs to be true', tiers.possible);
-  html += renderTier('watch', 'Watch list — near miss, revisit later', 'No pathway matches YET, but qualifying perimeter is 30–74%. Worth revisiting as surrounding development changes.', tiers.watch);
+  html += renderTier('confirmed_qualifying', 'Confirmed qualifying', 'At least one pathway meets its statutory threshold AND no unresolved risk signal from the data.', tiers.confirmed_qualifying);
+  html += renderTier('strong_candidate', 'Strong candidate — with unresolved risk signal', 'A pathway meets threshold, but the data shows a specific at-risk finding (post-1/1/2025 sale, co-owner recorded). Verify before relying on it.', tiers.strong_candidate);
+  html += renderTier('watch_list', 'Watch list — near miss, revisit later', 'No pathway currently matches, but at least one pathway shows real potential (30–59%). Worth revisiting as surrounding development changes.', tiers.watch_list);
 
   if(tiers.unlikely.length > 0){
     if(unlikelyCollapsed){
       html += `<button class="tier-toggle" id="showUnlikelyBtn">Show ${tiers.unlikely.length} unlikely properties &darr;</button>`;
     } else {
       html += `<button class="tier-toggle" id="hideUnlikelyBtn">Hide unlikely properties &uarr;</button>`;
-      html += renderTier('unlikely', 'Unlikely', 'No pathway currently matches — hidden by default', tiers.unlikely);
+      html += renderTier('unlikely', 'Unlikely', 'Every implemented pathway scores low — no currently viable path.', tiers.unlikely);
     }
+  }
+
+  // EXCLUDED sits alone at the very bottom, visually separated from the
+  // ranked candidates above. Hard statutory exclusions (Wekiva, Everglades,
+  // ACSC, acreage cap exceeded even under the exception, unincorporated
+  // status failure) apply regardless of how high any raw pathway score
+  // looks -- these parcels must never be mixed in with real candidates.
+  if(tiers.excluded.length > 0){
+    html += `<div style="margin-top:36px;padding-top:20px;border-top:2px dashed var(--clay);"></div>`;
+    html += renderTier('excluded', 'Excluded — statutorily ineligible', 'Hard statutory exclusion hit (Wekiva Study Area, Everglades Protection Area, Area of Critical State Concern, incorporated-city overlap, or acreage cap exceeded even under the dense-urban exception). These are structurally ineligible regardless of any pathway percentage above.', tiers.excluded);
   }
 
   container.innerHTML = html;
@@ -1001,10 +1074,16 @@ function ownershipLine(r){
   return '<span class="empty-note">Unknown — this county has no co-owner field</span>';
 }
 function tierBadgeHtml(tier){
-  const labels = {confident: 'Confident', possible: 'Possible', watch: 'Watch list', unlikely: 'Unlikely'};
+  const labels = {
+    confident: 'Confident', possible: 'Possible', watch: 'Watch list', unlikely: 'Unlikely',
+    confirmed_qualifying: 'Confirmed qualifying', strong_candidate: 'Strong candidate',
+    watch_list: 'Watch list', excluded: 'Excluded',
+  };
   let style = '';
-  if(tier === 'confident') style = 'background:var(--brass-dim);color:var(--brass-800);';
-  else if(tier === 'watch') style = 'background:#FFEB9C;color:var(--brass-800);';
+  if(tier === 'confident' || tier === 'confirmed_qualifying') style = 'background:#C6EFCE;color:var(--brass-800);';
+  else if(tier === 'strong_candidate' || tier === 'possible') style = 'background:#EEE3C2;color:var(--brass-800);';
+  else if(tier === 'watch' || tier === 'watch_list') style = 'background:#FFEB9C;color:var(--brass-800);';
+  else if(tier === 'excluded') style = 'background:#FFC7CE;color:var(--clay);';
   return `<span class="tier-badge" style="${style}">${labels[tier] || tier}</span>`;
 }
 
@@ -1163,7 +1242,7 @@ function buildOverlayContent(r, key){
 
   return `
     <div class="overlay-title">${r.parcel_id || 'Unknown parcel'}</div>
-    <div class="overlay-sub">${r.county_id} &middot; ${r.acreage!=null ? r.acreage.toFixed(1)+' ac' : 'acreage unknown'} (${r.acreage_source || 'source unknown'}) &middot; ${tierBadgeHtml(r.confidence_tier)}</div>
+    <div class="overlay-sub">${r.county_id} &middot; ${r.acreage!=null ? r.acreage.toFixed(1)+' ac' : 'acreage unknown'} (${r.acreage_source || 'source unknown'}) &middot; ${tierBadgeHtml(r.tier || r.confidence_tier)}</div>
 
     <div class="overlay-section">
       <h4>Parcel</h4>
@@ -1771,6 +1850,8 @@ async function exportDiligenceTracker(){
         pct_perimeter_qualifying: r.pct_perimeter_qualifying,
         likely_pathways: r.likely_pathways || [],
         confidence_tier: r.confidence_tier,
+        tier: r.tier,
+        driving_pathways: r.driving_pathways || [],
         attractiveness_score: r.attractiveness_score,
         sold_since_2025: r.sold_since_2025,
         single_owner_signal: r.single_owner_signal,

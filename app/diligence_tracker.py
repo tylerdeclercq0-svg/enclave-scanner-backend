@@ -72,9 +72,15 @@ _CORE_COLUMNS = [
     ("acreage", "Acres", 8),
     ("owner_name", "Owner", 30),
     # ---- 2. PATHWAY & SCORING (decision-relevant, visible on load) ----
+    # Master tier is the PRIMARY signal (sorted first, color-coded); the
+    # driving-pathways cell explains WHY the parcel landed in that tier
+    # ("Option 1: 58% qualifying perimeter (needs 75%)"). Both added
+    # 2026-07-06 -- previously only confidence_tier lived here.
+    ("tier", "Tier (master)", 18),
+    ("driving_pathways_str", "Driving pathway(s)", 60),
     ("pct_perimeter_qualifying", "Qual. perimeter %", 12),
     ("pathways_str", "Pathways matched", 18),
-    ("confidence_tier", "Confidence tier", 14),
+    ("confidence_tier", "Confidence tier (legacy)", 16),
     ("attractiveness_score", "Score /100", 10),
     # ---- 3. PROPERTY / SITE data ----
     ("owner_name_2", "Co-owner", 24),
@@ -141,6 +147,26 @@ def build_diligence_tracker_xlsx(payload_rows: list[dict[str, Any]]) -> bytes:
     ws = wb.active
     ws.title = "Diligence Tracker"
 
+    # Sort by master tier (primary) then attractiveness score (secondary),
+    # matching the results-table ranking in the UI so the export tells
+    # the same decision story on paper.
+    _MASTER_TIER_ORDER = {
+        "confirmed_qualifying": 0,
+        "strong_candidate":     1,
+        "watch_list":           2,
+        "unlikely":             3,
+        "excluded":             4,
+        # Legacy fallbacks
+        "confident": 0, "possible": 1, "watch": 2,
+    }
+    payload_rows = sorted(payload_rows, key=lambda r: (
+        _MASTER_TIER_ORDER.get(
+            (r.get("tier") or r.get("confidence_tier") or "unlikely").lower(),
+            3,
+        ),
+        -(r.get("attractiveness_score") or 0),
+    ))
+
     checklist_labels = _normalize_checklist_columns(payload_rows)
 
     # ---- headers ----
@@ -160,14 +186,30 @@ def build_diligence_tracker_xlsx(payload_rows: list[dict[str, Any]]) -> bytes:
     ws.row_dimensions[1].height = 32
 
     # ---- data rows ----
-    # Fills for the confidence_tier cell so the primary result column
-    # is immediately readable at a glance. brass-dim for confident/possible,
-    # yellow for the new watch tier, gray for unlikely.
+    # Fills for the tier cell so the primary result column is
+    # immediately readable at a glance. Master-tier values (new) plus
+    # legacy confidence_tier values (kept for backward-compatibility
+    # with any pre-migration rows in the tracker).
     tier_fills = {
+        # Master tier (2026-07-06)
+        "confirmed_qualifying": PatternFill("solid", fgColor="C6EFCE"),  # green
+        "strong_candidate":     PatternFill("solid", fgColor="EEE3C2"),  # brass-dim
+        "watch_list":           PatternFill("solid", fgColor="FFEB9C"),  # yellow
+        "excluded":             PatternFill("solid", fgColor="FFC7CE"),  # red
+        # Legacy + neutral
         "confident": PatternFill("solid", fgColor="C6EFCE"),
         "possible":  PatternFill("solid", fgColor="EEE3C2"),
         "watch":     PatternFill("solid", fgColor="FFEB9C"),
         "unlikely":  PatternFill("solid", fgColor="D9D9D9"),
+    }
+    # Tier-display labels for the "Tier (master)" column (raw enum
+    # values would look terrible in a spreadsheet for an analyst).
+    tier_display = {
+        "confirmed_qualifying": "Confirmed qualifying",
+        "strong_candidate":     "Strong candidate",
+        "watch_list":           "Watch list",
+        "unlikely":             "Unlikely",
+        "excluded":             "Excluded",
     }
 
     for row_idx, row in enumerate(payload_rows, start=2):
@@ -178,6 +220,8 @@ def build_diligence_tracker_xlsx(payload_rows: list[dict[str, Any]]) -> bytes:
             "acreage": row.get("acreage"),
             "owner_name": row.get("owner_name"),
             # 2. Pathway & scoring
+            "tier": tier_display.get(row.get("tier") or "", (row.get("tier") or "").replace("_", " ").capitalize() or "-"),
+            "driving_pathways_str": "\n".join(row.get("driving_pathways") or []) or "(none)",
             "pct_perimeter_qualifying": row.get("pct_perimeter_qualifying"),
             "pathways_str": ", ".join(f"Option {p}" for p in (row.get("likely_pathways") or [])) or "(none)",
             "confidence_tier": (row.get("confidence_tier") or "").capitalize() or "-",
@@ -210,13 +254,22 @@ def build_diligence_tracker_xlsx(payload_rows: list[dict[str, Any]]) -> bytes:
         }
         for col_idx, (key, _, _) in enumerate(_CORE_COLUMNS, start=1):
             cell = ws.cell(row=row_idx, column=col_idx, value=core_values.get(key))
-            # Color-fill the confidence_tier cell to mirror the in-app tier
+            # Color-fill the master tier cell to mirror the in-app tier
             # badges, so the tracker matches the UI at a glance.
-            if key == "confidence_tier":
-                tier_key = (row.get("confidence_tier") or "").lower()
+            if key == "tier":
+                tier_key = (row.get("tier") or "").lower()
                 if tier_key in tier_fills:
                     cell.fill = tier_fills[tier_key]
                     cell.font = _STATUS_FONT
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+            elif key == "driving_pathways_str":
+                # Wrap the multiline driver detail so all drivers stay
+                # visible in the cell without cutting off.
+                cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+            elif key == "confidence_tier":
+                tier_key = (row.get("confidence_tier") or "").lower()
+                if tier_key in tier_fills:
+                    cell.fill = tier_fills[tier_key]
 
         # Index this row's checklist by label so we can look up per column.
         checklist_by_label = {

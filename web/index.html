@@ -2294,24 +2294,28 @@ document.getElementById('exportChecklistBtn').addEventListener('click', () => {
 // re-derives status logic; the export always matches what the parcel
 // detail overlay showed.
 // ---------------------------------------------------------------------
-async function exportDiligenceTracker(){
+async function exportDiligenceTracker(parcels){
+  // Caller passes the already-filtered parcels array (e.g. the current
+  // Step-3 selection, or -- once the Master DB list view lands per
+  // roadmap item 4 -- whatever is checked there). This function no
+  // longer reaches into `results`/`selectedParcels` itself, so it can
+  // be reused across contexts without duplicating export logic.
   const btn = document.getElementById('exportDiligenceBtn');
   const helpEl = document.getElementById('diligenceHelp');
-  const selected = results.filter(r => selectedParcels.has(rowKey(r)));
-  if(selected.length === 0){
+  if(!parcels || parcels.length === 0){
     helpEl.style.color = 'var(--clay)';
     helpEl.innerHTML = '<strong>Select at least one parcel in Step 3</strong> before running this export — the diligence tracker deliberately requires an explicit selection, unlike the CSV / manual-review-checklist exports which fall back to the full result set.';
     return;
   }
   helpEl.style.color = '';
-  helpEl.textContent = `Building diligence tracker for ${selected.length} selected parcel${selected.length===1?'':'s'}...`;
+  helpEl.textContent = `Building diligence tracker for ${parcels.length} selected parcel${parcels.length===1?'':'s'}...`;
   btn.disabled = true;
   try{
     // Send every raw field the backend workbook uses, plus the
     // pre-computed verification checklist. Merged export (single
     // canonical .xlsx) as of 2026-07-06 -- no separate CSV.
     const payload = {
-      rows: selected.map(r => ({
+      rows: parcels.map(r => ({
         parcel_id: r.parcel_id,
         county_id: r.county_id,
         acreage: r.acreage,
@@ -2356,7 +2360,7 @@ async function exportDiligenceTracker(){
     // to a client-computed one so the download still saves with a sensible name.
     const cd = res.headers.get('Content-Disposition') || '';
     const m = cd.match(/filename="([^"]+)"/);
-    const counties = [...new Set(selected.map(r => r.county_id))].sort().join('_');
+    const counties = [...new Set(parcels.map(r => r.county_id))].sort().join('_');
     const filename = m ? m[1] : `enclave_candidates_${counties}_${new Date().toISOString().slice(0,10)}.xlsx`;
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
@@ -2364,7 +2368,7 @@ async function exportDiligenceTracker(){
     a.href = url; a.download = filename; a.click();
     URL.revokeObjectURL(url);
     helpEl.style.color = '';
-    helpEl.innerHTML = `Downloaded <strong>${filename}</strong> (${selected.length} parcel${selected.length===1?'':'s'}).`;
+    helpEl.innerHTML = `Downloaded <strong>${filename}</strong> (${parcels.length} parcel${parcels.length===1?'':'s'}).`;
   }catch(err){
     helpEl.style.color = 'var(--clay)';
     helpEl.textContent = 'Diligence tracker export failed: ' + err.message;
@@ -2372,7 +2376,12 @@ async function exportDiligenceTracker(){
     btn.disabled = false;
   }
 }
-document.getElementById('exportDiligenceBtn').addEventListener('click', exportDiligenceTracker);
+// Current-scan export: caller-side filter to whatever's checked in Step 3.
+// A future Master DB list view (roadmap item 4) will attach a separate
+// listener that passes its own selection instead.
+document.getElementById('exportDiligenceBtn').addEventListener('click', () => {
+  exportDiligenceTracker(results.filter(r => selectedParcels.has(rowKey(r))));
+});
 
 // ---------------------------------------------------------------------
 // Leaflet map views (2026-07-06)

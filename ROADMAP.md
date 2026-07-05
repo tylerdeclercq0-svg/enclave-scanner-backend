@@ -21,17 +21,16 @@ the index/checklist, not the full spec.
   regardless of what the caller sends. Set `DEBUG_API_KEY` on Render the
   same way `CENSUS_API_KEY` is set before the next deploy.
 
-- [ ] **2. EXPORT REFACTOR -- generalize `exportDiligenceTracker`**
-  The function at `web/index.html:2297` is hardcoded to
-  `results.filter(r => selectedParcels.has(rowKey(r)))` -- it only reads
-  the current-scan `results` array. Needs to be refactored to accept an
-  arbitrary parcels array (and its own selection set) so both the
-  current-scan export and the future Master DB list-view export call one
-  shared function instead of duplicating the payload-building + POST +
-  download logic. This is a **blocking dependency for item 4** (the list
-  view's checkbox-selection export). **Status: not started.** Full
-  detailed instructions will be provided in a separate prompt when this
-  item is actively being worked.
+- [x] **2. EXPORT REFACTOR -- generalize `exportDiligenceTracker`** *(done 2026-07-06)*
+  `exportDiligenceTracker(parcels)` in `web/index.html` now takes the
+  parcels array as a parameter -- the internal
+  `results.filter(r => selectedParcels.has(rowKey(r)))` was moved to the
+  current-scan button's click handler. Verified via a preview_eval-driven
+  fetch-intercept that the POST payload is identical to pre-refactor: all
+  26 row keys, values passthrough, row order preserved; empty-array and
+  `null` inputs both correctly early-return with no fetch fired. Future
+  Master DB list view (item 6) can attach its own listener that passes
+  whatever's checked there.
 
 - [ ] **3. FOUNDATION REWORK, PART 1 -- Master DB list becomes the primary landing view**
   Restructure so the master database LIST is what the user lands on when

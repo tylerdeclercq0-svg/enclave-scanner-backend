@@ -454,7 +454,12 @@
       </div>
       <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap;">
         <button class="btn-primary" id="runBtn">Advance coverage (next ZIP section)</button>
+        <button class="btn-primary" id="scanEntireBtn" title="Loop through every remaining ZIP section for this county automatically, using the same per-parcel ledger and batch logic. Runs as a background job -- close this tab and come back, your progress is preserved.">Scan entire county</button>
+        <button class="export" id="cancelJobBtn" style="display:none;background:var(--clay);color:#fff;border-color:var(--clay);">Stop background scan</button>
         <button class="export" id="resetCoverageBtn" title="Wipe this county's coverage ledger (start fresh).">Reset coverage</button>
+      </div>
+      <div id="jobStatusBar" style="display:none;margin-top:12px;padding:10px 14px;border:1px solid var(--line-strong);border-radius:3px;background:var(--brass-dim);font-family:'IBM Plex Mono',monospace;font-size:12.5px;">
+        <span id="jobStatusText"></span>
       </div>
       <div class="status" id="status"></div>
       <div class="bar-outer"><div class="bar-inner" id="progressBar"></div></div>
@@ -666,7 +671,10 @@ function renderCounties(){
           // Reset per-scan state when the county changes.
           results = []; selectedParcels.clear(); renderResults();
           const base = getApiBase();
-          if(base) refreshCoveragePanel(base, c.id);
+          if(base){
+            refreshCoveragePanel(base, c.id);
+            checkExistingJob(base, c.id);
+          }
         }
         showStep(currentStep); // refresh Continue-button enabled state
       });
@@ -701,8 +709,10 @@ async function loadCounties(){
     selectedCounties.clear();
     if(firstLive !== null){
       selectedCounties.add(firstLive);
-      // Prime the coverage panel for the auto-selected county on load.
+      // Prime the coverage panel + resume any in-flight background job
+      // for the auto-selected county on load.
       refreshCoveragePanel(base, firstLive);
+      checkExistingJob(base, firstLive);
     }
     renderCounties();
     const liveCount = counties.filter(c => c.live).length;
@@ -862,6 +872,146 @@ document.getElementById('resetCoverageBtn').addEventListener('click', async () =
     await refreshCoveragePanel(base, activeCounties[0].id);
   }catch(err){ setStatus('Reset failed: ' + err.message, true); }
 });
+
+// ---------------------------------------------------------------------
+// Full-county background scan (2026-07-06): daemon-thread job on the
+// backend, poll-driven progress in the UI. Poll every 5 s while a job
+// is running; on tab reopen, resume polling automatically.
+// ---------------------------------------------------------------------
+let _jobPollTimer = null;
+let _jobPollCountyId = null;
+
+function _pillLabel(status){
+  return {
+    queued: 'queued', running: 'running', complete: 'complete',
+    error: 'error', cancelled: 'cancelled', interrupted: 'interrupted',
+  }[status] || status;
+}
+
+function _renderJobStatus(job){
+  const bar = document.getElementById('jobStatusBar');
+  const cancelBtn = document.getElementById('cancelJobBtn');
+  const startBtn = document.getElementById('scanEntireBtn');
+  if(!job){
+    bar.style.display = 'none';
+    cancelBtn.style.display = 'none';
+    startBtn.disabled = false;
+    startBtn.textContent = 'Scan entire county';
+    return;
+  }
+  bar.style.display = 'block';
+  const isRunning = (job.status === 'running' || job.status === 'queued');
+  cancelBtn.style.display = isRunning ? 'inline-block' : 'none';
+  startBtn.disabled = isRunning;
+  if(job.status === 'interrupted'){
+    startBtn.textContent = 'Resume scan';
+    startBtn.disabled = false;
+  } else if(job.status === 'error'){
+    startBtn.textContent = 'Retry / resume scan';
+    startBtn.disabled = false;
+  } else {
+    startBtn.textContent = 'Scan entire county';
+  }
+
+  // Tint the bar per status
+  const tint = {
+    queued: 'var(--brass-dim)', running: 'var(--brass-dim)',
+    complete: '#C6EFCE', error: 'var(--clay-dim)',
+    cancelled: 'var(--line)', interrupted: 'var(--clay-dim)',
+  }[job.status] || 'var(--brass-dim)';
+  bar.style.background = tint;
+
+  const text = document.getElementById('jobStatusText');
+  let msg = `<strong>${_pillLabel(job.status).toUpperCase()}</strong>`;
+  if(job.current_zcta) msg += ` &middot; current ZCTA <strong>${job.current_zcta}</strong>`;
+  msg += ` &middot; ${job.batches_this_run} batch${job.batches_this_run===1?'':'es'} this run`;
+  msg += ` &middot; ${job.processed_this_run} parcels processed this run`;
+  if(job.error) msg += `<div style="margin-top:6px;color:var(--clay);font-size:11.5px;line-height:1.4;">${job.error}</div>`;
+  text.innerHTML = msg;
+}
+
+async function _pollJobOnce(base, countyId){
+  try{
+    const [jobRes, coverageOk] = await Promise.all([
+      fetch(`${base}/api/coverage/${countyId}/job-status`),
+      refreshCoveragePanel(base, countyId),
+    ]);
+    if(!jobRes.ok) throw new Error(`HTTP ${jobRes.status}`);
+    const {job} = await jobRes.json();
+    _renderJobStatus(job);
+    return job;
+  }catch(err){
+    _renderJobStatus({status: 'error', error: 'Could not reach backend: ' + err.message,
+                      batches_this_run: 0, processed_this_run: 0});
+    return null;
+  }
+}
+
+function _startPolling(base, countyId){
+  if(_jobPollTimer){ clearInterval(_jobPollTimer); }
+  _jobPollCountyId = countyId;
+  _pollJobOnce(base, countyId);
+  _jobPollTimer = setInterval(async () => {
+    const job = await _pollJobOnce(base, countyId);
+    if(!job || !(job.status === 'running' || job.status === 'queued')){
+      clearInterval(_jobPollTimer); _jobPollTimer = null;
+    }
+  }, 5000);
+}
+
+document.getElementById('scanEntireBtn').addEventListener('click', async () => {
+  const base = getApiBase();
+  const activeCounties = counties.filter(c => selectedCounties.has(c.id));
+  if(activeCounties.length !== 1){ setStatus('Pick exactly one county in Step 1.', true); return; }
+  const county = activeCounties[0];
+
+  const payload = {
+    max_parcels_per_run: parseInt(document.getElementById('maxCandidates').value) || 25,
+    min_acreage: parseFloat(document.getElementById('minAcres').value) || 0,
+    max_acreage: parseFloat(document.getElementById('maxAcres').value) || 4480,
+    require_single_owner: document.getElementById('ownershipFilter').value === 'single',
+    min_encirclement_pct: document.getElementById('minEncirclementFilter').value
+      ? parseFloat(document.getElementById('minEncirclementFilter').value) : null,
+    surrounding_density_filter: document.getElementById('densityFilter').value || null,
+  };
+  try{
+    const res = await fetch(`${base}/api/coverage/${county.id}/scan-entire-county`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+    });
+    if(!res.ok){
+      const text = await res.text();
+      throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+    }
+    setStatus(`Started full-county background scan for ${county.name}. Progress updates below.`);
+    _startPolling(base, county.id);
+  }catch(err){ setStatus('Failed to start job: ' + err.message, true); }
+});
+
+document.getElementById('cancelJobBtn').addEventListener('click', async () => {
+  const base = getApiBase();
+  const countyId = _jobPollCountyId;
+  if(!countyId) return;
+  if(!confirm('Stop the background scan? The ledger keeps whatever progress made it to disk; you can restart later.')) return;
+  try{
+    const res = await fetch(`${base}/api/coverage/${countyId}/job-cancel`, {method: 'POST'});
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    await _pollJobOnce(base, countyId);
+  }catch(err){ setStatus('Cancel failed: ' + err.message, true); }
+});
+
+// On page load / after a county switch, check whether a job is already
+// running for the selected county and resume polling if so. Called
+// from loadCounties + the county-pick handler.
+async function checkExistingJob(base, countyId){
+  const job = await _pollJobOnce(base, countyId);
+  if(job && (job.status === 'running' || job.status === 'queued')){
+    _startPolling(base, countyId);
+  } else if(_jobPollTimer){
+    clearInterval(_jobPollTimer); _jobPollTimer = null;
+  }
+}
 
 // ---------------------------------------------------------------------
 // Step 3 — review candidates (tiered)

@@ -41,7 +41,16 @@ import ring_demographics  # noqa: E402
 import diligence_tracker  # noqa: E402
 import coverage_ledger  # noqa: E402
 import zcta_client  # noqa: E402
+import background_jobs  # noqa: E402
 from fastapi.responses import Response  # noqa: E402
+from dataclasses import asdict  # noqa: E402
+
+
+# At startup, flip any job whose process died mid-run from "running"
+# -> "interrupted" so the frontend can offer a resume rather than
+# showing stale progress. Safe to call every restart; a no-op when
+# no interrupted jobs exist.
+background_jobs.mark_interrupted_at_startup()
 
 
 app = FastAPI(
@@ -603,3 +612,58 @@ def coverage_reset(county_id: str):
         raise HTTPException(status_code=404, detail=f"Unknown county: {county_id}")
     coverage_ledger.reset_county(county_id)
     return {"county_id": county_id, "reset": True}
+
+
+# =====================================================================
+# Full-county background scan (added 2026-07-06). Daemon-thread job
+# runner, JSON-backed state, polling-driven progress in the UI. See
+# app/background_jobs.py for the architecture write-up.
+# =====================================================================
+
+class FullCountyScanPayload(BaseModel):
+    """Same scan filters as the manual /advance endpoint; the runner
+    threads them through each per-ZCTA batch."""
+    max_parcels_per_run: int = 25
+    min_acreage: float = 20.0
+    max_acreage: float = 4480.0
+    require_single_owner: bool = False
+    min_encirclement_pct: Optional[float] = None
+    flum_character_filter: Optional[str] = None
+    surrounding_density_filter: Optional[str] = None
+
+
+@app.post("/api/coverage/{county_id}/scan-entire-county")
+def scan_entire_county(county_id: str, payload: FullCountyScanPayload):
+    """
+    Kick off (or return the already-running) full-county scan job.
+    Idempotent: a second POST with a job in flight returns that job's
+    current state instead of spawning a duplicate.
+    """
+    if county_id not in COUNTIES:
+        raise HTTPException(status_code=404, detail=f"Unknown county: {county_id}")
+    county_entry = COUNTIES[county_id]
+    if county_entry.population is not None and county_entry.population > POPULATION_CAP:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{county_entry.name} County exceeds the {POPULATION_CAP:,} population cap.",
+        )
+    state = background_jobs.start_full_county_job(county_id, payload.model_dump())
+    return asdict(state)
+
+
+@app.get("/api/coverage/{county_id}/job-status")
+def coverage_job_status(county_id: str):
+    """Return the current background-job state for this county, or None."""
+    if county_id not in COUNTIES:
+        raise HTTPException(status_code=404, detail=f"Unknown county: {county_id}")
+    state = background_jobs.get_state(county_id)
+    return {"county_id": county_id, "job": asdict(state) if state else None}
+
+
+@app.post("/api/coverage/{county_id}/job-cancel")
+def coverage_job_cancel(county_id: str):
+    """Signal the background job to stop between batches (safe cancel)."""
+    if county_id not in COUNTIES:
+        raise HTTPException(status_code=404, detail=f"Unknown county: {county_id}")
+    state = background_jobs.cancel_job(county_id)
+    return {"county_id": county_id, "job": asdict(state) if state else None}

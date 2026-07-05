@@ -67,18 +67,22 @@ the index/checklist, not the full spec.
   **Status: not started.** Full detailed instructions will be provided in
   a separate prompt when this item is actively being worked.
 
-- [ ] **6. FOUNDATION REWORK, PART 4 -- the actual list view**
-  Sortable / filterable table view of every parcel ever scanned (same
-  data source as the existing Master DB map view at
-  `web/index.html:460`). Default sort: tier, then metro-pull score
-  (item 5) within tier. Also sortable and groupable by nearest-metro
-  name specifically, so the user can pivot into "everything near
-  Tampa" / "everything near Orlando." Checkbox selection reusing
-  item 2's refactored export function. Layout: Map / List toggle
-  inside the existing Master DB overlay (same pattern as Step 3's
-  existing List/Map toggle). **Blocked on items 2, 4, and 5.**
-  **Status: not started.** Full detailed instructions will be provided
-  in a separate prompt when this item is actively being worked.
+- [~] **6. FOUNDATION REWORK, PART 4 -- the actual list view** *(core version done 2026-07-06; metro extension deferred to item 5)*
+  Core list view lives in the Master DB overlay alongside the existing
+  map, with a Map / List toggle at the top and shared `_dbAllParcels`
+  data source. Columns: tier, score, driving pathway(s), county,
+  parcel_id, acres, owner, ZIP, last scanned. Default sort tier asc +
+  score desc, all headers click-to-sort. County + tier filter dropdowns.
+  Per-row + select-all checkboxes with independent selection state
+  (`_dbSelectedKeys`); "Export selected (.xlsx)" reuses
+  `exportDiligenceTracker(parcels)` from item 2 without duplicating
+  logic. Column and filter definitions live in `DB_LIST_COLUMNS` /
+  `DB_LIST_FILTERS` arrays -- adding metro-proximity columns
+  (name / distance / population / income) when item 5 lands is one
+  array push per column, not a rewrite. **Remaining under this item:**
+  metro-proximity columns + metro-based sort/filter options, blocked on
+  item 5. Excluded-tier hiding by default is item 4 (next up), not
+  this item.
 
 - [ ] **7. SCALE-UP, PHASE 1 -- statewide reconnaissance across 65 eligible counties**
   Cheap reconnaissance pass across all 65 statute-eligible FL counties

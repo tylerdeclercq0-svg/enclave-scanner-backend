@@ -286,6 +286,19 @@
   #dbMapPanel{padding:0;height:calc(100vh - 100px);display:flex;flex-direction:column;overflow:hidden;}
   #dbMapPanel .overlay-close{z-index:5;background:var(--paper-raised);border:1px solid var(--line-strong);}
   #dbMap{flex:1 1 auto;}
+  /* Master DB list-view specifics. Sort indicators are subtle glyphs on the
+     active sort column; column defs live in DB_LIST_COLUMNS (JS) so adding
+     metro-proximity columns later is one array push, not a table rewrite. */
+  #dbListContainer table{width:100%;border-collapse:collapse;font-size:13px;background:var(--paper-raised);}
+  #dbListContainer thead th{position:sticky;top:0;background:var(--paper-raised);z-index:1;}
+  #dbListContainer thead th .sort-indicator{margin-left:6px;color:var(--brass);font-family:'IBM Plex Mono',monospace;}
+  #dbListContainer tbody tr{cursor:default;}
+  #dbListContainer tbody tr:hover{background:var(--brass-dim);}
+  #dbListContainer .db-list-summary{
+    font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--ink-faint);
+    padding:14px 0 10px;border-bottom:1px solid var(--line);
+  }
+  #dbListContainer .master-tier-pill{font-size:10.5px;padding:2px 7px;}
   .overlay-close{
     position:absolute;top:16px;right:16px;background:none;border:none;
     font-size:22px;line-height:1;color:var(--ink-faint);cursor:pointer;padding:4px 8px;
@@ -613,15 +626,26 @@
     </div>
   </div>
 
-  <!-- MASTER DB MAP (top-level overlay reached from the masthead) -->
+  <!-- MASTER DB (top-level overlay reached from the masthead).
+       One overlay hosts both the Map view and the List view -- they share
+       the same underlying _dbAllParcels data. Toggle sits at the top; the
+       inactive subview's controls are hidden so the header stays clean. -->
   <div class="overlay-backdrop" id="dbMapBackdrop">
     <div class="overlay-panel" id="dbMapPanel" style="max-width:1400px;">
       <button class="overlay-close" id="dbMapClose" aria-label="Close">&times;</button>
       <div style="padding:18px 22px 12px;">
-        <div class="overlay-title">Master property database — map view</div>
-        <div class="overlay-sub">Every parcel scanned across every county, over every run. Click a parcel for quick-hit facts; click through to the full detail overlay from there.</div>
+        <div class="overlay-title">Master property database</div>
+        <div class="overlay-sub">Every parcel scanned across every county, over every run. Switch between the map (spatial overview) and the list (sortable, filterable, exportable).</div>
         <div id="dbMapControls" style="display:flex;gap:14px;margin:14px 0;flex-wrap:wrap;align-items:center;">
-          <div class="field" style="min-width:220px;">
+          <div class="field">
+            <label>View</label>
+            <div class="view-toggle">
+              <button class="active" data-dbview="map" id="dbViewMapBtn">Map</button>
+              <button data-dbview="list" id="dbViewListBtn">List</button>
+            </div>
+          </div>
+          <!-- Map-only controls -->
+          <div class="field db-map-only" style="min-width:220px;">
             <label>Color by</label>
             <select id="dbColorBy" class="mono">
               <option value="tier">Qualification tier</option>
@@ -630,17 +654,36 @@
               <option value="coverage">ZIP coverage status</option>
             </select>
           </div>
-          <div class="field">
+          <div class="field db-map-only">
             <label>Basemap</label>
             <div class="view-toggle">
               <button class="active" data-basemap="satellite" id="dbBasemapSat">Satellite</button>
               <button data-basemap="street" id="dbBasemapStreet">Street</button>
             </div>
           </div>
+          <!-- List-only controls: county + tier filters. Populated at render time
+               from the actual loaded data so we don't hardcode a county list. -->
+          <div class="field db-list-only" style="min-width:180px;display:none;">
+            <label>County</label>
+            <select id="dbListFilterCounty" class="mono"><option value="">All counties</option></select>
+          </div>
+          <div class="field db-list-only" style="min-width:180px;display:none;">
+            <label>Tier</label>
+            <select id="dbListFilterTier" class="mono">
+              <option value="">All tiers</option>
+              <option value="confirmed_qualifying">Confirmed qualifying</option>
+              <option value="strong_candidate">Strong candidate</option>
+              <option value="watch_list">Watch list</option>
+              <option value="unlikely">Unlikely</option>
+              <option value="excluded">Excluded</option>
+            </select>
+          </div>
+          <button class="db-list-only" id="dbListExportBtn" style="display:none;padding:6px 12px;font-family:'IBM Plex Mono',monospace;font-size:12px;background:var(--ink);color:var(--paper);border:none;border-radius:3px;cursor:pointer;">Export selected (.xlsx)</button>
           <div id="dbMapMeta" class="empty-note" style="margin-left:auto;font-size:12px;"></div>
         </div>
       </div>
       <div id="dbMap" style="height:calc(100% - 180px);min-height:520px;border-top:1px solid var(--line);"></div>
+      <div id="dbListContainer" style="display:none;flex:1 1 auto;overflow:auto;border-top:1px solid var(--line);padding:0 22px 22px;"></div>
     </div>
   </div>
 
@@ -2654,6 +2697,239 @@ document.getElementById('dbMapClose').addEventListener('click', () => {
 });
 document.getElementById('dbMapBackdrop').addEventListener('click', (e) => {
   if(e.target.id === 'dbMapBackdrop') document.getElementById('dbMapBackdrop').classList.remove('open');
+});
+
+// ---------------------------------------------------------------------
+// Master DB LIST view -- companion to the map view above. Same
+// _dbAllParcels source; independent selection set + sort/filter state.
+//
+// Extensibility: DB_LIST_COLUMNS is the single source of truth for what
+// columns exist, in what order. Adding metro-proximity columns later
+// (roadmap Part 3 lands them: metro_name, metro_distance_mi,
+// metro_population, metro_income) is one array push each -- header,
+// cell HTML, sort accessor, and filter dropdowns all read from these
+// defs. Do not hardcode column count/order anywhere else. Same rule
+// for DB_LIST_FILTERS.
+// ---------------------------------------------------------------------
+const _DB_TIER_ORDER = {
+  confirmed_qualifying: 0, strong_candidate: 1, watch_list: 2, unlikely: 3, excluded: 4,
+};
+function _dbTier(r){
+  const legacy = {confident: 'confirmed_qualifying', possible: 'strong_candidate', watch: 'watch_list'};
+  return r.tier || legacy[r.confidence_tier] || r.confidence_tier || 'unlikely';
+}
+function _dbLastScannedIso(r){ return r.last_scanned_at || r.first_scanned_at || null; }
+function _dbLastScannedShort(r){
+  const iso = _dbLastScannedIso(r);
+  return iso ? iso.slice(0, 10) : '—';
+}
+function _dbPathwayText(r){
+  const arr = r.driving_pathways && r.driving_pathways.length ? r.driving_pathways
+             : (r.likely_pathways || []).map(p => `#${p}`);
+  return arr.length ? arr.slice(0, 2).join(', ') + (arr.length > 2 ? ` +${arr.length - 2}` : '') : '—';
+}
+
+const DB_LIST_COLUMNS = [
+  { key: 'tier', label: 'Tier', align: 'left',
+    cellHtml: r => `<span class="master-tier-pill tier-${_dbTier(r)}">${tierLabelText(_dbTier(r))}</span>`,
+    sortValue: r => _DB_TIER_ORDER[_dbTier(r)] ?? 99 },
+  { key: 'attractiveness_score', label: 'Score', align: 'num',
+    cellHtml: r => r.attractiveness_score != null
+      ? `<span class="${scoreClass(r.attractiveness_score)}">${r.attractiveness_score}</span>` : '—',
+    sortValue: r => r.attractiveness_score ?? -1 },
+  { key: 'driving_pathways', label: 'Pathway', align: 'left',
+    cellHtml: r => `<span class="pathway-pill">${_dbPathwayText(r)}</span>`,
+    sortValue: r => (r.driving_pathways || r.likely_pathways || []).length },
+  { key: 'county_id', label: 'County', align: 'left',
+    cellHtml: r => r.county_id || '—',
+    sortValue: r => r.county_id || '' },
+  { key: 'parcel_id', label: 'Parcel ID', align: 'left', cls: 'mono',
+    cellHtml: r => `<span class="mono">${r.parcel_id || '—'}</span>`,
+    sortValue: r => r.parcel_id || '' },
+  { key: 'acreage', label: 'Acres', align: 'num',
+    cellHtml: r => r.acreage != null ? r.acreage.toFixed(0) : '—',
+    sortValue: r => r.acreage ?? -1 },
+  { key: 'owner_name', label: 'Owner', align: 'left', cls: 'owner',
+    cellHtml: r => {
+      const o = [r.owner_name, r.owner_name_2].filter(Boolean).join(' / ') || '—';
+      return `<span class="owner" title="${o.replace(/"/g,'&quot;')}">${o}</span>`;
+    },
+    sortValue: r => (r.owner_name || '') },
+  { key: 'zcta5', label: 'ZIP', align: 'left', cls: 'mono',
+    cellHtml: r => `<span class="mono">${r.zcta5 || '—'}</span>`,
+    sortValue: r => r.zcta5 || '' },
+  { key: 'last_scanned_at', label: 'Last scanned', align: 'left', cls: 'mono',
+    cellHtml: r => `<span class="mono">${_dbLastScannedShort(r)}</span>`,
+    sortValue: r => _dbLastScannedIso(r) || '' },
+];
+
+const DB_LIST_FILTERS = [
+  { key: 'county_id', elementId: 'dbListFilterCounty', accessor: r => r.county_id || '' },
+  { key: 'tier',      elementId: 'dbListFilterTier',   accessor: r => _dbTier(r) },
+];
+
+let _dbView = 'map';
+// Default sort: tier (asc = qualifying tiers first) then score (desc).
+// The second key is applied when the first key is tied, mirroring the
+// server-side ordering in /api/property-db/{county_id}/ranked.
+let _dbListSort = { key: 'tier', dir: 'asc', secondary: { key: 'attractiveness_score', dir: 'desc' } };
+const _dbSelectedKeys = new Set();
+
+function _dbListFilteredRows(){
+  return _dbAllParcels.filter(r => {
+    for(const f of DB_LIST_FILTERS){
+      const el = document.getElementById(f.elementId);
+      const val = el && el.value;
+      if(val && f.accessor(r) !== val) return false;
+    }
+    return true;
+  });
+}
+
+function _dbListSortedRows(rows){
+  const col = DB_LIST_COLUMNS.find(c => c.key === _dbListSort.key);
+  const sec = _dbListSort.secondary && DB_LIST_COLUMNS.find(c => c.key === _dbListSort.secondary.key);
+  const dir = _dbListSort.dir === 'desc' ? -1 : 1;
+  const secDir = _dbListSort.secondary && _dbListSort.secondary.dir === 'desc' ? -1 : 1;
+  const cmp = (a, b, c, d) => {
+    const va = c.sortValue(a), vb = c.sortValue(b);
+    if(typeof va === 'string' || typeof vb === 'string'){
+      return d * String(va).localeCompare(String(vb));
+    }
+    return d * ((va ?? 0) - (vb ?? 0));
+  };
+  return rows.slice().sort((a, b) => {
+    const primary = cmp(a, b, col, dir);
+    if(primary !== 0 || !sec) return primary;
+    return cmp(a, b, sec, secDir);
+  });
+}
+
+function _populateDbCountyFilter(){
+  const sel = document.getElementById('dbListFilterCounty');
+  const current = sel.value;
+  const counties = [...new Set(_dbAllParcels.map(r => r.county_id).filter(Boolean))].sort();
+  sel.innerHTML = '<option value="">All counties</option>'
+    + counties.map(c => `<option value="${c}">${c}</option>`).join('');
+  sel.value = current;
+}
+
+function _renderDbList(){
+  const container = document.getElementById('dbListContainer');
+  if(!_dbAllParcels.length){
+    container.innerHTML = '<div class="db-list-summary">No parcels in the master database yet. Run a scan to populate it.</div>';
+    return;
+  }
+  const filtered = _dbListFilteredRows();
+  const sorted = _dbListSortedRows(filtered);
+
+  const summary = `<div class="db-list-summary">`
+    + `Showing <strong>${sorted.length}</strong> of ${_dbAllParcels.length} parcels`
+    + ` &middot; ${_dbSelectedKeys.size} selected`
+    + ` &middot; sort: ${_dbListSort.key} ${_dbListSort.dir}`
+    + (_dbListSort.secondary ? `, then ${_dbListSort.secondary.key} ${_dbListSort.secondary.dir}` : '')
+    + `</div>`;
+
+  const headerCells = ['<th style="width:24px;"><input type="checkbox" id="dbListSelectAll"></th>']
+    .concat(DB_LIST_COLUMNS.map(c => {
+      const active = _dbListSort.key === c.key;
+      const ind = active ? `<span class="sort-indicator">${_dbListSort.dir === 'desc' ? '↓' : '↑'}</span>` : '';
+      const cls = c.align === 'num' ? 'num' : '';
+      return `<th class="${cls}" data-col="${c.key}">${c.label}${ind}</th>`;
+    }))
+    .join('');
+
+  const bodyRows = sorted.map(r => {
+    const key = rowKey(r);
+    const checked = _dbSelectedKeys.has(key) ? 'checked' : '';
+    const cells = DB_LIST_COLUMNS.map(c => {
+      const cls = c.align === 'num' ? 'num' : '';
+      return `<td class="${cls}">${c.cellHtml(r)}</td>`;
+    }).join('');
+    return `<tr data-key="${key}"><td><input type="checkbox" class="db-list-check" data-key="${key}" ${checked}></td>${cells}</tr>`;
+  }).join('');
+
+  container.innerHTML = summary
+    + `<div style="overflow-x:auto;"><table><thead><tr>${headerCells}</tr></thead><tbody>${bodyRows}</tbody></table></div>`;
+
+  // Header click -> re-sort (toggles direction if already active).
+  container.querySelectorAll('thead th[data-col]').forEach(th => {
+    th.addEventListener('click', () => {
+      const k = th.dataset.col;
+      if(_dbListSort.key === k){
+        _dbListSort.dir = _dbListSort.dir === 'asc' ? 'desc' : 'asc';
+      } else {
+        _dbListSort = { key: k, dir: k === 'tier' ? 'asc' : 'desc',
+                        secondary: k === 'tier' ? { key: 'attractiveness_score', dir: 'desc' } : null };
+      }
+      _renderDbList();
+    });
+  });
+
+  // Row-checkbox handlers.
+  container.querySelectorAll('input.db-list-check').forEach(cb => {
+    cb.addEventListener('change', () => {
+      if(cb.checked) _dbSelectedKeys.add(cb.dataset.key);
+      else _dbSelectedKeys.delete(cb.dataset.key);
+      _renderDbList();
+    });
+  });
+
+  // Select-all (visible-filtered-rows scope, not the entire DB).
+  const selectAll = document.getElementById('dbListSelectAll');
+  const allChecked = sorted.length && sorted.every(r => _dbSelectedKeys.has(rowKey(r)));
+  selectAll.checked = allChecked;
+  selectAll.addEventListener('change', () => {
+    if(selectAll.checked) sorted.forEach(r => _dbSelectedKeys.add(rowKey(r)));
+    else sorted.forEach(r => _dbSelectedKeys.delete(rowKey(r)));
+    _renderDbList();
+  });
+}
+
+function _setDbView(kind){
+  _dbView = kind;
+  document.querySelectorAll('#dbMapControls .view-toggle button[data-dbview]').forEach(b =>
+    b.classList.toggle('active', b.dataset.dbview === kind));
+  const mapEl = document.getElementById('dbMap');
+  const listEl = document.getElementById('dbListContainer');
+  const showList = kind === 'list';
+  mapEl.style.display = showList ? 'none' : '';
+  listEl.style.display = showList ? 'flex' : 'none';
+  listEl.style.flexDirection = 'column';
+  document.querySelectorAll('.db-map-only').forEach(el => { el.style.display = showList ? 'none' : ''; });
+  document.querySelectorAll('.db-list-only').forEach(el => {
+    el.style.display = showList ? (el.tagName === 'BUTTON' ? 'inline-block' : '') : 'none';
+  });
+  if(showList){
+    _populateDbCountyFilter();
+    _renderDbList();
+  } else {
+    setTimeout(() => _dbMap && _dbMap.invalidateSize(), 60);
+    _renderDbLayer();
+  }
+}
+
+document.getElementById('dbViewMapBtn').addEventListener('click', () => _setDbView('map'));
+document.getElementById('dbViewListBtn').addEventListener('click', () => _setDbView('list'));
+DB_LIST_FILTERS.forEach(f => {
+  const el = document.getElementById(f.elementId);
+  if(el) el.addEventListener('change', _renderDbList);
+});
+
+document.getElementById('dbListExportBtn').addEventListener('click', () => {
+  // Reuse the roadmap-item-2 refactored export function -- pass ONLY the
+  // selected+filtered rows. If nothing's checked, exportDiligenceTracker
+  // itself prompts the user via #diligenceHelp; but Step 4's help element
+  // isn't visible from the DB overlay, so give inline feedback too.
+  const filteredKeys = new Set(_dbListFilteredRows().map(rowKey));
+  const selectedRows = _dbAllParcels.filter(r =>
+    _dbSelectedKeys.has(rowKey(r)) && filteredKeys.has(rowKey(r))
+  );
+  if(selectedRows.length === 0){
+    alert('Select at least one row (checkbox column) before exporting.');
+    return;
+  }
+  exportDiligenceTracker(selectedRows);
 });
 
 // ---------------------------------------------------------------------

@@ -238,6 +238,17 @@ the index/checklist, not the full spec.
   `total_candidates=629` on a fresh advance confirms the fix runs
   server-side (old bug would have shown 1328).
 
+  **No pre-fix "complete" state anywhere to reset.** The only ledger
+  persistence surface is `data/coverage_ledger.json` on Render's
+  ephemeral Starter-tier filesystem. No git-tracked ledger files (`data/`
+  is fully `.gitignore`d), no external DB backend in `requirements.txt`,
+  no persistent-disk mount in Procfile. Render instance restarts (not
+  just redeploys) wipe the ledger -- confirmed live: the 4-complete
+  Nassau state I created during the fix verification was already gone
+  by the time I re-checked ~15 min later. So any ZCTA that had been
+  falsely marked complete under the OLD undercounting logic is
+  guaranteed already gone.
+
 - [ ] **12. POPULATE REAL DATA -- FULL SCANS ACROSS ALL ACTIVE COUNTIES**
   Once every other roadmap item is complete (including item 8's pipeline
   reordering, item 9's expansion to 30+ confirmed-live counties, and

@@ -249,7 +249,7 @@ the index/checklist, not the full spec.
   falsely marked complete under the OLD undercounting logic is
   guaranteed already gone.
 
-- [ ] **12. DURABLE PERSISTENCE FOR THE COVERAGE LEDGER + PROPERTY DATABASE**
+- [x] **12. DURABLE PERSISTENCE FOR THE COVERAGE LEDGER + PROPERTY DATABASE** *(done 2026-07-06)*
   Discovered during item 11 verification: the coverage ledger and
   property database persist only to `data/coverage_ledger.json` on
   Render's Starter-tier ephemeral filesystem, which gets wiped not
@@ -322,8 +322,25 @@ the index/checklist, not the full spec.
   starting with Postgres today would be premature scaling for a
   low-write internal tool.
 
-  **Status: awaiting Tyler's call on which option to implement.** Do
-  not proceed to item 13 until this is landed.
+  **Implemented via Option 1 (persistent disk + existing JSON):** Render
+  5 GB disk mounted at `/var/data`; `coverage_ledger.py` and
+  `background_jobs.py` both read `DATA_DIR` from the environment
+  (defaults to `<repo>/data` for local dev so nothing changes offline);
+  `/health` surfaces the resolved path so any mount misconfiguration
+  is obvious at a glance. Zero application-code change to ledger
+  logic itself -- the pre-existing atomic tmp-file + rename write
+  pattern and `threading.RLock` already handle single-process crash
+  safety.
+
+  **Live-verified end-to-end:** wrote 5 real Pasco parcels via
+  `POST /api/coverage/pasco/advance`, snapshotted the parcel IDs,
+  triggered a redeploy (commit `811ded0`) -- with a disk attached,
+  Render fully stops the old instance before starting the new one,
+  so this is a real instance transition, not a graceful reload --
+  waited for the new instance to come up, then re-fetched
+  `/api/property-db/all`. All 5 parcel IDs survived intact. Compare
+  to item 11's evidence where 4 complete Nassau ZCTAs vanished ~15
+  min later without even a redeploy.
 
 - [ ] **13. POPULATE REAL DATA -- FULL SCANS ACROSS ALL ACTIVE COUNTIES**
   Once every other roadmap item is complete (including item 8's pipeline

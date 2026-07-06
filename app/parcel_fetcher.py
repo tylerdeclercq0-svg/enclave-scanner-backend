@@ -206,6 +206,70 @@ def _osceola_is_agricultural(attrs: dict) -> bool:
     return code_int in valid_ints
 
 
+# Lee's DORCODE is a 2-character string (values '00' through '99', no
+# leading zero on the 3-digit statewide DOR_UC form). A 2-char range
+# '50'-'69' doesn't hit the same lexicographic false-positive trap that
+# 4-char codes have (Osceola/St. Johns) because there are no valid
+# 2-char codes with a leading zero that would fall between '50' and '69'
+# under string comparison. Live-verified 2026-07-06 via distinct-values
+# query + 5-row sample (real DORCODE values '60', '66', '69' all
+# returned parcels with LANDUSEDES 'MARKET VALUE AGRICULTURAL').
+def _lee_ag_where(county: CountyEndpoint) -> str:
+    lo, hi = county.parcel_agricultural_use_code_range
+    return f"{county.parcel_use_code_field}>='{lo}' AND {county.parcel_use_code_field}<='{hi}'"
+
+
+def _lee_is_agricultural(attrs: dict) -> bool:
+    code = attrs.get("DORCODE")
+    if code is None:
+        return False
+    lo, hi = COUNTIES["lee"].parcel_agricultural_use_code_range
+    return lo <= code <= hi
+
+
+# Leon's PROP_USE is a 4-character string (real sample: '5400', '5007',
+# '6900'). Same lexicographic-trap class as Osceola/St. Johns -- use CAST
+# to integer + explicit code list, not a string range. Live-verified
+# 2026-07-06: 5-row sample under this WHERE returned real ag parcels
+# (POWERHOUSE INC 1616 ac PROP_USE='5400', BRYANT JAMES 7.83 ac
+# PROP_USE='6900').
+def _leon_ag_where(county: CountyEndpoint) -> str:
+    codes = ",".join(county.parcel_agricultural_use_codes)  # ints, no quotes
+    return f"CAST({county.parcel_use_code_field} AS INTEGER) IN ({codes})"
+
+
+def _leon_is_agricultural(attrs: dict) -> bool:
+    code = attrs.get("PROP_USE")
+    if code is None:
+        return False
+    try:
+        code_int = int(code)
+    except (TypeError, ValueError):
+        return False
+    return code_int in {int(c) for c in COUNTIES["leon"].parcel_agricultural_use_codes}
+
+
+# Citrus's LUC is a 4-character string that also has blank entries (' ')
+# and mixed-format values (e.g. '0000', '5000', '6300'). Same CAST-based
+# handling as Leon/Osceola. Live-verified 2026-07-06 with 5-row sample
+# under this WHERE: real ag parcels returned (LUC '6100' Rich Brandy in
+# Crystal River, LUC '5000' Greene Sheila in Lecanto, etc.).
+def _citrus_ag_where(county: CountyEndpoint) -> str:
+    codes = ",".join(county.parcel_agricultural_use_codes)
+    return f"CAST({county.parcel_use_code_field} AS INTEGER) IN ({codes})"
+
+
+def _citrus_is_agricultural(attrs: dict) -> bool:
+    code = attrs.get("LUC")
+    if code is None or (isinstance(code, str) and code.strip() == ""):
+        return False
+    try:
+        code_int = int(code)
+    except (TypeError, ValueError):
+        return False
+    return code_int in {int(c) for c in COUNTIES["citrus"].parcel_agricultural_use_codes}
+
+
 # Registry of per-county (where-clause builder, client-side classifier)
 # pairs. Adding a fifth county means adding a new pair here, not editing
 # a shared conditional — keeps each county's comparison logic isolated
@@ -215,6 +279,9 @@ _AG_CLASSIFIERS: dict[str, tuple[Callable[[CountyEndpoint], str], Callable[[dict
     "nassau": (_nassau_ag_where, _nassau_is_agricultural),
     "st_johns": (_st_johns_ag_where, _st_johns_is_agricultural),
     "osceola": (_osceola_ag_where, _osceola_is_agricultural),
+    "lee": (_lee_ag_where, _lee_is_agricultural),
+    "leon": (_leon_ag_where, _leon_is_agricultural),
+    "citrus": (_citrus_ag_where, _citrus_is_agricultural),
 }
 
 

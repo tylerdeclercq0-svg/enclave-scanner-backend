@@ -705,6 +705,164 @@ COUNTIES: dict[str, CountyEndpoint] = {
         # is populated and must be reached via a spatial join instead.
         unincorporated_check="flum_jurisdiction_join",
     ),
+    # =====================================================================
+    # Scale-Up Phase 3 -- Wave 1 additions, 2026-07-06.
+    # Same rigor as the four pilot counties -- describe_layer live, real
+    # field names and ag classification values confirmed via live sample
+    # queries (see per-county notes below). BUT: FLUM agricultural values
+    # are Wave-1 best-guess from a 500-row distinct-values sample, NOT
+    # exhaustively verified against every FLUM category. Refine in a
+    # follow-up if a real scan surfaces obvious misclassification.
+    # =====================================================================
+    "lee": CountyEndpoint(
+        id="lee",
+        name="Lee",
+        fips=71,  # FL DOR county number for Lee
+        # FLUM: Lee County Planning Tool layer 0, real field 'Main_FLU'.
+        # Sampled distinct values: 'Central Urban', 'Coastal Rural',
+        # 'Commercial', 'Airport', 'Conservation Lands Upland', ...
+        # Wave-1 best-guess: 'Coastal Rural' as agricultural_flu_values.
+        # None of Lee's sampled FLUM values contain the literal word
+        # "Agricultural"; if a real scan of a known-ag Lee parcel
+        # returns 0% qualifying encirclement, revisit this guess against
+        # a larger FLUM sample.
+        flum_service_url=(
+            "https://services8.arcgis.com/7tOcoRLUBt73R0wV/arcgis/rest/"
+            "services/Lee_County_Planning_Tool_WFL1/FeatureServer/0"
+        ),
+        flu_field="Main_FLU",
+        jurisdiction_field=None,
+        acreage_field=None,
+        agricultural_flu_values=("Coastal Rural",),
+        population=822571,  # BEBR 2024 estimate. Under 1.75M cap.
+        confirmed_live=True,
+        notes=(
+            "Wave 1 (2026-07-06). PARCEL layer confirmed via live "
+            "describe_layer + 5-row ag-parcel sample: DORCODE (2-char, "
+            "'50'-'69' range confirmed ag with LANDUSEDES='MARKET VALUE "
+            "AGRICULTURAL'), GISACRES (Double, acreage in acres, from "
+            "'GIS Calculated Area (ac)' alias -- no manual conversion), "
+            "O_NAME (single owner name field, no co-owner), STRAP "
+            "(parcel ID), no jurisdiction field. FLUM Main_FLU field: "
+            "500-row distinct sample dominated by 'Conservation Lands "
+            "Upland' (472x) and 'Central Urban' (15x) -- 'Coastal Rural' "
+            "(5x) picked as the ag_flu_values best-guess. Not exhaustive; "
+            "revisit if scan quality suggests otherwise. No unincorporated "
+            "filter available -- SITECITY field exists on parcel layer "
+            "but not verified as a source-of-truth incorporated marker; "
+            "leaving unincorporated_check=manual_only."
+        ),
+        parcel_service_url=(
+            "https://services2.arcgis.com/LvWGAAhHwbCJ2GMP/arcgis/rest/"
+            "services/Lee_County_Parcels/FeatureServer/0"
+        ),
+        parcel_use_code_field="DORCODE",
+        parcel_agricultural_use_code_range=("50", "69"),
+        parcel_acreage_field="GISACRES",
+        parcel_owner_field="O_NAME",
+        parcel_owner_field_2=None,
+        parcel_id_field="STRAP",
+    ),
+    "leon": CountyEndpoint(
+        id="leon",
+        name="Leon",
+        fips=37,  # FL DOR county number for Leon (Tallahassee)
+        # FLUM: FDOT District 3 D3_FLUM_County layer 5 (Leon_FLUM). Real
+        # field 'FUTURELU' with distinct value 'AG' (2 features seen in
+        # 500-row sample); LANDUSE description also present for eyeballs.
+        # Highest-confidence FLUM ag value out of the 3 Wave-1 counties.
+        flum_service_url=(
+            "https://services1.arcgis.com/O1JpcwDW8sjYuddV/arcgis/rest/"
+            "services/D3_FLUM_County/FeatureServer/5"
+        ),
+        flu_field="FUTURELU",
+        jurisdiction_field=None,
+        acreage_field=None,
+        agricultural_flu_values=("AG",),
+        population=302713,  # BEBR 2024 estimate. Under 1.75M cap.
+        confirmed_live=True,
+        notes=(
+            "Wave 1 (2026-07-06). PARCEL layer confirmed via live "
+            "describe_layer + 5-row ag-parcel sample: PROP_USE (4-char, "
+            "CAST-to-integer range check to avoid the Osceola-style "
+            "lexicographic false-positive trap; real sample values "
+            "'5400', '5007', '6900'), CALC_ACREA (Double, acreage), "
+            "OWNER1/OWNER2 (single + co-owner), TAXID (parcel ID), "
+            "SALEDTE_S1/SALEDTE_S2 (sale dates -- format not yet decoded, "
+            "leaving sale_date_encoding=None for now). Layer is hosted "
+            "by City of Tallahassee's own GIS (intervector.leoncountyfl.gov). "
+            "FLUM FUTURELU field has explicit 'AG' code (LANDUSE "
+            "description 'Agricultural') -- cleanest ag_flu_values of the "
+            "Wave 1 additions. No unincorporated filter wired -- Leon "
+            "contains Tallahassee (major incorporated area); this remains "
+            "a manual-review gap."
+        ),
+        parcel_service_url=(
+            "https://intervector.leoncountyfl.gov/intervector/rest/"
+            "services/MapServices/TLC_OverlayParnal_D_WM/MapServer/0"
+        ),
+        parcel_use_code_field="PROP_USE",
+        parcel_agricultural_use_codes=tuple(
+            str(c) for c in range(5000, 7000, 100)
+        ) + ("5001","5002","5003","5004","5005","5006","5007","5008","5009"),
+        parcel_acreage_field="CALC_ACREA",
+        parcel_owner_field="OWNER1",
+        parcel_owner_field_2="OWNER2",
+        parcel_id_field="TAXID",
+    ),
+    "citrus": CountyEndpoint(
+        id="citrus",
+        name="Citrus",
+        fips=8,  # FL DOR county number for Citrus
+        # FLUM: Citrus_County_Data_WFL1 layer 7 (LandUse). Real field
+        # 'LANDUSE' with distinct values 'CL' (255x), 'GNC' (85x), 'RMU'
+        # (63x), 'IND' (55x), 'RUR' (42x) in a 500-row sample.
+        # Wave-1 best-guess: 'RUR' as ag_flu_values (Rural). 'CL' is
+        # likely Conservation Land (not ag), 'GNC' likely General
+        # Neighborhood Commercial, 'RMU' likely Residential Mixed Use,
+        # 'IND' likely Industrial. Best-guess mapping -- validate against
+        # a known-ag scan result before trusting it broadly.
+        flum_service_url=(
+            "https://services1.arcgis.com/q8sarOko6mCDwiGm/arcgis/rest/"
+            "services/Citrus_County_Data_WFL1/FeatureServer/7"
+        ),
+        flu_field="LANDUSE",
+        jurisdiction_field=None,
+        acreage_field=None,
+        agricultural_flu_values=("RUR",),
+        population=170453,  # BEBR 2024 estimate. Under 1.75M cap.
+        confirmed_live=True,
+        notes=(
+            "Wave 1 (2026-07-06). PARCEL layer confirmed via live "
+            "describe_layer + 5-row ag-parcel sample: LUC (4-char, "
+            "CAST-to-integer + blank-string guard because the layer has "
+            "' ' entries; real sample values '5000', '5500', '6100'), "
+            "OWN1/OWN2 (owner + co-owner), ALTKEY (parcel ID), no direct "
+            "acreage field -- SQFT exists but is square feet, not acres, "
+            "and there's no confirmed acreage-in-acres field, so "
+            "parcel_acreage_field is left None and _extract_acreage falls "
+            "back to geometry-based computation (same handling as St. "
+            "Johns). CITYNAME field on the parcel layer exists but is "
+            "populated with the postal city (e.g. 'CRYSTAL RIVER', "
+            "'LECANTO', 'INVERNESS', 'DUNNELLON') and does NOT distinguish "
+            "incorporated vs unincorporated -- leaving "
+            "unincorporated_check=manual_only. FLUM ag_flu_values 'RUR' "
+            "is a Wave-1 best-guess -- revisit if scan quality suggests "
+            "otherwise."
+        ),
+        parcel_service_url=(
+            "https://services1.arcgis.com/5hzvezV1fsP5byjX/arcgis/rest/"
+            "services/Citrus_County__FL_Parcels/FeatureServer/11"
+        ),
+        parcel_use_code_field="LUC",
+        parcel_agricultural_use_codes=tuple(
+            str(c) for c in range(5000, 7000, 100)
+        ),
+        parcel_acreage_field=None,  # No confirmed acres field; use geometry
+        parcel_owner_field="OWN1",
+        parcel_owner_field_2="OWN2",
+        parcel_id_field="ALTKEY",
+    ),
 }
 
 

@@ -61,38 +61,45 @@ the index/checklist, not the full spec.
   Export from item 2 automatically respects the current filter since
   it reads from `_dbListFilteredRows()`.
 
-- [~] **5. FOUNDATION REWORK, PART 3 -- metro-proximity signal** *(module + live verification done 2026-07-06; pipeline wiring + list-view sort still open)*
-  New "metro pull" secondary sort signal. Pull FL Census place-level
-  population + median household income (place = incorporated cities +
-  Census-designated places, statewide, one-time load). For each scanned
-  parcel, find the **nearest place by real great-circle distance** to the
-  parcel's centroid -- NOT "whichever result came back first from a
-  spatial query," which is the same class of bug already caught and fixed
-  once last session for county attribution
-  (`find_bg_containing_point` fix, commit `44277a5`). Compute a
-  transparent "metro pull" score as a function of nearest-place population,
-  nearest-place median income, and distance -- expose all three inputs
-  alongside the score so it's auditable, not a black box. **Never**
-  blended into the tier or pathway score -- purely a secondary sort key.
-  **Status: not started.** Full detailed instructions will be provided in
-  a separate prompt when this item is actively being worked.
+- [x] **5. FOUNDATION REWORK, PART 3 -- metro-proximity signal** *(done 2026-07-06)*
+  New `app/metro_proximity.py` module: pulls 955 FL Census places from
+  TIGERweb (Incorporated Places layer 28 + CDPs layer 30) + ACS 2023
+  5-year for population + median HH income, and computes the transparent
+  "metro pull" score via `log10((pop * income) / (distance + 1))`.
+  Nearest-place lookup uses real haversine distance from the parcel
+  centroid over every FL place -- never "whichever place came back
+  first from a spatial query" (the same class of bug caught last session
+  for county attribution, `find_bg_containing_point` fix). All raw inputs
+  to the score are stored on `ScanResultRow` alongside the score, so
+  every ranking is auditable. Wired into `scan_orchestrator.run_county_scan`
+  via `_load_fl_places_safely` (returns `[]` on any Census/TIGERweb
+  failure or missing `CENSUS_API_KEY`, so metro proximity being down
+  never breaks a scan). Live-verified: reference sanity check hits
+  Kissimmee (score 9.31) as Osceola's dominant metro, Land O' Lakes
+  (8.74) leads for Pasco, St. Augustine (8.64) for St. Johns; 19 real
+  rural parcels across Pasco + Nassau scored in a coherent 7.0-7.4
+  range appropriate for their small nearest CDPs. Score is NEVER
+  blended into `tier` or `attractiveness_score` -- purely a secondary
+  sort key inside a tier (see item 6 for the frontend wiring).
 
-- [~] **6. FOUNDATION REWORK, PART 4 -- the actual list view** *(core version done 2026-07-06; metro extension deferred to item 5)*
-  Core list view lives in the Master DB overlay alongside the existing
-  map, with a Map / List toggle at the top and shared `_dbAllParcels`
-  data source. Columns: tier, score, driving pathway(s), county,
-  parcel_id, acres, owner, ZIP, last scanned. Default sort tier asc +
-  score desc, all headers click-to-sort. County + tier filter dropdowns.
-  Per-row + select-all checkboxes with independent selection state
-  (`_dbSelectedKeys`); "Export selected (.xlsx)" reuses
-  `exportDiligenceTracker(parcels)` from item 2 without duplicating
-  logic. Column and filter definitions live in `DB_LIST_COLUMNS` /
-  `DB_LIST_FILTERS` arrays -- adding metro-proximity columns
-  (name / distance / population / income) when item 5 lands is one
-  array push per column, not a rewrite. **Remaining under this item:**
-  metro-proximity columns + metro-based sort/filter options, blocked on
-  item 5. Excluded-tier hiding by default is item 4 (next up), not
-  this item.
+- [x] **6. FOUNDATION REWORK, PART 4 -- the actual list view** *(done 2026-07-06)*
+  Core list view lives in the Property Database landing tab alongside
+  the map, with a Map / List toggle at the top and shared
+  `_dbAllParcels` data source. `DB_LIST_COLUMNS` has 14 columns:
+  tier, score, driving pathway(s), county, parcel_id, acres, owner,
+  ZIP, last scanned, plus the item-5 metro extension (Metro / Miles /
+  Metro pop / Metro inc / Metro pull). Default sort tier asc +
+  `metro_pull_score` desc; rows with a null metro score sort last
+  within their tier so they don't crowd out real matches. All headers
+  click-to-sort with direction toggle. Filter dropdowns for county,
+  tier, and metro (metro dropdown populated dynamically from whatever
+  metros the loaded data actually references, same pattern as
+  county). Excluded rows hidden by default per item 4. Per-row +
+  select-all checkboxes; "Export selected (.xlsx)" reuses
+  `exportDiligenceTracker(parcels)` from item 2. Verified in preview:
+  Confirmed-tier tie-break by metro pull works (Tampa-adjacent 9.402
+  above Land-O'-Lakes-adjacent 8.739), null-metro rows sort last
+  within tier as designed.
 
 - [ ] **7. SCALE-UP, PHASE 1 -- statewide reconnaissance across 65 eligible counties**
   Cheap reconnaissance pass across all 65 statute-eligible FL counties

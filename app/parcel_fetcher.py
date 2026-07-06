@@ -370,6 +370,47 @@ def fetch_candidate_parcels(
     return candidates
 
 
+def count_matching_candidates(
+    county_id: str,
+    zcta_geometry: Optional[dict] = None,
+    min_acreage: float = 20.0,
+    max_acreage: float = 4480.0,
+    require_single_owner: bool = False,
+) -> int:
+    """
+    Count parcels that `fetch_candidate_parcels` WOULD return with the
+    given filters -- unbounded (no `max_candidates` cap) and no
+    `skip_parcel_ids`. Deliberately shares the exact same code path as
+    the fetcher, so the ledger's `total_candidates` and the fetcher's
+    result set can never silently diverge.
+
+    Roadmap item 11 (2026-07-06): the old ledger stored a
+    total_candidates computed by `zcta_client.count_parcels_in_zcta`,
+    which only applied the server-side ag WHERE clause + spatial
+    intersect. `fetch_candidate_parcels` then adds client-side filters
+    (min/max acreage, `is_agricultural` re-check, single-owner). Any
+    parcel that matched the WHERE but failed a client-side filter
+    inflated total_candidates without ever being fetch-able -- so the
+    ledger's "N remaining" number never reached zero, and background
+    jobs terminated with "0 rows but N candidates remaining." Using
+    this function instead of the bare server count closes that gap.
+
+    This is more expensive than a `returnCountOnly=true` query (pulls
+    attributes and geometry for every match, not just a count), but
+    the total is stored in the ledger and computed at most once per
+    ZCTA per process, so the extra cost is one-time.
+    """
+    return len(fetch_candidate_parcels(
+        county_id=county_id,
+        min_acreage=min_acreage,
+        max_acreage=max_acreage,
+        max_candidates=10**9,  # effectively unbounded
+        zcta_geometry=zcta_geometry,
+        require_single_owner=require_single_owner,
+        skip_parcel_ids=None,
+    ))
+
+
 def group_by_apparent_owner(parcels: list[CandidateParcel]) -> dict[str, list[CandidateParcel]]:
     """
     Best-effort grouping of parcels that share an exact owner name

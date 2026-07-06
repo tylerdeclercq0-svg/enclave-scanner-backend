@@ -170,13 +170,21 @@ def _run_job_loop(county_id: str, params: dict, cancel_flag: threading.Event) ->
             target = zcta_by_code[next_z]
 
             # Ensure total_candidates is set so completion detection works.
+            # Roadmap item 11 (2026-07-06): uses
+            # parcel_fetcher.count_matching_candidates so the total matches
+            # what the fetcher will actually return -- see main.py's parallel
+            # comment for the full context. The old zcta_client.count_parcels_in_zcta
+            # was inflating totals by 52% on average across a sampled audit.
             zstate = coverage_ledger.get_zcta_state(county_id, next_z)
             if zstate.get("total_candidates") is None:
                 try:
-                    total = zcta_client.count_parcels_in_zcta(
-                        county.parcel_service_url,
-                        build_ag_where_clause(county_id),
-                        target["geometry"],
+                    from parcel_fetcher import count_matching_candidates
+                    total = count_matching_candidates(
+                        county_id=county_id,
+                        zcta_geometry=target["geometry"],
+                        min_acreage=params.get("min_acreage", 20.0),
+                        max_acreage=params.get("max_acreage", 4480.0),
+                        require_single_owner=params.get("require_single_owner", False),
                     )
                     coverage_ledger.set_zcta_total(county_id, next_z, total)
                 except Exception:  # noqa: BLE001 -- count is a cache, retry next batch
@@ -222,15 +230,43 @@ def _run_job_loop(county_id: str, params: dict, cancel_flag: threading.Event) ->
 
             # Empty-batch guard: if the fetcher genuinely returned zero
             # rows AND the ledger still says the ZCTA has remaining
-            # parcels, we're stuck. Break out so the frontend surfaces
-            # the situation rather than looping forever.
+            # parcels, self-heal by re-verifying the total via the same
+            # code path as the fetcher (roadmap item 11, 2026-07-06).
+            # For ledgers persisted before that fix the stored total was
+            # inflated by the OLD zcta_client counter -- if the recomputed
+            # total agrees with what's been processed already, the old
+            # total was wrong and this ZCTA is actually done. Only surface
+            # an error if divergence persists AFTER the self-heal, since
+            # that means something genuinely unexpected is happening.
             if not rows and zcta_total and len(already_processed) < zcta_total:
+                try:
+                    from parcel_fetcher import count_matching_candidates
+                    reverified = count_matching_candidates(
+                        county_id=county_id,
+                        zcta_geometry=target["geometry"],
+                        min_acreage=params.get("min_acreage", 20.0),
+                        max_acreage=params.get("max_acreage", 4480.0),
+                        require_single_owner=params.get("require_single_owner", False),
+                    )
+                except Exception:  # noqa: BLE001
+                    reverified = None
+                if reverified is not None and reverified != zcta_total:
+                    coverage_ledger.set_zcta_total(county_id, next_z, reverified)
+                    # If the healed total now matches processed, treat this
+                    # ZCTA as done and continue the job's outer loop.
+                    if len(already_processed) >= reverified:
+                        continue
+                    # Still short after healing -- update loop-local total
+                    # so subsequent iterations see the corrected value.
+                    zcta_total = reverified
                 state.status = "error"
                 state.error = (
                     f"Advance for ZCTA {next_z} returned 0 rows but the "
                     f"ZCTA still shows {zcta_total - len(already_processed)} "
-                    "candidates remaining. Filters may be too restrictive; "
-                    "loosen them and resume."
+                    "candidates remaining after re-verifying against the "
+                    "same code path as the fetcher. Likely a real filter/"
+                    "layer inconsistency worth investigating rather than a "
+                    "stale ledger count."
                 )
                 state.finished_at = _now()
                 _save_state(state)

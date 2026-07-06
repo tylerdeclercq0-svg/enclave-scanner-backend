@@ -698,18 +698,32 @@ def coverage_advance(county_id: str, payload: CoverageAdvancePayload):
 
     # Establish the total candidate count for this ZCTA (once per ZCTA
     # per process lifetime -- ledger caches it so future advances don't
-    # requery). Uses the same ag-use WHERE clause as the fetcher.
+    # requery). Roadmap item 11 (2026-07-06): uses
+    # parcel_fetcher.count_matching_candidates, NOT the older
+    # zcta_client.count_parcels_in_zcta. The old function counted every
+    # parcel matching the server-side ag WHERE + ZCTA intersect, but the
+    # actual fetcher then applied client-side acreage bounds + is_agricultural
+    # re-check, silently dropping many. Any parcel matching the WHERE
+    # but failing a client-side filter inflated total_candidates without
+    # ever being fetchable, so the ledger's "remaining" number never
+    # reached zero and the job runner terminated with "0 rows but N
+    # candidates remaining." Audit across 12 sampled ZCTAs found 52% of
+    # the old total was spurious. count_matching_candidates uses the same
+    # code path as the fetcher, guaranteeing count == fetchable by
+    # construction.
     zcta_ledger = coverage_ledger.get_zcta_state(county_id, target_zcta5)
+    from parcel_fetcher import count_matching_candidates
     if zcta_ledger.get("total_candidates") is None:
-        from parcel_fetcher import build_ag_where_clause
         try:
-            total = zcta_client.count_parcels_in_zcta(
-                county_entry.parcel_service_url,
-                build_ag_where_clause(county_id),
-                target_zcta["geometry"],
+            total = count_matching_candidates(
+                county_id=county_id,
+                zcta_geometry=target_zcta["geometry"],
+                min_acreage=payload.min_acreage,
+                max_acreage=payload.max_acreage,
+                require_single_owner=payload.require_single_owner,
             )
             coverage_ledger.set_zcta_total(county_id, target_zcta5, total)
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             # Non-fatal -- we can still run the pipeline, just without a
             # denominator until the next call.
             pass
@@ -749,6 +763,32 @@ def coverage_advance(county_id: str, payload: CoverageAdvancePayload):
     # ranked view can be built from accumulated history, not just this
     # session. Deliberately part of the same ledger, not a parallel store.
     coverage_ledger.save_parcel_results(county_id, scan_orchestrator.rows_to_dicts(rows))
+
+    # Self-heal for ledgers whose total_candidates was computed by the
+    # OLD (pre-item-11) counter. If this advance returned 0 rows but the
+    # ledger still says >0 remain, re-verify the total via the same
+    # code path as the fetcher. If the recomputed total <= processed
+    # count, the old total was inflated -- update it and let mark_processed
+    # flip the completeness flag. Guards against a background job hitting
+    # the same "0 rows / N remaining" error state on ledger state
+    # persisted before the fix. Only fires when there's a real
+    # divergence to fix.
+    zcta_state_pre_heal = coverage_ledger.get_zcta_state(county_id, target_zcta5)
+    stored_total = zcta_state_pre_heal.get("total_candidates")
+    stored_processed = len(zcta_state_pre_heal.get("processed_parcel_ids", []))
+    if (not rows) and stored_total is not None and stored_processed < stored_total:
+        try:
+            reverified = count_matching_candidates(
+                county_id=county_id,
+                zcta_geometry=target_zcta["geometry"],
+                min_acreage=payload.min_acreage,
+                max_acreage=payload.max_acreage,
+                require_single_owner=payload.require_single_owner,
+            )
+            if reverified != stored_total:
+                coverage_ledger.set_zcta_total(county_id, target_zcta5, reverified)
+        except Exception:  # noqa: BLE001 -- self-heal is best-effort
+            pass
 
     summary = coverage_ledger.county_summary(county_id, zcta_codes)
     zcta_state = coverage_ledger.get_zcta_state(county_id, target_zcta5)

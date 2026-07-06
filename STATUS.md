@@ -1771,3 +1771,19 @@ map view -- is NOT started. Includes:
 Also outstanding: the `/api/debug/acs-probe` endpoint is
 deliberately ad-hoc and should be moved behind an auth check or
 removed entirely before this ships to real users beyond Tyler.
+
+## Durable persistence attached -- 2026-07-06 (very late session)
+
+Roadmap item 12: coverage ledger + property database now write to a
+5 GB Render persistent disk mounted at `/var/data` instead of the
+Starter tier's ephemeral filesystem. `coverage_ledger.py` and
+`background_jobs.py` both read `DATA_DIR` from the environment
+(defaults to `<repo>/data` for local dev). `/health` surfaces the
+resolved path so a mount misconfiguration is obvious at a glance.
+
+Verification (this commit): write 5 real Pasco parcels, trigger a
+redeploy via this very commit, confirm the 5 parcels survive the
+instance transition -- something Render's ephemeral filesystem
+provably could not do (item 11 verified that the Nassau parcels
+written during item 10 verification were gone ~15 min later without
+even a redeploy).

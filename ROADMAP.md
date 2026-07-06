@@ -154,19 +154,41 @@ the index/checklist, not the full spec.
   parcels landed in the master DB via `save_parcel_results` and are
   visible through `/api/property-db/all`.
 
-- [ ] **11. POPULATE REAL DATA -- FULL SCANS ACROSS ALL ACTIVE COUNTIES**
+- [ ] **11. INVESTIGATE + FIX ZCTA CANDIDATE-COUNT-VS-ACTUAL-QUERY MISMATCH**
+  During item 10's Nassau test scan the background job terminated with
+  the error *"Advance for ZCTA 31537 returned 0 rows but the ZCTA still
+  shows 4 candidates remaining. Filters may be too restrictive; loosen
+  them and resume."* This is a real gap in the coverage ledger's
+  completeness guarantee -- the ledger's accounting of "remaining
+  candidates for this ZCTA" is disagreeing with what the live parcel
+  fetch actually returns, so the "county_complete" flag can never
+  reliably fire and a runner has no way to distinguish "ZCTA really is
+  done" from "ledger says there are 4 more but they're structurally
+  unreachable under the current filter." Not just a filter-tuning
+  footnote -- needs to be understood (is the ledger overcounting? Are
+  the filters silently dropping parcels? Is `mark_processed` failing
+  to record some IDs?) and fixed before item 12's real-data population,
+  since a bad completeness signal there means half-scanned counties
+  silently reported as complete. **Status: not started.** Full detailed
+  instructions will be provided in a separate prompt when this item is
+  actively being worked.
+
+- [ ] **12. POPULATE REAL DATA -- FULL SCANS ACROSS ALL ACTIVE COUNTIES**
   Once every other roadmap item is complete (including item 8's pipeline
-  reordering and item 9's expansion to 30+ confirmed-live counties), run
-  real "Scan entire county" background jobs across every confirmed-live
-  county to populate the Property Database with real data. **Deliberately
-  sequenced last**: no point generating a real dataset before the pipeline
-  computation itself (exclusion order, county count, metro-proximity
-  fields) is finalized -- would mean re-scanning every parcel later
-  anyway. This is the point where the Property Database home screen
-  actually becomes populated with the real, usable candidate list instead
-  of test/mock data. **Blocked on items 5, 7, 8, 9, and 10.** **Status:
-  not started.** Full detailed instructions will be provided in a
-  separate prompt when this item is actively being worked.
+  reordering, item 9's expansion to 30+ confirmed-live counties, and
+  item 11's ledger-completeness fix), run real "Scan entire county"
+  background jobs across every confirmed-live county to populate the
+  Property Database with real data. **Deliberately sequenced last**: no
+  point generating a real dataset before the pipeline computation itself
+  (exclusion order, county count, metro-proximity fields) is finalized
+  and the completeness signal is trustworthy -- would mean re-scanning
+  every parcel later anyway, or worse, running with silently-partial
+  county coverage. This is the point where the Property Database home
+  screen actually becomes populated with the real, usable candidate list
+  instead of test/mock data. **Blocked on items 5, 7, 8, 9, 10, and
+  11.** **Status: not started.** Full detailed instructions will be
+  provided in a separate prompt when this item is actively being
+  worked.
 
 ## How to use this file
 

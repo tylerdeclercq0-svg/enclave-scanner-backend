@@ -281,16 +281,45 @@ def run_county_scan(
         surrounding_density = "unknown"
         adjacent_to_interstate = False
         adjacent_to_usb = False
-        # Initialized here (not inside the else) so the no-geometry path
-        # can still reach the fallback unincorporated-check block below.
+        interstate_frontage_pct = 0.0
+        usb_perimeter_pct = 0.0
         is_unincorporated: Optional[bool] = None
         unincorporated_detail: str = ""
+
+        # EARLY EXCLUSION GATE (roadmap item 8, 2026-07-06). Runs the
+        # Fix-A-cached statewide exclusion intersects (Wekiva /
+        # Everglades / ACSC) BEFORE the expensive concurrent I/O phase.
+        # Per-parcel cost is a local Shapely intersect against the
+        # cached polygon set (<10 ms warm), so it doesn't materially
+        # add to the serial critical path for parcels that pass, and
+        # for parcels that hit an exclusion zone it saves FLUM neighbor
+        # fetch + interstate/USB adjacency + encirclement + follow-ups.
+        #
+        # NOTE: unincorporated_check was tried in the early gate too
+        # but empirically it's a ~500 ms network RTT that was free-
+        # riding on FLUM's ~800 ms concurrent wait. Moving it out
+        # exposed that cost as a serial hit that hurt more than the
+        # rare Pasco exclusion win. Kept in the concurrent phase.
+        with _time_block("early_exclusion_gate"):
+            exclusion_flags: list[str] = exclusions.check_exclusions(parcel)
+        skip_expensive_io = bool(exclusion_flags)
 
         if parcel.geometry is None:
             needs_review.append(
                 "No geometry returned for this parcel — encirclement "
                 "test could not run. Verify manually in the county GIS viewer."
             )
+        elif skip_expensive_io:
+            # Early-gate excluded: FLUM neighbor fetch, interstate/USB
+            # adjacency + follow-up measurements, encirclement, and
+            # determine_pathways are all skipped. Downstream fields
+            # stay at their initialized defaults (pct_qualifying=None,
+            # pathways=[], adjacent flags=False). The tier assignment
+            # downstream forces "excluded" whenever exclusion_flags is
+            # non-empty, so the resulting row is the same shape and
+            # sort order as before -- just built without paying for
+            # work that was going to be discarded anyway.
+            pass
         else:
             try:
                 with _time_block("buffer_esri_geometry"):
@@ -298,17 +327,15 @@ def run_county_scan(
                         parcel.geometry, fetch_neighbor_buffer_feet
                     )
 
-                # Fix C (2026-07-06): run the 4 independent per-parcel I/O
-                # calls concurrently. Smoke test confirmed the target
-                # servers (Pasco FLUM, FDOT, Pasco services6 x2) accept
-                # concurrent load with zero errors and a 2.4x wall-clock
-                # speedup vs. sequential on 12-parcel * 4-call test. The
-                # 2 measure_* follow-ups are conditional on their
-                # adjacency check returning True and stay serialized after
-                # the concurrent phase (avoids wasting a query when the
-                # adjacency comes back False).
-                interstate_frontage_pct = 0.0
-                usb_perimeter_pct = 0.0
+                # Fix C (2026-07-06): 4 independent I/O calls concurrently.
+                # FLUM neighbor fetch dominates the wall clock (~800 ms
+                # typical), so the other 3 tasks (interstate, USB,
+                # unincorporated -- each ~500 ms RTT) all finish
+                # alongside it essentially for free. Roadmap item 8's
+                # first attempt was to move unincorporated to an early
+                # gate, but empirically that exposed its RTT as a
+                # serial cost that hurt more than the rare Pasco
+                # exclusion win -- kept concurrent here.
                 interstate_exc: Optional[Exception] = None
                 usb_exc: Optional[Exception] = None
                 neighbor_features: list = []
@@ -352,6 +379,17 @@ def run_county_scan(
                             adjacent_to_usb = False
                         with _time_block("unincorporated_check"):
                             is_unincorporated, unincorporated_detail = f_uninc.result()
+                        # Early-gate short-circuit: if concurrent phase found
+                        # this parcel incorporated, promote to hard flag so
+                        # scoring hits tier=excluded like the other early
+                        # gates. Kept out of skip_expensive_io because we're
+                        # already past the concurrent phase by the time we
+                        # know this (unlike the statewide-cache checks,
+                        # which are truly early).
+                        if is_unincorporated is False:
+                            exclusion_flags.append(
+                                f"Unincorporated-status hard filter FAILED: {unincorporated_detail}"
+                            )
 
                 with _time_block("compute_encirclement"):
                     encirclement = compute_encirclement(
@@ -481,23 +519,13 @@ def run_county_scan(
         if surrounding_density_filter and surrounding_density != surrounding_density_filter:
             continue
 
-        with _time_block("exclusions_check"):
-            exclusion_flags = exclusions.check_exclusions(parcel)
-
-        # Unincorporated check already ran in the Fix C concurrent I/O
-        # phase above. If the parcel had no geometry (concurrent phase
-        # was skipped), fall back to the sync call here so the check
-        # still runs before the pass/fail branching.
-        if is_unincorporated is None and unincorporated_detail == "":
-            with _time_block("unincorporated_check"):
-                is_unincorporated, unincorporated_detail = statutory_checks.check_unincorporated(
-                    county, parcel.geometry, AREA_SR
-                )
-        if is_unincorporated is False:
-            exclusion_flags.append(
-                f"Unincorporated-status hard filter FAILED: {unincorporated_detail}"
-            )
-        elif is_unincorporated is None:
+        # exclusions.check_exclusions and check_unincorporated already
+        # ran in the early exclusion gate at the top of this loop
+        # iteration (roadmap item 8), and their outcomes are already
+        # in `exclusion_flags` + `is_unincorporated` /
+        # `unincorporated_detail`. Just surface the "unknown" case as
+        # a manual-review note here.
+        if is_unincorporated is None and unincorporated_detail:
             needs_review.append(f"Unincorporated-status check: {unincorporated_detail}")
 
         if exclusion_flags:

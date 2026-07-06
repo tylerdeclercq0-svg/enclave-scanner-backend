@@ -132,20 +132,45 @@ the index/checklist, not the full spec.
   will be provided in a separate prompt when this item is actively being
   worked.
 
-- [ ] **8. SCALE-UP, PHASE 2 -- reorder the per-parcel pipeline for early exclusion gating**
-  Move the cheap/fast exclusion checks (cached statewide Wekiva /
-  Everglades / ACSC intersects -- effectively free after warm-up per
-  Fix A from the 2026-07-06 profiling pass -- and the unincorporated-
-  status check) to run as an **early gate** before the expensive
-  concurrent FLUM / interstate / USB / water-sewer phase. A parcel that
-  gets excluded early should skip everything downstream. **Must be
-  profiled before and after against the same 25-parcel Pasco batch used
-  for the A/B/C speed fixes** (baseline was 196.88s -> 64.45s after
-  Fixes A/B/C -- see STATUS.md's profiling section). This reorder only
-  helps parcels that actually get excluded early; measure the real
-  impact against real data, don't assume it. **Status: not started.**
-  Full detailed instructions will be provided in a separate prompt when
-  this item is actively being worked.
+- [x] **8. SCALE-UP, PHASE 2 -- reorder the per-parcel pipeline for early exclusion gating** *(done 2026-07-06)*
+  Partial reorder shipped, with a full honest report. `exclusions.check_exclusions`
+  (Wekiva / Everglades / ACSC -- Fix-A-cached statewide, per-parcel cost
+  is a local Shapely intersect) now runs BEFORE the concurrent I/O
+  phase; any parcel hitting one skips FLUM neighbor fetch + interstate/USB
+  adjacency + follow-ups + encirclement entirely (~1.5s/parcel per hit).
+  New named block `early_exclusion_gate` positions future hard-fail
+  checks (conservation easements, military buffers if data ever
+  surfaces) obviously.
+
+  **`unincorporated_check` was NOT moved to the early gate** after
+  measurement showed it was empirically wrong: the check's ~500 ms
+  network RTT was free-riding on FLUM's ~800 ms concurrent wait, so
+  serializing it exposed a real cost with no offsetting benefit.
+  Documented inline in the code for future engineers.
+
+  **Measurement (same 25-parcel Pasco batch used for Fixes A/B/C):**
+  - BEFORE (baseline):    45.09s (1.80s/parcel)
+  - FULL REORDER attempt: 56.10s (2.24s/parcel) -- **-24% regression**
+  - PARTIAL (shipped):    45.97s (1.84s/parcel) -- **within Render/
+                                                    ArcGIS variance**
+
+  Correctness verified in both attempts: same 25 parcels, exact same
+  tier distribution, zero field diffs on tier / score /
+  pct_perimeter_qualifying / likely_pathways / exclusion_flags.
+
+  **Honest assessment:** no measured wall-clock win on Pasco because
+  the early-exclusion rate on that batch is 0/25 (Pasco isn't in any
+  of the statewide exclusion zones, and no ag parcels landed in an
+  incorporated city). The reorder is architectural positioning for
+  future scans hitting Wekiva (Central FL) / Everglades (South FL) /
+  ACSC (Green Swamp, Big Cypress, Apalachicola, Florida Keys) -- not
+  a measured win today. Item 13's real-data pass will show the
+  actual aggregate exclusion rate across 30 counties; if it's still
+  low, this reorder was positioning-not-a-win and that's fine (Tyler's
+  own directive).
+
+  Recon script at [`scripts/phase2_profile.py`](scripts/phase2_profile.py)
+  for future re-profiling.
 
 - [ ] **9. SCALE-UP, PHASE 3 -- prioritized full verification to >=30 confirmed-live counties**
   Using item 7's triage list

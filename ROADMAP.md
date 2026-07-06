@@ -249,22 +249,100 @@ the index/checklist, not the full spec.
   falsely marked complete under the OLD undercounting logic is
   guaranteed already gone.
 
-- [ ] **12. POPULATE REAL DATA -- FULL SCANS ACROSS ALL ACTIVE COUNTIES**
+- [ ] **12. DURABLE PERSISTENCE FOR THE COVERAGE LEDGER + PROPERTY DATABASE**
+  Discovered during item 11 verification: the coverage ledger and
+  property database persist only to `data/coverage_ledger.json` on
+  Render's Starter-tier ephemeral filesystem, which gets wiped not
+  just on redeploys but on any instance restart -- and Render provides
+  no notification when a restart happens. Confirmed live: the 4-complete
+  Nassau ZCTA state populated during item 11's verification was gone
+  ~15 min later without a redeploy. **Must be fixed before item 13**
+  (populate real data), since there is no point running scans that
+  might silently disappear on the next unattended restart.
+
+  **Options researched (2026-07-06):**
+
+  1. **Persistent disk + existing JSON files** *(recommended)*
+     - Render offers persistent disks on any paid tier including the
+       current Starter ($7/mo), at **$0.25/GB/month**. A 5 GB disk
+       (~30x current projected max size) costs **$1.25/mo**, i.e.
+       **~$15/year**.
+     - Mount the disk (e.g. at `/var/data`), point `_LEDGER_DIR` at
+       the mount path via env var. Zero application-code change to
+       ledger logic -- the existing atomic write via tmp-file + rename
+       already handles crash safety, and the existing `threading.RLock`
+       already handles single-process concurrency (uvicorn is
+       single-worker on Render by default).
+     - **Implementation effort: ~30 minutes** including redeploy +
+       live verification that state survives an instance restart.
+     - Trade-offs: disks preclude zero-downtime deploys (few seconds
+       of unavailability per redeploy -- acceptable for this internal
+       tool) and horizontal scaling (already single-instance -- not
+       a change).
+
+  2. **Managed Postgres (Render Postgres, Basic-256mb tier)**
+     - Cheapest paid tier: **~$7/mo compute** + $0.30/GB/month
+       storage (1 GB baseline included). At current projected 30-county
+       size (<200 MB) storage stays under $0.30/mo, so **~$87/year total**.
+     - Requires: add `psycopg2` dependency, design schema (coverage_ledger
+       table, parcels table with JSONB for geometry_wgs84 + score_breakdown),
+       rewrite `_load`/`_save`/`set_zcta_total`/`mark_processed`/
+       `save_parcel_results`/`list_all_parcels*` to hit Postgres, handle
+       connection pool, add indexes for the property-db list-view queries.
+     - **Implementation effort: 4-8 hours** including schema design,
+       code migration, testing every endpoint, and one-time data load.
+     - Trade-offs: real database (backups, transactions, indexed
+       queries, better concurrency headroom) but 6x the cost and
+       ~10x the implementation time. Note the free tier (1 GB, expires
+       after 30 days) is a dealbreaker -- can't rely on that for
+       persistent production data.
+
+  3. **SQLite on persistent disk**
+     - Storage cost same as option 1 (~$15/year for the disk).
+     - Rewrite ledger to SQLite (stdlib, no new dep). Similar schema
+       to Postgres option but no connection pool, no network hop.
+     - **Implementation effort: 3-5 hours**.
+     - Middle-ground robustness: WAL-mode SQLite handles concurrent
+       readers cleanly and does row-level writes instead of full-file
+       rewrites. Real query language + indexes. Corruption risk is
+       real but SQLite's journaling is well-tested.
+     - Not recommended today because option 1 solves the immediate
+       problem cheaper and faster; SQLite makes sense as an upgrade
+       path later if JSON writes get slow (>100 MB) or query patterns
+       need indexes.
+
+  **Recommendation: Option 1 (persistent disk + existing JSON).** Data
+  volume is tiny today (~1 MB current, projected <200 MB even after
+  item 13 scans 30 counties). Single-process uvicorn writes fit in
+  well under a second even at projected max size. Cost is 6x cheaper
+  than managed Postgres ($15/yr vs $87/yr). Implementation is one
+  order of magnitude faster (30 min vs hours). If load ever grows
+  past what JSON handles gracefully, migrating from JSON-on-disk to
+  SQLite-on-disk (option 3) later is a straightforward second step;
+  starting with Postgres today would be premature scaling for a
+  low-write internal tool.
+
+  **Status: awaiting Tyler's call on which option to implement.** Do
+  not proceed to item 13 until this is landed.
+
+- [ ] **13. POPULATE REAL DATA -- FULL SCANS ACROSS ALL ACTIVE COUNTIES**
   Once every other roadmap item is complete (including item 8's pipeline
-  reordering, item 9's expansion to 30+ confirmed-live counties, and
-  item 11's ledger-completeness fix), run real "Scan entire county"
-  background jobs across every confirmed-live county to populate the
-  Property Database with real data. **Deliberately sequenced last**: no
-  point generating a real dataset before the pipeline computation itself
-  (exclusion order, county count, metro-proximity fields) is finalized
-  and the completeness signal is trustworthy -- would mean re-scanning
-  every parcel later anyway, or worse, running with silently-partial
-  county coverage. This is the point where the Property Database home
-  screen actually becomes populated with the real, usable candidate list
-  instead of test/mock data. **Blocked on items 5, 7, 8, 9, 10, and
-  11.** **Status: not started.** Full detailed instructions will be
-  provided in a separate prompt when this item is actively being
-  worked.
+  reordering, item 9's expansion to 30+ confirmed-live counties,
+  item 11's ledger-completeness fix, and **item 12's durable
+  persistence fix**), run real "Scan entire county" background jobs
+  across every confirmed-live county to populate the Property Database
+  with real data. **Deliberately sequenced last**: no point generating
+  a real dataset before the pipeline computation itself (exclusion
+  order, county count, metro-proximity fields) is finalized, the
+  completeness signal is trustworthy, and the data has somewhere
+  durable to land -- would mean re-scanning every parcel later anyway,
+  or worse, running with silently-partial county coverage or watching
+  the whole database vanish on the next Render instance restart. This
+  is the point where the Property Database home screen actually becomes
+  populated with the real, usable candidate list instead of test/mock
+  data. **Blocked on items 5, 7, 8, 9, 10, 11, and 12.** **Status:
+  not started.** Full detailed instructions will be provided in a
+  separate prompt when this item is actively being worked.
 
 ## How to use this file
 

@@ -101,7 +101,23 @@ the index/checklist, not the full spec.
   above Land-O'-Lakes-adjacent 8.739), null-metro rows sort last
   within tier as designed.
 
-- [ ] **7. SCALE-UP, PHASE 1 -- statewide reconnaissance across 65 eligible counties**
+- [x] **7. SCALE-UP, PHASE 1 -- statewide reconnaissance across 65 eligible counties** *(done 2026-07-06)*
+  Cheap AGOL-only existence check ran against all 58 remaining counties
+  (65 statute-eligible minus 7 already `confirmed_live=True` in
+  `county_registry.py`). Method: ArcGIS Online item search with a tight
+  match rule (title must contain the county name AND "parcel"/"cadastr").
+  Buckets: **10 live** (Citrus, Collier, Gadsden, Glades, Hendry, Lee,
+  Leon, Okeechobee, Pinellas, Wakulla; Gadsden + Wakulla share one
+  Leon-hosted layer so it's one integration), **21 unclear**, **27
+  none**. Full triage list committed at
+  [`scripts/phase1_recon_results.md`](scripts/phase1_recon_results.md);
+  the recon script itself is at
+  [`scripts/phase1_recon.py`](scripts/phase1_recon.py) for re-runs.
+  **Known limitation of this method:** many populous FL counties host
+  their own on-prem ArcGIS Server or Property Appraiser subdomain not
+  indexed on AGOL under standard parcel titles, so "none" here is
+  *not* equivalent to "no service exists" -- see item 9's re-check
+  list.
   Cheap reconnaissance pass across all 65 statute-eligible FL counties
   (all 67 minus Miami-Dade and Broward, which exceed the 1.75M population
   cap enforced per `s. 163.3164(4)(f)` in `main.py`'s
@@ -132,16 +148,34 @@ the index/checklist, not the full spec.
   this item is actively being worked.
 
 - [ ] **9. SCALE-UP, PHASE 3 -- prioritized full verification to >=30 confirmed-live counties**
-  Using item 7's triage list, work through counties in priority order to
-  reach at least 30 confirmed-live counties. Priority uses the same
-  growth-rate / median-income prioritization already used for selecting
-  the original four pilot counties (Pasco, Nassau, St. Johns, Osceola).
-  Each new county needs the full ground-truthing pass documented in
-  STATUS.md: `describe_layer` verification, real field-name confirmation,
-  live agricultural-classification test, live end-to-end
+  Using item 7's triage list
+  ([`scripts/phase1_recon_results.md`](scripts/phase1_recon_results.md)),
+  work through counties in priority order to reach at least 30
+  confirmed-live counties. Priority uses the same growth-rate /
+  median-income prioritization already used for selecting the original
+  four pilot counties (Pasco, Nassau, St. Johns, Osceola). Each new
+  county needs the full ground-truthing pass documented in STATUS.md:
+  `describe_layer` verification, real field-name confirmation, live
+  agricultural-classification test, live end-to-end
   `fetch_candidate_parcels`, and `confirmed_live=True` in
-  `county_registry.py`. **Blocked on item 7** (need the triage list to
-  pick from). **Status: not started.** Full detailed instructions will
+  `county_registry.py`.
+
+  **CRITICAL: item 7's "none" bucket is NOT authoritative.** Phase 1's
+  AGOL-only search misses any county that hosts its own on-prem ArcGIS
+  Server or publishes through a Property Appraiser subdomain not
+  indexed on AGOL. Before writing off any "none" or "unclear" county
+  from item 7's list, specifically re-check these five known-significant
+  counties via direct Property Appraiser sites and known county GIS
+  URL patterns: **Alachua, Marion, Polk, Duval, and Monroe** -- these
+  are all large, active-GIS counties almost certainly miscategorized by
+  Phase 1's method, and writing them off from the Phase 1 baseline
+  without a direct-URL re-check would be a real oversight. Same
+  discipline (Property Appraiser site + direct county GIS URL check)
+  should be applied to any other "none" county before it's dropped from
+  Phase 3's scope.
+
+  **Blocked on item 7** (need the triage list to pick from) -- now
+  complete. **Status: not started.** Full detailed instructions will
   be provided in a separate prompt when this item is actively being
   worked.
 

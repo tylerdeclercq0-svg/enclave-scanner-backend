@@ -195,24 +195,48 @@ the index/checklist, not the full spec.
   parcels landed in the master DB via `save_parcel_results` and are
   visible through `/api/property-db/all`.
 
-- [ ] **11. INVESTIGATE + FIX ZCTA CANDIDATE-COUNT-VS-ACTUAL-QUERY MISMATCH**
-  During item 10's Nassau test scan the background job terminated with
-  the error *"Advance for ZCTA 31537 returned 0 rows but the ZCTA still
-  shows 4 candidates remaining. Filters may be too restrictive; loosen
-  them and resume."* This is a real gap in the coverage ledger's
-  completeness guarantee -- the ledger's accounting of "remaining
-  candidates for this ZCTA" is disagreeing with what the live parcel
-  fetch actually returns, so the "county_complete" flag can never
-  reliably fire and a runner has no way to distinguish "ZCTA really is
-  done" from "ledger says there are 4 more but they're structurally
-  unreachable under the current filter." Not just a filter-tuning
-  footnote -- needs to be understood (is the ledger overcounting? Are
-  the filters silently dropping parcels? Is `mark_processed` failing
-  to record some IDs?) and fixed before item 12's real-data population,
-  since a bad completeness signal there means half-scanned counties
-  silently reported as complete. **Status: not started.** Full detailed
-  instructions will be provided in a separate prompt when this item is
-  actively being worked.
+- [x] **11. INVESTIGATE + FIX ZCTA CANDIDATE-COUNT-VS-ACTUAL-QUERY MISMATCH** *(done 2026-07-06)*
+  Root cause: query construction divergence, NOT stale count and NOT
+  "filters too restrictive" (that error message was itself a symptom).
+  The ledger's `total_candidates` was computed by
+  `zcta_client.count_parcels_in_zcta` with only the server-side ag
+  WHERE clause + spatial intersect; `parcel_fetcher.fetch_candidate_parcels`
+  then applied client-side filters (`min_acreage`/`max_acreage`,
+  `is_agricultural` re-check, `require_single_owner`) that silently
+  dropped many. Any parcel matching the WHERE but failing a client-side
+  filter inflated total_candidates without ever being fetch-able --
+  ledger's "remaining" number never hit zero, background jobs
+  terminated with "0 rows but N candidates remaining."
+
+  **Systemic, not Nassau-specific.** Audit across 12 sampled ZCTAs
+  (top-3 by area in each pilot county) found **52.3% of the OLD total
+  was spurious.** Example divergences:
+  - Nassau 31537: 18 OLD -> 14 NEW (4 parcels below the 20-acre floor)
+  - Nassau 32046: 1796 -> 846 (dropped 950, 53%)
+  - Pasco 33523: 1328 -> 629 (dropped 699, 53%)
+  - Pasco 33597: 28 -> 33 (**NEW is +5** -- OLD *under*-counted here
+    because the client-side `is_agricultural` re-check accepts parcels
+    the server WHERE doesn't return; divergence works both directions)
+
+  **Fix:** new `parcel_fetcher.count_matching_candidates()` calls
+  `fetch_candidate_parcels` internally so count and fetch share the
+  identical code path -- divergence impossible by construction.
+  `main.py` (`/coverage/{id}/advance`) and `background_jobs.py`
+  (`scan-entire-county`) both switched to it. Both call sites also add
+  a self-heal: on advance-returns-zero-rows-with-remaining, re-verify
+  the total via the same helper and update the ledger. Ledgers
+  persisted before this commit auto-correct on the next advance touch;
+  the "0 rows / N remaining" error now only surfaces if divergence
+  persists AFTER the self-heal (i.e. a genuinely-unexpected condition,
+  no longer a spurious ledger-accounting misfire).
+
+  **Live-verified:** kicked off a Nassau `scan-entire-county` job with
+  the same params as item 10's failing run. ZCTA 31537 now shows
+  `total_candidates=14, processed=14, complete=True` and the job
+  advanced cleanly through 15 ZCTAs (4 complete + 1 in progress + 91
+  parcels processed) before I cancelled it. Pasco ZCTA 33523's new
+  `total_candidates=629` on a fresh advance confirms the fix runs
+  server-side (old bug would have shown 1328).
 
 - [ ] **12. POPULATE REAL DATA -- FULL SCANS ACROSS ALL ACTIVE COUNTIES**
   Once every other roadmap item is complete (including item 8's pipeline

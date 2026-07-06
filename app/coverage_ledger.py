@@ -53,7 +53,13 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 
-_LEDGER_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
+# Where the ledger + property database JSON lives on disk. Configurable
+# via the DATA_DIR env var so a production deploy can point at a mounted
+# persistent disk (Render Starter tier's default filesystem is ephemeral
+# and wipes between instance restarts, not just redeploys -- see roadmap
+# item 12 for the full context and the ~$15/yr disk math). Local dev
+# leaves DATA_DIR unset and keeps writing to <repo>/data as before.
+_LEDGER_DIR = os.environ.get("DATA_DIR") or os.path.join(os.path.dirname(__file__), "..", "data")
 _LEDGER_PATH = os.path.join(_LEDGER_DIR, "coverage_ledger.json")
 
 # Simple in-process lock to make concurrent /api/coverage/... calls safe

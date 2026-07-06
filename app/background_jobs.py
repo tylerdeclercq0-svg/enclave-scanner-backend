@@ -30,7 +30,11 @@ import scan_orchestrator
 import zcta_client
 
 
-_JOBS_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
+# Where the background-job state JSON lives. Shares the same DATA_DIR
+# env-var toggle as the coverage_ledger (roadmap item 12) so both files
+# land together on the mounted persistent disk in production. Local dev
+# leaves DATA_DIR unset and keeps writing to <repo>/data as before.
+_JOBS_DIR = os.environ.get("DATA_DIR") or os.path.join(os.path.dirname(__file__), "..", "data")
 _JOBS_PATH = os.path.join(_JOBS_DIR, "jobs.json")
 _LOCK = threading.RLock()
 

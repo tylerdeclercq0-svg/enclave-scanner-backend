@@ -118,8 +118,14 @@ def _resolve_code_version() -> str:
 
 @app.get("/health")
 def health():
-    """Liveness check — Render/Railway ping this to confirm the service is up."""
-    return {"status": "ok", "code_version": _resolve_code_version()}
+    """Liveness check — Render/Railway ping this to confirm the service is up.
+    Also surfaces the resolved data_dir so a caller can eyeball whether the
+    persistent-disk mount actually took effect (roadmap item 12)."""
+    return {
+        "status": "ok",
+        "code_version": _resolve_code_version(),
+        "data_dir": coverage_ledger._LEDGER_DIR,
+    }
 
 
 @app.get("/api/counties", response_model=list[CountyInfo])

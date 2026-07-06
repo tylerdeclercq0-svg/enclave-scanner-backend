@@ -569,6 +569,10 @@
               <option value="excluded">Excluded</option>
             </select>
           </div>
+          <div class="field db-list-only" style="min-width:180px;">
+            <label>Metro</label>
+            <select id="dbListFilterMetro" class="mono"><option value="">Any metro</option></select>
+          </div>
           <label class="db-list-only" style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--ink-faint);display:flex;align-items:center;gap:6px;cursor:pointer;">
             <input type="checkbox" id="dbListShowExcluded"> Show excluded
           </label>
@@ -2847,18 +2851,51 @@ const DB_LIST_COLUMNS = [
   { key: 'last_scanned_at', label: 'Last scanned', align: 'left', cls: 'mono',
     cellHtml: r => `<span class="mono">${_dbLastScannedShort(r)}</span>`,
     sortValue: r => _dbLastScannedIso(r) || '' },
+  // Metro-proximity columns (roadmap item 5 wired into the pipeline
+  // 2026-07-06). Every input to metro_pull_score is exposed so any
+  // ranking is auditable directly. The score itself is a SECONDARY sort
+  // key inside a tier -- never blended into `attractiveness_score` or
+  // `tier`. If ScanResultRow's metro_* fields are None (parcel scanned
+  // before this wiring landed, or CENSUS_API_KEY unavailable at the
+  // time), each column renders "—" and the row sorts to the bottom
+  // under a metro-based sort.
+  { key: 'metro_place_basename', label: 'Metro', align: 'left',
+    cellHtml: r => r.metro_place_basename || '—',
+    sortValue: r => r.metro_place_basename || '' },
+  { key: 'metro_distance_miles', label: 'Miles', align: 'num',
+    cellHtml: r => r.metro_distance_miles != null ? r.metro_distance_miles.toFixed(1) : '—',
+    sortValue: r => r.metro_distance_miles ?? 999 },
+  { key: 'metro_place_population', label: 'Metro pop', align: 'num',
+    cellHtml: r => r.metro_place_population != null ? r.metro_place_population.toLocaleString() : '—',
+    sortValue: r => r.metro_place_population ?? -1 },
+  { key: 'metro_place_median_hh_income', label: 'Metro inc', align: 'num',
+    cellHtml: r => r.metro_place_median_hh_income != null ? '$' + r.metro_place_median_hh_income.toLocaleString() : '—',
+    sortValue: r => r.metro_place_median_hh_income ?? -1 },
+  { key: 'metro_pull_score', label: 'Metro pull', align: 'num',
+    cellHtml: r => r.metro_pull_score != null
+      ? `<span class="mono" title="log10((pop × income) / (distance + 1))">${r.metro_pull_score.toFixed(2)}</span>`
+      : '—',
+    sortValue: r => r.metro_pull_score ?? -1 },
 ];
 
 const DB_LIST_FILTERS = [
   { key: 'county_id', elementId: 'dbListFilterCounty', accessor: r => r.county_id || '' },
   { key: 'tier',      elementId: 'dbListFilterTier',   accessor: r => _dbTier(r) },
+  // Metro-name filter: lets the user pivot into "everything near Tampa"
+  // / "everything near Orlando" per item 6's original spec. Populated
+  // at render time from the actual loaded data (same pattern as County).
+  { key: 'metro_place_basename', elementId: 'dbListFilterMetro', accessor: r => r.metro_place_basename || '' },
 ];
 
 let _dbView = 'map';
-// Default sort: tier (asc = qualifying tiers first) then score (desc).
-// The second key is applied when the first key is tied, mirroring the
-// server-side ordering in /api/property-db/{county_id}/ranked.
-let _dbListSort = { key: 'tier', dir: 'asc', secondary: { key: 'attractiveness_score', dir: 'desc' } };
+// Default sort (2026-07-06 pass, item 6): tier ascending (qualifying
+// tiers first) then metro_pull_score descending (bigger nearby metro
+// = higher demand pull). Score / acres / etc. are still available as
+// single-column sorts via header click. metro_pull_score is a
+// SECONDARY sort key only -- never blended into `tier` or the
+// statutory pathway score itself. Rows with a null metro score sort
+// last within their tier (see sortValue in DB_LIST_COLUMNS above).
+let _dbListSort = { key: 'tier', dir: 'asc', secondary: { key: 'metro_pull_score', dir: 'desc' } };
 const _dbSelectedKeys = new Set();
 
 function _dbListFilteredRows(){
@@ -2923,6 +2960,20 @@ function _populateDbCountyFilter(){
   const counties = [...new Set(_dbAllParcels.map(r => r.county_id).filter(Boolean))].sort();
   sel.innerHTML = '<option value="">All counties</option>'
     + counties.map(c => `<option value="${c}">${c}</option>`).join('');
+  sel.value = current;
+}
+
+function _populateDbMetroFilter(){
+  // Populated from whatever metro names actually landed on rows this
+  // run, so we don't hardcode a list of ~955 FL places. Rows scanned
+  // before the metro-proximity wiring landed have null metro_place_
+  // basename and don't contribute an option here.
+  const sel = document.getElementById('dbListFilterMetro');
+  if(!sel) return;
+  const current = sel.value;
+  const metros = [...new Set(_dbAllParcels.map(r => r.metro_place_basename).filter(Boolean))].sort();
+  sel.innerHTML = '<option value="">Any metro</option>'
+    + metros.map(m => `<option value="${m}">${m}</option>`).join('');
   sel.value = current;
 }
 
@@ -3024,6 +3075,7 @@ function _setDbView(kind){
   });
   if(showList){
     _populateDbCountyFilter();
+    _populateDbMetroFilter();
     _renderDbList();
   } else {
     setTimeout(() => _dbMap && _dbMap.invalidateSize(), 60);

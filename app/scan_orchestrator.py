@@ -43,6 +43,7 @@ from arcgis_client import query_layer
 import exclusions
 import flu_taxonomy
 import flwmi_client
+import metro_proximity
 import roads_client
 import scoring
 import statutory_checks
@@ -115,6 +116,79 @@ class ScanResultRow:
     usb_perimeter_pct: Optional[float] = None
     adjacent_to_interstate: bool = False
     adjacent_to_usb: bool = False
+    # Metro-proximity fact set (roadmap item 5, 2026-07-06). Nearest FL
+    # Census place to this parcel's centroid + the transparent
+    # "metro pull" score computed from that place's population + median
+    # HH income, discounted by distance. Every input to the score is
+    # stored so ranking is auditable. Score is a SECONDARY sort key
+    # only -- never blended into `tier` or `attractiveness_score`.
+    # All None when CENSUS_API_KEY is unavailable or the metro fetch
+    # failed (see _load_fl_places_safely in this file).
+    metro_place_name: Optional[str] = None
+    metro_place_basename: Optional[str] = None
+    metro_place_fips: Optional[str] = None
+    metro_distance_miles: Optional[float] = None
+    metro_place_population: Optional[int] = None
+    metro_place_median_hh_income: Optional[float] = None
+    metro_pull_score: Optional[float] = None
+
+
+_METRO_FIELDS_UNKNOWN = {
+    "metro_place_name": None,
+    "metro_place_basename": None,
+    "metro_place_fips": None,
+    "metro_distance_miles": None,
+    "metro_place_population": None,
+    "metro_place_median_hh_income": None,
+    "metro_pull_score": None,
+}
+
+
+def _metro_fields_for(lat: Optional[float], lon: Optional[float], places: list) -> dict:
+    """
+    Map a parcel centroid to the seven metro_* fields on ScanResultRow.
+    Returns all-None when the centroid is missing or no FL place is
+    within the default 50-mile radius, so a downstream `**_metro_fields_for`
+    spread always fills every field. Score itself is only ever set from
+    real inputs (see metro_proximity.compute_metro_pull), never fabricated.
+    """
+    if lat is None or lon is None or not places:
+        return dict(_METRO_FIELDS_UNKNOWN)
+    mp = metro_proximity.metro_proximity_for_parcel(lat, lon, places)
+    if mp is None:
+        return dict(_METRO_FIELDS_UNKNOWN)
+    return {
+        "metro_place_name": mp.place_name,
+        "metro_place_basename": mp.place_basename,
+        "metro_place_fips": mp.place_fips,
+        "metro_distance_miles": mp.distance_miles,
+        "metro_place_population": mp.place_population,
+        "metro_place_median_hh_income": mp.place_median_hh_income,
+        "metro_pull_score": mp.metro_pull_score,
+    }
+
+
+def _load_fl_places_safely() -> list:
+    """
+    Load FL Census places for the metro-proximity signal without letting
+    a Census/TIGERweb hiccup break the whole scan. Returns [] on any
+    failure -- callers treat empty as "score every parcel's metro
+    fields as None," which the frontend already renders as "not
+    available." Deliberately swallows exceptions rather than raising
+    because metro proximity is a nice-to-have secondary sort signal,
+    NOT a statutory or eligibility gate.
+    """
+    import os
+    key = os.environ.get("CENSUS_API_KEY")
+    if not key:
+        return []
+    try:
+        return metro_proximity.fetch_fl_places(key)
+    except Exception:  # noqa: BLE001
+        # Silently degrade so scans keep working. Callers see [] and
+        # score every parcel's metro fields as None. Deliberately not
+        # raising here -- metro proximity is a secondary sort signal.
+        return []
 
 
 def run_county_scan(
@@ -168,6 +242,13 @@ def run_county_scan(
     )
 
     rows: list[ScanResultRow] = []
+
+    # Metro-proximity places load (roadmap item 5, 2026-07-06). One-shot
+    # per process -- cached at module scope inside metro_proximity so
+    # subsequent scans reuse the ~955-place list. Safe on failure: an
+    # empty list means every parcel's metro fields land as None.
+    with _time_block("metro_places_load"):
+        _fl_places = _load_fl_places_safely()
 
     # Fix B (2026-07-06): batched water/sewer lookup. Fetch every
     # candidate's FLWMI record in one remote call (chunked to 50 IDs)
@@ -595,6 +676,7 @@ def run_county_scan(
             adjacent_to_interstate=adjacent_to_interstate,
             adjacent_to_usb=adjacent_to_usb,
             geometry_wgs84=geometry_wgs84,
+            **_metro_fields_for(centroid_lat, centroid_lon, _fl_places),
         ))
 
     rows.sort(key=lambda r: (r.attractiveness_score or 0), reverse=True)

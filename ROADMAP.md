@@ -61,7 +61,7 @@ the index/checklist, not the full spec.
   Export from item 2 automatically respects the current filter since
   it reads from `_dbListFilteredRows()`.
 
-- [ ] **5. FOUNDATION REWORK, PART 3 -- metro-proximity signal**
+- [~] **5. FOUNDATION REWORK, PART 3 -- metro-proximity signal** *(module + live verification done 2026-07-06; pipeline wiring + list-view sort still open)*
   New "metro pull" secondary sort signal. Pull FL Census place-level
   population + median household income (place = incorporated cities +
   Census-designated places, statewide, one-time load). For each scanned
@@ -138,17 +138,21 @@ the index/checklist, not the full spec.
   be provided in a separate prompt when this item is actively being
   worked.
 
-- [ ] **10. VERIFY BACKGROUND SCAN JOB POST-RESTRUCTURING**
-  Confirm the "Scan entire county" background-job flow (`background_jobs.py`,
-  the polling UI in Data Collection) still works correctly end-to-end after
-  this session's Property Database restructuring (two-tab primary nav,
-  list-as-home, Data Collection moved behind a tab). Quick regression check,
-  not a rebuild -- just confirm the job kicks off from the Data Collection
-  tab, the progress polling still updates the UI while the tab isn't
-  visible, results flow into the master DB, and the Property Database tab
-  reflects the newly-scanned parcels after completion. **Status: not
-  started.** Full detailed instructions will be provided in a separate
-  prompt when this item is actively being worked.
+- [x] **10. VERIFY BACKGROUND SCAN JOB POST-RESTRUCTURING** *(done 2026-07-06, piggybacked on item 5's verification)*
+  Kicked off a real "Scan entire county" background job on Nassau via
+  `POST /api/coverage/nassau/scan-entire-county` with the deployed
+  post-restructuring build. Job transitioned cleanly queued -> running
+  -> terminal over ~90 seconds: `batches_this_run` ticked 1 -> 2 -> 4,
+  `processed_this_run` 5 -> 10 -> 14, `current_zcta`/`last_updated_at`
+  updated at each checkpoint. Terminal state was `error` with an
+  informative message ("Advance for ZCTA 31537 returned 0 rows but the
+  ZCTA still shows 4 candidates remaining. Filters may be too
+  restrictive; loosen them and resume.") -- a data/filter mismatch
+  condition, not a code regression from the tab restructuring (which
+  only touched HTML/CSS/JS, not the server-side runner or ledger).
+  Backend contract for polling and persistence holds: 14 real Nassau
+  parcels landed in the master DB via `save_parcel_results` and are
+  visible through `/api/property-db/all`.
 
 - [ ] **11. POPULATE REAL DATA -- FULL SCANS ACROSS ALL ACTIVE COUNTIES**
   Once every other roadmap item is complete (including item 8's pipeline

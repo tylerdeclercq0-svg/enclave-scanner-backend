@@ -400,6 +400,14 @@ def acs_probe(
     tract: str = Query("030901", description="Six-digit tract code, default one in Pasco"),
     block_group: str = Query("*", description="Block group number (default * = all)"),
     year: int = Query(2023, description="ACS 5-year vintage (endpoint year). Used for pop-trend probes."),
+    # Optional geography overrides. When set, they replace the
+    # block-group-scoped defaults above so this endpoint can probe any
+    # Census geography level (place, county, state, etc.) without a
+    # separate endpoint per level. Consistent with acs-probe's original
+    # "ad-hoc probe" intent. Roadmap item 5 (metro proximity) is the
+    # first caller that needs place-level data.
+    for_clause: Optional[str] = Query(None, description="Raw ACS `for=` clause (e.g. 'place:*'). Overrides block_group defaults."),
+    in_clause: Optional[str] = Query(None, description="Raw ACS `in=` clause (e.g. 'state:12'). Overrides the state+county+tract defaults."),
     debug_key: Optional[str] = Query(None, description="Shared secret (fallback to X-Debug-Key header)"),
     x_debug_key: Optional[str] = Header(None, description="Shared secret matching DEBUG_API_KEY env var"),
 ):
@@ -420,14 +428,15 @@ def acs_probe(
     if not api_key:
         raise HTTPException(status_code=500, detail="CENSUS_API_KEY not set")
     import requests
+    from urllib.parse import quote_plus
     var_list = ",".join(v.strip() for v in variables.split(",") if v.strip())
     base = f"https://api.census.gov/data/{year}/acs/acs5"
-    url = (
-        f"{base}?get=NAME,{var_list}"
-        f"&for=block%20group:{block_group}"
-        f"&in=state:{state}+county:{county}+tract:{tract}"
-        f"&key={api_key}"
-    )
+    for_part = quote_plus(for_clause) if for_clause else f"block%20group:{block_group}"
+    in_part = quote_plus(in_clause) if in_clause else f"state:{state}+county:{county}+tract:{tract}"
+    url = f"{base}?get=NAME,{var_list}&for={for_part}"
+    if in_part:  # some geography levels (e.g. state:*) have no `in=` clause
+        url += f"&in={in_part}"
+    url += f"&key={api_key}"
     try:
         resp = requests.get(url, timeout=30)
         # Preserve non-JSON responses (e.g. the "Invalid Key" HTML page)
@@ -443,6 +452,90 @@ def acs_probe(
         }
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/api/debug/metro-verify")
+def metro_verify(
+    county_id: Optional[str] = Query(None, description="Restrict to one county's parcels (default = all counties)"),
+    max_parcels: int = Query(20, description="Cap on parcels scored per request"),
+    max_miles: float = Query(50.0, description="Only consider FL places within this radius"),
+    debug_key: Optional[str] = Query(None),
+    x_debug_key: Optional[str] = Header(None),
+):
+    """
+    Verification harness for roadmap item 5 (metro proximity). Loads FL
+    Census places (~800), then scores a batch of already-scanned real
+    parcels from the coverage ledger against them, returning the raw
+    inputs alongside the computed metro_pull_score so the formula can
+    be sanity-checked before wiring this into the parcel pipeline
+    broadly.
+
+    Ad-hoc; gated by DEBUG_API_KEY like /api/debug/acs-probe.
+    """
+    _require_debug_key(x_debug_key, debug_key)
+    census_api_key = os.environ.get("CENSUS_API_KEY")
+    if not census_api_key:
+        raise HTTPException(status_code=500, detail="CENSUS_API_KEY not set")
+    import metro_proximity
+    try:
+        places = metro_proximity.fetch_fl_places(census_api_key)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"FL places fetch failed: {exc}")
+
+    # Pull real parcels from the master DB. County-scoped if requested,
+    # otherwise round-robin across every county so a "no county_id" call
+    # gives representative coverage.
+    if county_id:
+        parcels = coverage_ledger.list_all_parcels(county_id)
+    else:
+        parcels = coverage_ledger.list_all_parcels_all_counties()
+    parcels = [p for p in parcels if p.get("centroid_lat") is not None][:max_parcels]
+
+    results = []
+    for p in parcels:
+        mp = metro_proximity.metro_proximity_for_parcel(
+            p["centroid_lat"], p["centroid_lon"], places, max_miles=max_miles,
+        )
+        results.append({
+            "parcel_id": p.get("parcel_id"),
+            "county_id": p.get("county_id"),
+            "tier": p.get("tier") or p.get("confidence_tier"),
+            "acreage": p.get("acreage"),
+            "centroid_lat": p.get("centroid_lat"),
+            "centroid_lon": p.get("centroid_lon"),
+            "metro_proximity": asdict(mp) if mp else None,
+        })
+
+    # Simple spot-check: 3 places closest to each pilot-county seat, so
+    # the caller can eyeball "does Tampa show up near Pasco parcels."
+    reference_points = {
+        "pasco (28.30, -82.42)": (28.30, -82.42),
+        "nassau (30.62, -81.71)": (30.62, -81.71),
+        "st_johns (29.90, -81.34)": (29.90, -81.34),
+        "osceola (28.29, -81.41)": (28.29, -81.41),
+    }
+    reference_hits = {}
+    for label, (lat, lon) in reference_points.items():
+        top = metro_proximity.nearest_places(lat, lon, places, max_miles=max_miles, max_results=3)
+        reference_hits[label] = [
+            {
+                "name": p.basename,
+                "distance_mi": round(d, 2),
+                "population": p.population,
+                "median_hh_income": p.median_household_income,
+                "metro_pull_score": metro_proximity.compute_metro_pull(
+                    p.population, p.median_household_income, d,
+                ),
+            }
+            for p, d in top
+        ]
+
+    return {
+        "fl_places_loaded": len(places),
+        "reference_nearest_places_by_pilot_county": reference_hits,
+        "parcels_scored": len(results),
+        "results": results,
+    }
 
 
 class DiligenceExportPayload(BaseModel):

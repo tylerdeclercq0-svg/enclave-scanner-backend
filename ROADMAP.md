@@ -172,7 +172,7 @@ the index/checklist, not the full spec.
   Recon script at [`scripts/phase2_profile.py`](scripts/phase2_profile.py)
   for future re-profiling.
 
-- [ ] **9. SCALE-UP, PHASE 3 -- prioritized full verification to >=30 confirmed-live counties**
+- [~] **9. SCALE-UP, PHASE 3 -- prioritized full verification to >=30 confirmed-live counties** *(Wave 1 done 2026-07-06, 3/10 wired; further waves needed to reach the >=30 goal)*
   Using item 7's triage list
   ([`scripts/phase1_recon_results.md`](scripts/phase1_recon_results.md)),
   work through counties in priority order to reach at least 30
@@ -200,9 +200,47 @@ the index/checklist, not the full spec.
   Phase 3's scope.
 
   **Blocked on item 7** (need the triage list to pick from) -- now
-  complete. **Status: not started.** Full detailed instructions will
-  be provided in a separate prompt when this item is actively being
-  worked.
+  complete.
+
+  **Wave 1 outcome (2026-07-06):** worked through the 10 counties
+  Phase 1 confidently marked "live." Only **3/10 turned out viable**
+  via Phase 1's URLs -- the others have parcel services that lack
+  critical fields (use code, acreage) or are misindexed:
+
+  | County | Outcome | Reason |
+  |---|---|---|
+  | **Lee** | ✓ WIRED + end-to-end scan verified | DORCODE 2-digit range, GISACRES, O_NAME; FLUM ag_flu_values 'Coastal Rural' (Wave-1 best-guess) |
+  | **Leon** | ✓ WIRED + end-to-end scan verified | PROP_USE 4-digit CAST-to-int, CALC_ACREA, OWNER1/OWNER2; FLUM 'AG' (highest-confidence FLUM value of the wave) |
+  | **Citrus** | ✓ WIRED + end-to-end scan verified | LUC 4-digit CAST-to-int + blank-string guard, OWN1/OWN2, geometry-computed acreage; FLUM 'RUR' (Wave-1 best-guess) |
+  | Collier | not viable via Phase 1 URLs | Both "Parcels" (10-field join view) and "Simplified Parcels" (4 fields) lack a use-code field |
+  | Glades | not viable via Phase 1 URLs | 6-field layer, only PARCELNO |
+  | Hendry | not viable via Phase 1 URLs | 9-field layer, no use code, no acreage |
+  | Pinellas | not viable via Phase 1 URLs | Both AGOL and egis.pinellas.gov URLs are SURVEY PLAN datasets (PLANID/ACCURACY/MISCLOSERATIO), not parcels |
+  | Gadsden + Wakulla | not viable via Phase 1 URLs | 8-field Leon-hosted overlay (TAXID/OWNER/ADDRESS/JURISDICTION), no use code |
+  | Okeechobee | not viable via Phase 1 URLs | 91 fields but all `gis_int_*` columns are empty strings -- broken join dump |
+
+  Non-viable != impossible: these counties may still have real GIS
+  behind a Property Appraiser subdomain not indexed on AGOL under the
+  search terms Phase 1 tried (matches Phase 1's own known limitation).
+  Adding any of them requires a per-county deep-dive.
+
+  Investigation script:
+  [`scripts/phase3_investigate.py`](scripts/phase3_investigate.py).
+
+  **Wave 1 caveats worth flagging for a future refinement pass:**
+  - FLUM `agricultural_flu_values` for Lee ('Coastal Rural') and Citrus
+    ('RUR') are best-guesses from a 500-row distinct-values sample.
+    Both need a scan-quality check before item 13's real-data run.
+  - None of the 3 wired counties has an automated unincorporated check;
+    all three left at `unincorporated_check=manual_only`.
+  - Leon's SALEDTE_S1/SALEDTE_S2 encoding wasn't decoded in Wave 1;
+    `sale_date_encoding=None` so the post-1/1/2025 flag can't fire.
+
+  **Status: Wave 1 complete (3 wired, 7 non-viable reported), 27
+  counties still needed to reach the >=30 goal.** Next wave prompt
+  should specify targets (Phase 1's "unclear" bucket with the 5
+  CRITICAL re-check counties above -- Palm Beach, Sarasota, Manatee,
+  Orange, Seminole -- is the highest-leverage next batch).
 
 - [x] **10. VERIFY BACKGROUND SCAN JOB POST-RESTRUCTURING** *(done 2026-07-06, piggybacked on item 5's verification)*
   Kicked off a real "Scan entire county" background job on Nassau via

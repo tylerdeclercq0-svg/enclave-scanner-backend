@@ -1072,6 +1072,70 @@ COUNTIES: dict[str, CountyEndpoint] = {
         sale_date_encoding="year_only",
         sale_year_field="SALE1_YEAR",
     ),
+    "polk": CountyEndpoint(
+        id="polk",
+        name="Polk",
+        fips=53,
+        # FLUM: Polk County's OWN official Hub portal
+        # (polk-county-geoportal-open-data-polk-bocc-gis.hub.arcgis.com).
+        # DCAT feed at /api/feed/dcat-us/1.1.json surfaced the FeatureServer
+        # -- same technique that unlocked Marion. Real fields FLUNAME (primary
+        # FLU code, 36 distinct values), DEV_AREA_DESC (broader development-
+        # area classification), FLU_CP, FLU_LDC.
+        # Full paginated distinct on FLUNAME: LAKES (767x, water bodies),
+        # RL-1/RL-2/RL-3/RL-4 (Rural Land tiers, 414+250+218+162), A/RR
+        # (390x = Agriculture/Rural Residential, primary ag), CITY (303x,
+        # incorporated), RM/RS/RL/LR/RH (residential density tiers), PRESV
+        # (226x, Preservation), IND (179x, Industrial), BPC-1/BPC-2
+        # (Business Park Center), INST-1/INST-2 (Institutional), LCC, CE
+        # (120x, Conservation Easement), ROS (119x, Recreation/Open Space),
+        # NAC, OC, DRI, PM, CC, ...
+        # FLUM-at-parcel-centroid on 3 known SWFWMD ag parcels:
+        #   OVERSTREET MARK (248ac PARUSECODE=060 Grazing) -> FLUNAME='A/RR'
+        #   CRESCASA LLC (104ac PARUSECODE=060 Grazing) -> FLUNAME='A/RR'
+        #   ANTENNA LLC (96ac PARUSECODE=051) -> FLUNAME='LAKES' + 'A/RR'
+        # ag_flu_values covers A/RR + all 4 Rural Land tiers + LAKES +
+        # PRESV + CE + ROS as non-residential-development.
+        flum_service_url=(
+            "https://services1.arcgis.com/YMN4aIYxPejzDjo2/arcgis/rest/"
+            "services/Map_Land_Use_and_Zoning___FLU_2030/FeatureServer/0"
+        ),
+        flu_field="FLUNAME",
+        jurisdiction_field=None,
+        acreage_field=None,
+        agricultural_flu_values=(
+            "A/RR", "RL-1", "RL-2", "RL-3", "RL-4",
+            "LAKES", "PRESV", "CE", "ROS",
+        ),
+        population=787404,  # BEBR 2024 estimate. Under 1.75M cap.
+        confirmed_live=True,
+        notes=(
+            "Wave 2b batch 5 (2026-07-06). PARCEL via SWFWMD layer 14. "
+            "FLUM at Polk's OWN official Hub (polk-county-geoportal-open-"
+            "data-polk-bocc-gis.hub.arcgis.com) FLU 2030 layer. Discovered "
+            "via the DCAT feed technique that unlocked Marion. Field "
+            "FLUNAME (36 distinct categories -- 2nd-largest FLU vocabulary "
+            "of any wired county after Lee). ag_flu_values covers A/RR "
+            "(primary ag, 390x), all 4 Rural Land tiers (1044x combined), "
+            "LAKES (water bodies), PRESV (Preservation), CE (Conservation "
+            "Easement), ROS (Recreation/Open Space). Validated via "
+            "FLUM-at-centroid on 3 SWFWMD ag parcels (all correctly in "
+            "A/RR or LAKES)."
+        ),
+        parcel_service_url=(
+            "https://www25.swfwmd.state.fl.us/arcgis12/rest/services/"
+            "BaseVector/parcel_search/MapServer/14"
+        ),
+        parcel_source="swfwmd_parcel_search",
+        parcel_use_code_field="PARUSECODE",
+        parcel_agricultural_use_code_range=("050", "069"),
+        parcel_acreage_field="AREANO",
+        parcel_owner_field="OWNNAME",
+        parcel_owner_field_2=None,
+        parcel_id_field="PARNO",
+        sale_date_encoding="year_only",
+        sale_year_field="SALE1_YEAR",
+    ),
     "marion": CountyEndpoint(
         id="marion",
         name="Marion",

@@ -546,6 +546,39 @@ the index/checklist, not the full spec.
   DATA -- just as a ZIP not a live service -- so it's the strongest
   candidate for future work if shapefile ingestion is scoped in.
 
+  **Wave 2b batch 5 -- DCAT-feed technique applied to the 7 remaining
+  (2026-07-06):** hit `<hub>/api/feed/dcat-us/1.1.json` for common
+  Hub URL patterns per county. Same technique that unlocked Marion in
+  batch 4. Result: **1 additional wired (Polk).**
+
+  | County | Outcome |
+  |---|---|
+  | **Polk** | ✓ WIRED + live-verified. Hub at `polk-county-geoportal-open-data-polk-bocc-gis.hub.arcgis.com` responded to DCAT feed; surfaced FeatureServer at `services1.arcgis.com/YMN4aIYxPejzDjo2/Map_Land_Use_and_Zoning___FLU_2030/FeatureServer/0`. Field `FLUNAME` (36 distinct categories), ag values `A/RR + RL-1/2/3/4 + LAKES + PRESV + CE + ROS`. FLUM-at-centroid: OVERSTREET MARK (248ac), CRESCASA LLC (104ac), ANTENNA LLC (96ac) all correctly in A/RR or LAKES. |
+  | DeSoto | ✗ still blocked. No Hub portal at `data-desotocountyfl.opendata.arcgis.com` or variants. |
+  | Hernando | ✗ still blocked. No Hub portal responded. |
+  | Highlands | ✗ still blocked. No Hub portal. |
+  | Lake | ✗ still blocked. No Hub portal. |
+  | Levy | ✗ still blocked. No Hub portal. Very small county (~40k pop). |
+  | Sumter | ✗ still blocked. No Hub portal. |
+
+  **Final Wave 2b state: 13 confirmed-live counties.** Pilots
+  (Pasco, Nassau, St. Johns, Osceola) + Wave 1 (Lee, Leon, Citrus) +
+  Wave 2b (Sarasota, Manatee, Hardee, Charlotte, Marion, Polk).
+  **7 counties still parcel-ready + FLUM-blocked:** Duval (has ZIP
+  shapefile, different integration model), DeSoto, Hernando,
+  Highlands, Lake, Levy, Sumter (no Hub portal, no direct GIS
+  server responding to any tried pattern).
+
+  For the remaining 6 no-Hub-portal counties: the automatable search
+  approaches are genuinely exhausted. Reaching them would require
+  either (a) direct human-interactive investigation per county
+  (browsing each county's own website/comp-plan documents for a real
+  URL not exposed to API queries), (b) contacting each county's GIS
+  or Planning Department directly to request access, or (c) building
+  shapefile-ingestion infrastructure that would unlock both Duval
+  AND many of the smaller counties (which often publish only static
+  files, not live services).
+
 - [x] **10. VERIFY BACKGROUND SCAN JOB POST-RESTRUCTURING** *(done 2026-07-06, piggybacked on item 5's verification)*
   Kicked off a real "Scan entire county" background job on Nassau via
   `POST /api/coverage/nassau/scan-entire-county` with the deployed

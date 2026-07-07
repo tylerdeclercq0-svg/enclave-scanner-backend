@@ -1787,3 +1787,82 @@ instance transition -- something Render's ephemeral filesystem
 provably could not do (item 11 verified that the Nassau parcels
 written during item 10 verification were gone ~15 min later without
 even a redeploy).
+
+## Wave 2b closeout -- 13 confirmed-live counties (2026-07-06)
+
+Long session ending. Session-scope Wave 2b (scale-up beyond the 4
+pilot counties) grew a lot -- see ROADMAP.md item 9 for the full
+per-batch breakdown. Snapshot for whoever picks up next:
+
+**Currently confirmed_live in `county_registry.py` (13):**
+- Pasco, Nassau, St. Johns, Osceola (original pilots)
+- Lee, Leon, Citrus (Wave 1)
+- Sarasota, Manatee, Hardee, Charlotte, Marion, Polk (Wave 2b)
+
+**Shared infrastructure discovered this session:**
+- **SWFWMD shared parcel_search MapServer** at
+  `www25.swfwmd.state.fl.us/arcgis12/rest/services/BaseVector/parcel_search/MapServer`
+  hosts 16 FL counties as separate layer IDs with an IDENTICAL 95-field
+  schema. Single `_swfwmd_ag_where` / `_swfwmd_is_agricultural` classifier
+  in `parcel_fetcher.py` serves all of them -- adding a new SWFWMD-sourced
+  county is one dict entry, not new code. **DOCUMENTED SERVICE WINDOW:**
+  6 AM - 10 PM Eastern daily availability, enforced via
+  `app/service_windows.py` and `CountyEndpoint.parcel_source =
+  "swfwmd_parcel_search"`. Concentration risk: one upstream mirror,
+  affects all 6 SWFWMD-sourced wired counties (Sarasota, Manatee, Hardee,
+  Charlotte, Marion, Polk) simultaneously if it changes schema or goes
+  down. Worth knowing, not a reason to avoid it.
+- **FDOT District 3 shared FLUM MapServer** for the FL panhandle
+  (owner `matthew.gore_fdot3`, service `D3_FLUM_County`) hosts individual
+  layers for Bay/Escambia/Gulf/Jackson/Leon/Okaloosa/Santa Rosa/Walton/
+  Washington. Tested this session for D1/D5/D7 equivalents -- no other
+  FDOT district publishes an analogous aggregation. D3 was a Panhandle-
+  specific FDOT staff initiative, not a statewide pattern.
+
+**Discovery techniques that worked this session:**
+- Direct county-own GIS server URLs (`ags3.scgov.net`, `mymanatee.org`,
+  `gis.hardeecounty.net`, `agis.charlottecountyfl.gov`) -- proven for
+  4 of the 6 Wave 2b wins.
+- **DCAT feed on county Hub portals** (`<hub-url>/api/feed/dcat-us/1.1.json`)
+  -- proven for Marion + Polk. This technique should be tried FIRST for
+  any future county that has a `data-<county>.opendata.arcgis.com` or
+  `<county>-hub.arcgis.com` presence, before falling back to page
+  scraping or JS inspection.
+
+**Discovery techniques that DIDN'T work reliably:**
+- AGOL title/owner search for FLUM specifically -- returns third-party
+  republishes, wrong-state homonyms (Marion County OREGON fooled Wave 2b
+  batch 1; NC's Chapel Hill "Orange County," OK "Seminole County," MN
+  "Polk County," etc. across searches), auth-gated services (Duval's
+  `Jacksonville_FLU` requires token).
+- Blind URL guessing for Property Appraiser subdomains -- 0 of 6 counties
+  responded (Wave 2b batch 3).
+- FGIO / statewide FLUM aggregator search -- doesn't exist as a public
+  REST endpoint.
+
+**Still-blocked counties, 7 total, roughly ordered by likely difficulty:**
+- **Duval** -- Known FLU data exists as downloadable shapefile ZIP at
+  `mapstest.coj.net/publicdata/landuse.zip` (per the duvalproperty
+  application's own homepage). Not a live REST service. Strongest
+  candidate if shapefile-ingestion infrastructure is scoped in.
+- **DeSoto, Hernando, Highlands, Lake, Levy, Sumter** -- No Hub portal,
+  no responding direct GIS server, no viable AGOL hits. Likely require
+  per-county interactive investigation.
+
+**Recommended next steps** (whoever picks up):
+1. **New session** -- this one's grown long. Fresh context helps.
+2. **Item 8 (Scale-Up Phase 2)** was closed with an honest "positioning
+   not a measured win" verdict; don't relitigate.
+3. **Item 11 (ZCTA count-vs-fetch)** was a big correctness win; ~52% of
+   the OLD ledger totals were spurious. Trust the current fetcher-shared
+   count.
+4. **Item 12 (durable persistence)** is on Render disk at `/var/data`;
+   don't disable when experimenting.
+5. **Item 13 (populate real data)** -- 13 wired counties is a reasonable
+   starting set. Before running a real full-county scan across all 13,
+   consider whether the SWFWMD 6 AM-10 PM window (enforced in code) will
+   require batched-window scheduling for scans that would otherwise run
+   overnight. `service_windows.py` handles pausing/resuming individual
+   jobs but doesn't currently sequence multiple counties. If you want to
+   run all 13 in a batch, sequence the 6 SWFWMD-sourced ones during
+   morning window and the 7 direct-source ones any time.

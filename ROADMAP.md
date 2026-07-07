@@ -385,6 +385,48 @@ the index/checklist, not the full spec.
   Investigation script from this pass:
   [`scripts/phase3_wave2_recon.py`](scripts/phase3_wave2_recon.py).
 
+  **Wave 2b outcome (2026-07-06):** two additions closed out, three
+  still blocked.
+
+  FIRST -- SWFWMD availability window now a REAL, enforced constraint
+  (not just a doc note). New `app/service_windows.py` module. Sync
+  /scan + /coverage/advance + background /scan-entire-county all
+  refuse to start outside 6 AM-10 PM Eastern for SWFWMD-sourced
+  counties (503 with next-window-open time). A running background
+  job that crosses INTO blackout mid-run transitions to
+  `paused_awaiting_window` and sleeps in-thread until the window
+  reopens. On process restart, `mark_interrupted_at_startup` picks
+  up paused jobs whose window has since reopened and spawns fresh
+  worker threads. `CountyEndpoint.parcel_source` field carries the
+  source identifier + a concentration-risk note (every SWFWMD-
+  sourced county shares one upstream mirror -- a schema drift or
+  outage there hits all of them at once, unlike direct-county
+  sources which each have their own failure domain).
+
+  SECOND -- FLUM discovery closed for 2 of 5 targeted counties:
+
+  | County | Outcome | Detail |
+  |---|---|---|
+  | **Sarasota** | ✓ WIRED + verified live | Official FLUM at `ags3.scgov.net/server/rest/services/Hosted/FutureLandUse` (scgov.net = Sarasota County Gov). `flucode` field, ag values `RURAL` + `SRURAL`. Test parcels (BYRD LARRY DOR-062 Pasture) correctly sit in `MODR` = candidate enclave. |
+  | **Manatee** | ✓ WIRED + verified live | Official FLUM at `mymanatee.org/gisits/rest/services/opendata/Planning/FeatureServer/1`. `FLULABEL` field (FLUTYPE is null on some rows), ag value `AG-R`. Test parcels (DAKIN 340ac, MANNING 279/197ac) all correctly in FLULABEL='AG-R'. MANNING parcels correctly flagged sold_since_2025=True via SALE1_YEAR year_only encoding. |
+  | Marion | ✗ FLUM still blocked | Marion FL has no official AGOL org (the `Marion_County` org that surfaces is Marion COUNTY OREGON -- Willamette Greenway, Measure 37/49). No FLUM found on official county sites. Parcel infrastructure via SWFWMD layer 11 is confirmed and ready. |
+  | Polk | ✗ FLUM still blocked | Polk Hub site (polk-county-geoportal-open-data-polk-bocc-gis.hub.arcgis.com) exists but Hub API queries returned empty. Parcel infrastructure via SWFWMD layer 14 is confirmed and ready. |
+  | Duval | ✗ FLUM inaccessible | coj.net has 33 folders none of which host a land use / zoning / planning service. `Jacksonville_FLU` on AGOL requires auth token (HTTP 499 Token Required). Parcel infrastructure via coj.net Parcels layer confirmed and ready. |
+
+  Also confirmed by wire-up: SWFWMD's 95-field schema uniformity means
+  ONE `_swfwmd_ag_where` + `_swfwmd_is_agricultural` classifier pair
+  in parcel_fetcher serves every SWFWMD-sourced county (registered
+  for `sarasota` and `manatee` in this pass). Adding future SWFWMD
+  counties is just a new dict entry, not new classifier code.
+
+  **8 more counties on the same SWFWMD schema not yet touched:**
+  Charlotte (layer 1), DeSoto (3), Hardee (4), Hernando (5),
+  Highlands (6), Lake (8), Levy (9), Sumter (16). Each still needs
+  its own official FLUM located + validated per Wave 1 discipline,
+  but the parcel-layer half of the work is proven, so this is a
+  real sizeable next opportunity. Do NOT start until the current
+  batch's blockers close or Tyler explicitly reprioritizes.
+
 - [x] **10. VERIFY BACKGROUND SCAN JOB POST-RESTRUCTURING** *(done 2026-07-06, piggybacked on item 5's verification)*
   Kicked off a real "Scan entire county" background job on Nassau via
   `POST /api/coverage/nassau/scan-entire-county` with the deployed

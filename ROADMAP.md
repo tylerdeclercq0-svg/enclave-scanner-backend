@@ -236,11 +236,75 @@ the index/checklist, not the full spec.
   - Leon's SALEDTE_S1/SALEDTE_S2 encoding wasn't decoded in Wave 1;
     `sale_date_encoding=None` so the post-1/1/2025 flag can't fire.
 
-  **Status: Wave 1 complete (3 wired, 7 non-viable reported), 27
-  counties still needed to reach the >=30 goal.** Next wave prompt
-  should specify targets (Phase 1's "unclear" bucket with the 5
-  CRITICAL re-check counties above -- Palm Beach, Sarasota, Manatee,
-  Orange, Seminole -- is the highest-leverage next batch).
+  **Wave 1 validation pass (2026-07-06):** Lee and Citrus's FLUM
+  `agricultural_flu_values` guesses were live-tested against known ag
+  parcels' FLUM-at-centroid values -- both were wrong:
+  - Lee: Wave-1 guess `('Coastal Rural',)` REFINED to `('Rural',
+    'Coastal Rural', 'Rural Community Preserve',
+    'Density Reduction/Groundwater Resource', 'DRGR', 'Lee County
+    FLUM: DRGR', 'Open Lands')` after a full paginated distinct-values
+    pull found 90+ FLU codes and 3-parcel test showed real ag parcels
+    sit in Rural + DRGR (not just Coastal Rural).
+  - Citrus: `('RUR',)` REFINED to `('AGR', 'RUR')` -- 'AGR' (40x in
+    full distinct pull) is the primary ag designation and was missed.
+  - Lee unincorporated_check: WIRED to `city_limits_layer_join` via
+    the Lee County Planning Tool's Municipal Boundaries layer 4
+    (CityName field, real values 'City of Cape Coral', etc.).
+    First post-fix scan proved it works: TAMIAMI DEL PRADO ACQ LLC
+    (41ac) correctly flagged as inside City of Cape Coral -> excluded
+    (silently scanned as a candidate in Wave 1).
+  - Citrus unincorporated_check: WIRED to `city_limits_layer_join`
+    via Citrus's CityBoundaries layer 9 (CORPNAME field, real values
+    'CRYSTAL RIVER', 'INVERNESS').
+  - Leon unincorporated_check: stays manual_only. TAXDIST field is
+    uniformly '1' across a 2000-row sample; AGOL search didn't
+    surface a Tallahassee city-limits FeatureServer. Explicitly
+    deferred with reason.
+  - Leon SALEDTE_S1 DECODED as MMYYYY 6-char string (samples:
+    '042025' = Apr 2025). New `mmyyyy_string` sale_date_encoding
+    added to statutory_checks.py. Live-verified: POWERHOUSE INC's
+    parcel (SALEDTE_S1='042025') correctly returns
+    sold_since_2025=True.
+
+  **Wave 2 (2026-07-06):** Probed the 10 Wave-2 counties
+  Tyler flagged via county Property Appraiser + GIS URL patterns +
+  AGOL owner search. **Actual conversion: 2 of 10 confirmed viable**
+  (Alachua, Manatee), 8 not viable via best-effort recon:
+
+  | County | Outcome | Detail |
+  |---|---|---|
+  | Alachua | ✓ viable (identified, NOT yet wired) | AlachuaCountyGIS/Parcels35_view: puse code (5500/6500/5900 confirmed ag), PUSECAT='Agricultural', acres Double, firstName1 owner. FLUM candidate `Future_Land_Use04` needs layer re-selection. |
+  | Manatee | ✓ viable (identified, NOT yet wired) | mymanatee.org opendata/General: LUC code (5000/6000 confirmed ag), LUC_DESCRIPTION, ACRES String, OWNER+SECONDARY_OWNER, FUTURE_LAND_USE on the parcel layer (AG-R = ag) -- unusual pattern that deviates from pilot counties. |
+  | Palm Beach | ✗ not viable via cheap recon | No official parcel layer surfaced; hits are third-party republishes |
+  | Sarasota | ✗ not viable via cheap recon | Same |
+  | Orange | ✗ not viable via cheap recon | Top AGOL hits are NC Orange County (Chapel Hill) and VT Orange County -- classic false positives |
+  | Seminole | ✗ not viable via cheap recon | Top hits are OK Seminole/tribal data |
+  | Marion | ✗ not viable via cheap recon | TN + WV + IN Marion County false positives |
+  | Polk | ✗ not viable via cheap recon | MN Polk hits; FL Polk PA subdomain didn't respond to any tried URL pattern |
+  | Duval | ✗ not viable via cheap recon | Only informal Jax University-owned reshares |
+  | Monroe | ✗ not viable via cheap recon | MonroeCountyGIS org exists (uncertain state) but Current_Parcels layer has only 8 usable fields, no obvious use-code field |
+
+  **Wave 2 conversion rate: 2/10** -- lower than Wave 1's 3/10.
+  Property Appraiser direct URLs mostly resolved to 404s or SSL
+  failures. Getting any of the 8 non-viable counties requires
+  per-county targeted investigation.
+
+  Recon script for Wave 2 re-runs:
+  [`scripts/phase3_wave2_recon.py`](scripts/phase3_wave2_recon.py).
+
+  **Deliberately not wired under time pressure:** Alachua and Manatee
+  are confirmed viable but need dedicated attention -- Alachua's FLUM
+  layer needs re-picked (initial candidate is "Urban Service Area"
+  not the actual FLUM), and Manatee's FLU-on-parcel-layer pattern
+  needs the scan_orchestrator to be validated against a non-
+  separate-FLUM-service county. Recommend a focused Wave 2b prompt
+  to wire these two properly rather than shipping them with the
+  same shortcut that caused Wave 1's FLUM ag_values gap.
+
+  **Status: 3 wired (Wave 1), 2 confirmed viable pending wire-in,
+  15 non-viable via cheap recon.** Total real wire-ins: 3/30.
+  Reaching >=30 is a long road via cheap recon; each new county will
+  require dedicated per-county effort from here.
 
 - [x] **10. VERIFY BACKGROUND SCAN JOB POST-RESTRUCTURING** *(done 2026-07-06, piggybacked on item 5's verification)*
   Kicked off a real "Scan entire county" background job on Nassau via

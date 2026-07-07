@@ -908,6 +908,119 @@ COUNTIES: dict[str, CountyEndpoint] = {
         sale_date_encoding="mmyyyy_string",
         sale_date_field="SALEDTE_S1",
     ),
+    # =====================================================================
+    # Wave 2b additions (2026-07-06). Parcel data sourced via SWFWMD's
+    # shared parcel_search MapServer (16 counties as separate layer IDs,
+    # identical 95-field schema). parcel_source="swfwmd_parcel_search"
+    # triggers the 6 AM-10 PM Eastern service-window enforcement in
+    # service_windows.py. CONCENTRATION RISK: every county sharing this
+    # source depends on that one third-party mirror -- schema drift or
+    # outage there affects all of them simultaneously.
+    # FLUM sources are each county's OWN official layer (validated with
+    # FLUM-at-parcel-centroid on 3 known ag parcels each, per Wave 1's
+    # discipline lesson).
+    # =====================================================================
+    "sarasota": CountyEndpoint(
+        id="sarasota",
+        name="Sarasota",
+        fips=58,  # FL DOR county number for Sarasota
+        # FLUM: Sarasota County's OWN official server (ags3.scgov.net =
+        # Sarasota County Gov). Layer 0 (FutureLandUse). Field `flucode`,
+        # ag values 'RURAL' (39x in full paginated distinct) + 'SRURAL'
+        # (7x) -- CONFIRMED via FLUM-at-parcel-centroid test showing
+        # ag parcels sitting in MODR/MEDR/LDR being enclave candidates
+        # (which is why the ag_flu_values list must NOT include MODR
+        # etc, only the still-rural categories).
+        flum_service_url=(
+            "https://ags3.scgov.net/server/rest/services/Hosted/"
+            "FutureLandUse/FeatureServer/0"
+        ),
+        flu_field="flucode",
+        jurisdiction_field=None,
+        acreage_field=None,
+        agricultural_flu_values=("RURAL", "SRURAL"),
+        population=464223,  # BEBR 2024 estimate. Under 1.75M cap.
+        confirmed_live=True,
+        notes=(
+            "Wave 2b (2026-07-06). PARCEL layer via SWFWMD's shared "
+            "parcel_search MapServer layer 15 -- identical 95-field "
+            "schema shared with 15 other FL counties (Charlotte, Citrus, "
+            "DeSoto, Hardee, Hernando, Highlands, Hillsborough, Lake, "
+            "Levy, Manatee, Marion, Pasco, Pinellas, Polk, Sumter). "
+            "Real ag parcels confirmed via live sample: BYRD LARRY 22ac "
+            "PARUSECODE='062' (Pasture), all 3 known-ag test parcels "
+            "correctly sit in FLUM 'MODR' (residential development "
+            "designation) -- exactly the enclave candidates the tool "
+            "targets. FLUM ag_flu_values = ('RURAL', 'SRURAL') "
+            "confirmed via FLUM-at-parcel-centroid. AREANO is the "
+            "polygon-computed acreage (Double, always populated); ACRES "
+            "(deed-recorded) is often null so should NOT be used. "
+            "SWFWMD service is only available 6 AM-10 PM Eastern -- "
+            "window enforcement wired via parcel_source below."
+        ),
+        parcel_service_url=(
+            "https://www25.swfwmd.state.fl.us/arcgis12/rest/services/"
+            "BaseVector/parcel_search/MapServer/15"
+        ),
+        parcel_source="swfwmd_parcel_search",
+        parcel_use_code_field="PARUSECODE",
+        parcel_agricultural_use_code_range=("050", "069"),
+        parcel_acreage_field="AREANO",
+        parcel_owner_field="OWNNAME",
+        parcel_owner_field_2=None,
+        parcel_id_field="PARNO",
+        # SALE1_YEAR is a SmallInteger sale-year field -- clean year_only
+        # encoding, no need to decode combined date strings.
+        sale_date_encoding="year_only",
+        sale_year_field="SALE1_YEAR",
+    ),
+    "manatee": CountyEndpoint(
+        id="manatee",
+        name="Manatee",
+        fips=41,  # FL DOR county number for Manatee
+        # FLUM: Manatee County's OWN official server (mymanatee.org =
+        # Manatee County Gov). opendata/Planning layer 1 ('Future Land
+        # Use'). Real fields: FLUTYPE (String, includes 'AG', 'RES',
+        # 'CON', etc.), FLULABEL (more granular like 'AG-R', 'RES-6').
+        # FLUTYPE is null on some rows so FLULABEL is the safer choice
+        # for uniform matching. ag_flu_values = ('AG-R',) CONFIRMED via
+        # FLUM-at-parcel-centroid on 3 known SWFWMD ag parcels (DAKIN
+        # 340ac, MANNING 279ac + 197ac) -- all 3 correctly sit in
+        # FLULABEL='AG-R'.
+        flum_service_url=(
+            "https://www.mymanatee.org/gisits/rest/services/opendata/"
+            "Planning/FeatureServer/1"
+        ),
+        flu_field="FLULABEL",
+        jurisdiction_field=None,
+        acreage_field=None,
+        agricultural_flu_values=("AG-R",),
+        population=451540,  # BEBR 2024 estimate. Under 1.75M cap.
+        confirmed_live=True,
+        notes=(
+            "Wave 2b (2026-07-06). PARCEL layer via SWFWMD's shared "
+            "parcel_search MapServer layer 10. FLUM via Manatee County's "
+            "own official mymanatee.org opendata Planning service layer "
+            "1. ag_flu_values=('AG-R',) confirmed via FLUM-at-centroid "
+            "test on 3 known ag parcels. FLUTYPE field alternatively "
+            "carries 'AG' for these but is null on other rows -- "
+            "FLULABEL is more reliably populated. SWFWMD 6-10 PM ET "
+            "window enforcement wired via parcel_source."
+        ),
+        parcel_service_url=(
+            "https://www25.swfwmd.state.fl.us/arcgis12/rest/services/"
+            "BaseVector/parcel_search/MapServer/10"
+        ),
+        parcel_source="swfwmd_parcel_search",
+        parcel_use_code_field="PARUSECODE",
+        parcel_agricultural_use_code_range=("050", "069"),
+        parcel_acreage_field="AREANO",
+        parcel_owner_field="OWNNAME",
+        parcel_owner_field_2=None,
+        parcel_id_field="PARNO",
+        sale_date_encoding="year_only",
+        sale_year_field="SALE1_YEAR",
+    ),
 }
 
 

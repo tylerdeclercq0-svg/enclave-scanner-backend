@@ -270,6 +270,30 @@ def _citrus_is_agricultural(attrs: dict) -> bool:
     return code_int in {int(c) for c in COUNTIES["citrus"].parcel_agricultural_use_codes}
 
 
+# SWFWMD's shared parcel_search MapServer uses a standardized 95-field
+# schema across all 16 hosted counties (Wave 2b lead: SWFWMD_URL_ROOT +
+# /BaseVector/parcel_search/MapServer/{layer_id}). The `PARUSECODE`
+# field is 3-char DOR-style, same range as Pasco -- '050' through '069'
+# for agricultural. Live-verified against Sarasota (layer 15) and
+# Manatee (layer 10) with real ag parcel samples showing DOR codes
+# '050', '060', '062' etc. and PARUSEDESC values like 'ORNAMENTALS,
+# MISCELLANEOUS AGRICULTURAL'. One classifier serves every county
+# sourced through SWFWMD -- add each county's id to _AG_CLASSIFIERS
+# below pointing at this same pair.
+def _swfwmd_ag_where(county: CountyEndpoint) -> str:
+    lo, hi = county.parcel_agricultural_use_code_range
+    return f"{county.parcel_use_code_field}>='{lo}' AND {county.parcel_use_code_field}<='{hi}'"
+
+
+def _swfwmd_is_agricultural(attrs: dict) -> bool:
+    code = attrs.get("PARUSECODE")
+    if code is None:
+        return False
+    # All SWFWMD counties currently use the same '050'-'069' range.
+    lo, hi = ("050", "069")
+    return lo <= code <= hi
+
+
 # Registry of per-county (where-clause builder, client-side classifier)
 # pairs. Adding a fifth county means adding a new pair here, not editing
 # a shared conditional — keeps each county's comparison logic isolated
@@ -282,6 +306,11 @@ _AG_CLASSIFIERS: dict[str, tuple[Callable[[CountyEndpoint], str], Callable[[dict
     "lee": (_lee_ag_where, _lee_is_agricultural),
     "leon": (_leon_ag_where, _leon_is_agricultural),
     "citrus": (_citrus_ag_where, _citrus_is_agricultural),
+    # SWFWMD-sourced counties (Wave 2b, 2026-07-06). All share the same
+    # 95-field schema and standardized PARUSECODE ag range -- one
+    # classifier pair, multiple registrations.
+    "sarasota": (_swfwmd_ag_where, _swfwmd_is_agricultural),
+    "manatee":  (_swfwmd_ag_where, _swfwmd_is_agricultural),
 }
 
 

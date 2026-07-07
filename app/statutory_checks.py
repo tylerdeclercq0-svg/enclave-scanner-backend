@@ -79,6 +79,23 @@ def sold_on_or_after_cutoff(county: CountyEndpoint, attrs: dict) -> Optional[boo
         except (TypeError, ValueError):
             return None
 
+    if encoding == "mmyyyy_string":
+        # Leon's SALEDTE_S1 uses this format -- 6-character string, MM
+        # then YYYY, no separator. Live-verified 2026-07-06 against 15
+        # samples: '042025' = Apr 2025, '111982' = Nov 1982, '122024' =
+        # Dec 2024, etc. Cutoff is 1/1/2025, so any string with
+        # int(YYYY) >= 2025 counts as sold-since, and any int(YYYY) ==
+        # 2024 doesn't -- no month precision needed to disambiguate the
+        # cutoff boundary itself (Jan 1 is inclusive of Jan 2025 and any
+        # later month).
+        raw = attrs.get(county.sale_date_field)
+        if raw is None or not isinstance(raw, str) or len(raw) < 6:
+            return None
+        try:
+            return int(raw[-4:]) >= 2025
+        except (TypeError, ValueError):
+            return None
+
     return None
 
 

@@ -306,6 +306,85 @@ the index/checklist, not the full spec.
   Reaching >=30 is a long road via cheap recon; each new county will
   require dedicated per-county effort from here.
 
+  **Wave 2 followup with Tyler's real leads (2026-07-06):** Tyler
+  did a real web search outside Claude's tools and surfaced four
+  leads that Claude's blind-URL + AGOL search had missed. Findings:
+
+  **MASSIVE UNLOCK: SWFWMD's shared parcel_search MapServer.** The
+  URL Tyler gave for Marion
+  (`www25.swfwmd.state.fl.us/arcgis12/rest/services/BaseVector/parcel_search/MapServer/11`)
+  is not just a Marion layer -- **the same MapServer hosts 16
+  county parcel layers as separate layer IDs**, all with an
+  IDENTICAL 95-field schema (confirmed live: Marion layer 11,
+  Sarasota layer 15, Manatee layer 10, Polk layer 14 all show the
+  same field set). Layers cover Charlotte (1), Citrus (2), DeSoto
+  (3), Hardee (4), Hernando (5), Highlands (6), Hillsborough (7),
+  Lake (8), Levy (9), Manatee (10), Marion (11), Pasco (12),
+  Pinellas (13), Polk (14), Sarasota (15), Sumter (16). Same
+  integration effort unlocks all 16 (like Leon/Gadsden/Wakulla
+  pattern, but 16-way). Standardized SWFWMD fields:
+    - `PARUSECODE` (String, DOR 3-char, e.g. '069' ORNAMENTALS ag)
+    - `AREANO` (Double, polygon area in acres -- use this NOT
+      `ACRES` which is often null)
+    - `OWNNAME` (String, full owner)
+    - `PARNO` (String, parcel ID)
+    - `SALE1_YEAR` (SmallInteger, sale year -- clean year_only encoding)
+    - `PALINK` (URL to county PA record)
+  Real-parcel test on Marion: 6 ag parcels with PARUSECODE='069'
+  (STEPHEN MCDONALD GRASSING LLC) returned cleanly. **Caveat: the
+  SWFWMD service is documented as available 6 AM - 10 PM daily only.**
+  A production scan running outside those hours will fail -- would
+  need job-scheduling guards for item 13.
+
+  **Duval / Jacksonville consolidated gov confirmed.**
+  `maps.coj.net/coj/rest/services/CityBiz/Parcels/MapServer/0`
+  is real, 74 fields, description "Duval County Parcels", official
+  City of Jacksonville source. Real fields: `ACRES` (Double, always
+  populated), `LNAMEOWNER` (String), `PUSE` (String, 4-char DOR
+  code, ag range '5000'-'6999' via CAST-to-int matches the Osceola/
+  Leon pattern), `SALESLDD`/`SALESLMM`/`SALESLYY` (ymd_ints
+  encoding), `RE` (parcel ID). Real ag samples returned:
+  BIG CREEK TIMBER LLC 407ac PUSE='5600' (Timberland), PATEL ASSET
+  HOLDINGS 94ac, SALLETTE LIVING TRUST 27ac.
+
+  **Polk County Hub site (Tyler's link):** covered by SWFWMD
+  layer 14 -- Hub browsing not needed.
+
+  **Monroe County qPublic**: confirmed different platform
+  (qpublic.schneidercorp.com is a Schneider Corp interactive
+  application, no public ArcGIS REST endpoint). Would require
+  either a Schneider Corp API contract or web scraping of the
+  interactive UI. Deprioritized as a fundamentally different
+  integration.
+
+  **FLUM discovery challenge (blocker on wiring):** the SWFWMD +
+  Duval parcel wins do NOT come with matching FLUM layers. Wave 1
+  taught us that FLUM `agricultural_flu_values` MUST be validated
+  against known ag parcels via FLUM-at-centroid tests -- shortcuts
+  cost a whole validation pass. Tried multiple candidates:
+  - Marion FL FLUM: only third-party RDG-hosted layers surface on
+    AGOL. Marion County's OWN AGOL org (`Marion_County`) turned out
+    to be **Oregon's** Marion County (Willamette Greenway, Measure
+    37/49) -- a classic homonym trap the tool bit on before.
+  - Duval FLUM: `Jacksonville_FLU` on AGOL requires an auth token
+    ("Token Required" HTTP 499). Other Jax hits are UGB or CWPP
+    datasets, not FLUM.
+  - Sarasota/Manatee/Polk FLUM: not surfaced during this pass.
+
+  **Deliberately not wired in this session, per Wave 1's discipline
+  lesson.** Wiring Marion/Duval with best-guess FLUM would repeat
+  Wave 1's ag_flu_values gap. Confidence-preserving next step:
+
+  **Wave 2b prompt should focus on FLUM discovery per county.**
+  For each of Marion / Duval / Sarasota / Manatee / Polk: find the
+  county's OFFICIAL comprehensive-plan FLUM layer (not an AGOL
+  third-party republish), validate with a FLUM-at-centroid test
+  against 3 known ag parcels from that county, then wire. Parcel
+  infrastructure is already known -- half the work is done.
+
+  Investigation script from this pass:
+  [`scripts/phase3_wave2_recon.py`](scripts/phase3_wave2_recon.py).
+
 - [x] **10. VERIFY BACKGROUND SCAN JOB POST-RESTRUCTURING** *(done 2026-07-06, piggybacked on item 5's verification)*
   Kicked off a real "Scan entire county" background job on Nassau via
   `POST /api/coverage/nassau/scan-entire-county` with the deployed

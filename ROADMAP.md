@@ -503,6 +503,49 @@ the index/checklist, not the full spec.
   actual site, not URL-pattern guessing) rather than another
   automatable search pass. Cheap search has been exhausted.
 
+  **Wave 2b batch 4 -- Marion/Duval Hub-portal + application-URL leads
+  (2026-07-06):** Tyler surfaced two real web-search leads for
+  counties previously reported blocked. Result: **1 additional wired.**
+
+  **Marion** -- Tyler's lead
+  (data-marioncountyfl.opendata.arcgis.com/datasets/futurelanduse)
+  panned out perfectly. Marion's OWN opendata Hub exposes a real DCAT
+  feed at `/api/feed/dcat-us/1.1.json` which surfaced the underlying
+  FeatureServer at
+  `services1.arcgis.com/oMGpBoZpy1Db2sAl/FutureLandUse/FeatureServer/0`.
+  This is Marion FL's real AGOL org -- different from the "Marion_
+  County" org that turned out to be Marion County OREGON. Real fields
+  `LANDUSECOD` (Land Use Code, mostly 'RL' base zoning) + `GS_FLUM`
+  (Growth Services FLUM, the granular current designation, distinct
+  values: RL, P, LR, MR, COM, EC, PR, HR, M). ag_flu_values=('RL',)
+  validated via FLUM-at-parcel-centroid on 3 known SWFWMD ag parcels
+  (STEPHEN MCDONALD GRASSING LLC, PARUSECODE=069 Ornamentals, 21-28ac):
+  all 3 correctly in GS_FLUM='RL'. Live scan verified end-to-end.
+  **Marion WIRED.**
+
+  **Duval** -- Tyler's lead
+  (maps.coj.net/duvalproperty/) investigated. The application page
+  homepage HTML contains a `Download Land Use layer` link pointing to
+  `mapstest.coj.net/publicdata/landuse.zip` -- Duval's FLU is
+  published as a **downloadable ZIP shapefile**, NOT a live REST
+  endpoint. `mapstest.coj.net` doesn't resolve externally
+  (consistent with the "scheduled maintenance" note Tyler mentioned).
+  The duvalproperty app's JS (`js/homePage.js`, `js/misc.js`, etc.)
+  only exposes imagery URLs, no FLU MapServer. Coj.net's 33 REST
+  folders + guessed URL variants + alternative subdomains all
+  returned nothing FLU-related. **Duval FLU is available for USE
+  but requires a fundamentally different integration** (shapefile
+  ingestion + either self-hosting a REST service or in-memory
+  spatial index). Not tractable in this session's scope. Reported
+  honestly rather than substituting a lesser source silently.
+
+  **State after batch 4: 12 confirmed-live counties** (Pilots +
+  Wave 1 + Wave 2b batch 1 + Wave 2b batch 2 + Marion). **8 counties
+  parcel-ready + FLUM-blocked** (Polk, Duval, DeSoto, Hernando,
+  Highlands, Lake, Levy, Sumter). Duval specifically has KNOWN FLU
+  DATA -- just as a ZIP not a live service -- so it's the strongest
+  candidate for future work if shapefile ingestion is scoped in.
+
 - [x] **10. VERIFY BACKGROUND SCAN JOB POST-RESTRUCTURING** *(done 2026-07-06, piggybacked on item 5's verification)*
   Kicked off a real "Scan entire county" background job on Nassau via
   `POST /api/coverage/nassau/scan-entire-county` with the deployed

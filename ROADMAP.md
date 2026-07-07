@@ -458,6 +458,51 @@ the index/checklist, not the full spec.
   Pinellas -- worth checking for the same "county-per-layer" pattern
   that unlocked SWFWMD).
 
+  **Wave 2b batch 3 outcome -- FDOT district hypothesis + fallbacks
+  (2026-07-06):** tested each of the three next-angle approaches
+  systematically. Result: **0 additional counties wired.**
+
+  **(a) FDOT district FLUM services** -- confirmed the hypothesis
+  correctly: Leon's FLUM is officially served by FDOT District 3
+  (owner `matthew.gore_fdot3`, service `D3_FLUM_County/FeatureServer`
+  hosting 9 layers, one per D3 county: Bay, Escambia, Gulf, Jackson,
+  Leon, Okaloosa, Santa Rosa, Walton, Washington). The pattern is
+  real for D3. BUT no equivalent `D1_FLUM_County`, `D5_FLUM_County`,
+  or `D7_FLUM_County` service surfaced via: direct URL guessing on
+  the same host (`services1.arcgis.com/O1JpcwDW8sjYuddV/`), AGOL
+  title searches (`title:"D1_FLUM"` etc), FDOT-owner searches
+  (`owner:*_fdot*`), or gis.fdot.gov folder browsing. Individual
+  FeatureServers exist on the D3 org for D3 counties (`Walton_
+  FutureLandUse`, `Bay_FLUM`, `Escambia_FLUM`, `Jackson_FLUM`,
+  `Santa_Rosa_FutureLandUse`) but not for target D1/D5/D7 counties.
+  Conclusion: **D3's aggregation was a Panhandle-specific FDOT staff
+  initiative**, not a statewide FDOT pattern. Doesn't extend.
+
+  **(b) Property Appraiser subdomain patterns** -- tried 2-4 URL
+  patterns per county across the 6 remaining (e.g. `gis.<county>pa.
+  com`, `gis.<county>pao.org`, `gis.<county>propertyappraiser.com`,
+  county-gov subdomains). **0 of 6 responded** with a valid GIS
+  service; all returned DNS failures / SSL errors / 404s. FL PAs
+  either don't publish public ArcGIS REST endpoints under naming
+  patterns discoverable this way, or run on non-ArcGIS platforms
+  (Monroe = qPublic pattern already documented).
+
+  **(c) FGIO / statewide FLUM aggregator** -- FloridaGIO owner
+  publishes `Florida_Statewide_Cadastral` (already known, parcel-
+  level not FLU) and `Florida_Statewide_Parcel_Centroid_Version`.
+  No statewide FLUM aggregator surfaced -- suggests it doesn't exist
+  or isn't published to AGOL.
+
+  **Final Wave 2b state: 11 confirmed-live counties** (Pasco, Nassau,
+  St. Johns, Osceola + Wave 1 Lee, Leon, Citrus + Wave 2b Sarasota,
+  Manatee, Hardee, Charlotte). **9 counties parcel-ready +
+  FLUM-blocked** (Marion, Polk, Duval, DeSoto, Hernando, Highlands,
+  Lake, Levy, Sumter). **Reaching >=30 target requires a
+  fundamentally different approach for the 19-county gap** -- most
+  likely per-county interactive investigation (browsing each PA's
+  actual site, not URL-pattern guessing) rather than another
+  automatable search pass. Cheap search has been exhausted.
+
 - [x] **10. VERIFY BACKGROUND SCAN JOB POST-RESTRUCTURING** *(done 2026-07-06, piggybacked on item 5's verification)*
   Kicked off a real "Scan entire county" background job on Nassau via
   `POST /api/coverage/nassau/scan-entire-county` with the deployed

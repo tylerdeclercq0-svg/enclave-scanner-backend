@@ -309,8 +309,10 @@ _AG_CLASSIFIERS: dict[str, tuple[Callable[[CountyEndpoint], str], Callable[[dict
     # SWFWMD-sourced counties (Wave 2b, 2026-07-06). All share the same
     # 95-field schema and standardized PARUSECODE ag range -- one
     # classifier pair, multiple registrations.
-    "sarasota": (_swfwmd_ag_where, _swfwmd_is_agricultural),
-    "manatee":  (_swfwmd_ag_where, _swfwmd_is_agricultural),
+    "sarasota":  (_swfwmd_ag_where, _swfwmd_is_agricultural),
+    "manatee":   (_swfwmd_ag_where, _swfwmd_is_agricultural),
+    "hardee":    (_swfwmd_ag_where, _swfwmd_is_agricultural),
+    "charlotte": (_swfwmd_ag_where, _swfwmd_is_agricultural),
 }
 
 

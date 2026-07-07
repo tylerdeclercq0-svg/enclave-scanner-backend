@@ -1021,6 +1021,119 @@ COUNTIES: dict[str, CountyEndpoint] = {
         sale_date_encoding="year_only",
         sale_year_field="SALE1_YEAR",
     ),
+    "hardee": CountyEndpoint(
+        id="hardee",
+        name="Hardee",
+        fips=25,
+        # FLUM: Hardee County's OWN official server (gis.hardeecounty.net).
+        # LandUseZoning/MapServer layer 16 'Future Landuse (County)'.
+        # Fields LANDUSECODE + LANDUSEDESC. Full paginated distinct: AGR
+        # (136x AGRICULTURE), RVG (9x RURAL VILLAGE), CON (12x
+        # CONSERVATION), RCN (28x RURAL CENTER), plus CITY (multi-desc),
+        # TCN, HMX, RMX, COM, IND, RES-L, PBI.
+        # FLUM-at-parcel-centroid on 3 real ag parcels (SEMINOLE ELECTRIC
+        # 575ac in IND+REC+CON = enclave candidate; MOONEY FAMILY 398ac
+        # in AGR+CON+RVG = surrounded by ag; SHADOWLAWN 94ac in RVG+AGR)
+        # confirmed AGR + RVG + CON as ag/undeveloped categories.
+        flum_service_url=(
+            "https://gis.hardeecounty.net/arcgis/rest/services/"
+            "LandUseZoning/MapServer/16"
+        ),
+        flu_field="LANDUSECODE",
+        jurisdiction_field=None,
+        acreage_field=None,
+        agricultural_flu_values=("AGR", "RVG", "CON"),
+        population=25915,  # BEBR 2024 estimate (very small county)
+        confirmed_live=True,
+        notes=(
+            "Wave 2b (2026-07-06). PARCEL via SWFWMD layer 4. FLUM at "
+            "Hardee County's own official gis.hardeecounty.net "
+            "LandUseZoning/MapServer layer 16. ag_flu_values validated "
+            "via FLUM-at-parcel-centroid: AGR (Agriculture, 136x -- "
+            "primary), RVG (Rural Village, 9x), CON (Conservation, "
+            "12x) all included as non-residential-development. TCN "
+            "(Town Center), HMX (Highway Mixed Use), RMX (Residential "
+            "Mixed Use), COM (Commerce Park), IND (Industrial), CITY, "
+            "RES-L (Residential Low), PBI (Public Institutional) all "
+            "TREATED AS QUALIFYING for encirclement. Very small county "
+            "(~26k pop)."
+        ),
+        parcel_service_url=(
+            "https://www25.swfwmd.state.fl.us/arcgis12/rest/services/"
+            "BaseVector/parcel_search/MapServer/4"
+        ),
+        parcel_source="swfwmd_parcel_search",
+        parcel_use_code_field="PARUSECODE",
+        parcel_agricultural_use_code_range=("050", "069"),
+        parcel_acreage_field="AREANO",
+        parcel_owner_field="OWNNAME",
+        parcel_owner_field_2=None,
+        parcel_id_field="PARNO",
+        sale_date_encoding="year_only",
+        sale_year_field="SALE1_YEAR",
+    ),
+    "charlotte": CountyEndpoint(
+        id="charlotte",
+        name="Charlotte",
+        fips=15,
+        # FLUM: Charlotte County's OWN official CCBOCC server
+        # (agis.charlottecountyfl.gov). Essentials/CCGIS_Web_Layers2022
+        # /MapServer layer 42 'Future Land Use'. Field NEWLU (alias
+        # 'Future Land Use'). Full distinct: 'Low Density Residential'
+        # (553x), 'Commercial' (99x), 'City' (91x = incorporated),
+        # 'Preservation' (46x), 'High Density Residential', 'Medium
+        # Density Residential', 'Parks & Recreation' (30x), 'Agriculture'
+        # (16x), 'DRI Mixed Use', 'Coastal Residential', 'Low Intensity
+        # Industrial', 'Resource Conservation' (11x), 'Charlotte Harbor
+        # Mixed Use', 'Rural Estate Residential' (4x), 'Rural Community
+        # Mixed Use' (3x), and smaller categories.
+        # FLUM-at-parcel-centroid on 3 real ag parcels: VITALE LARRY
+        # (22ac DOR-055 Timberland) sits in 'Low Density Residential' =
+        # enclave candidate; NAJMI PROPERTIES in
+        # Preservation+LDR+Public Lands; ACORN PORT CHARLOTTE (48ac
+        # DOR-055) in Commercial+Preservation.
+        flum_service_url=(
+            "https://agis.charlottecountyfl.gov/arcgis/rest/services/"
+            "Essentials/CCGIS_Web_Layers2022/MapServer/42"
+        ),
+        flu_field="NEWLU",
+        jurisdiction_field=None,
+        acreage_field=None,
+        agricultural_flu_values=(
+            "Agriculture",
+            "Rural Estate Residential",
+            "Rural Community Mixed Use",
+            "Preservation",
+            "Resource Conservation",
+        ),
+        population=210369,  # BEBR 2024 estimate. Under 1.75M cap.
+        confirmed_live=True,
+        notes=(
+            "Wave 2b (2026-07-06). PARCEL via SWFWMD layer 1. FLUM at "
+            "Charlotte County's own official CCBOCC server "
+            "(agis.charlottecountyfl.gov) CCGIS_Web_Layers2022 layer 42. "
+            "Real field NEWLU. ag_flu_values covers Agriculture + rural "
+            "variants + preservation/conservation categories. Test "
+            "parcels confirmed enclave-candidate pattern: DOR ag parcels "
+            "sitting in Low Density Residential + Commercial FLUM (the "
+            "target case). Coastal Residential + Charlotte Harbor Coastal "
+            "Residential deliberately NOT included as ag -- they're "
+            "residential categories."
+        ),
+        parcel_service_url=(
+            "https://www25.swfwmd.state.fl.us/arcgis12/rest/services/"
+            "BaseVector/parcel_search/MapServer/1"
+        ),
+        parcel_source="swfwmd_parcel_search",
+        parcel_use_code_field="PARUSECODE",
+        parcel_agricultural_use_code_range=("050", "069"),
+        parcel_acreage_field="AREANO",
+        parcel_owner_field="OWNNAME",
+        parcel_owner_field_2=None,
+        parcel_id_field="PARNO",
+        sale_date_encoding="year_only",
+        sale_year_field="SALE1_YEAR",
+    ),
 }
 
 

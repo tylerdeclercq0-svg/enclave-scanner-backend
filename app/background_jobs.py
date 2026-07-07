@@ -27,6 +27,7 @@ from typing import Any, Optional
 
 import coverage_ledger
 import scan_orchestrator
+import service_windows
 import zcta_client
 
 
@@ -48,7 +49,7 @@ _CANCEL_FLAGS: dict[str, threading.Event] = {}
 class JobState:
     """Everything the frontend needs to render progress + a resume button."""
     county_id: str
-    status: str = "queued"  # queued / running / complete / error / cancelled / interrupted
+    status: str = "queued"  # queued / running / complete / error / cancelled / interrupted / paused_awaiting_window
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
     last_updated_at: Optional[str] = None
@@ -56,6 +57,11 @@ class JobState:
     processed_this_run: int = 0
     batches_this_run: int = 0
     error: Optional[str] = None
+    # ISO timestamp at which a paused_awaiting_window job should resume.
+    # Set when the worker enters the SWFWMD-style blackout mid-run; used
+    # by the startup handler to auto-resume paused jobs whose window has
+    # reopened since the last process death (Wave 2b, 2026-07-06).
+    resume_at: Optional[str] = None
     # Scan filters/params the job runs with, so the frontend can display
     # them and a resume uses the same settings.
     params: dict = field(default_factory=dict)
@@ -112,10 +118,19 @@ def mark_interrupted_at_startup() -> None:
     Called once at app startup: any job that was still 'running' when
     the process previously died gets flipped to 'interrupted' so the
     frontend can offer to resume rather than showing stale progress.
+
+    Also (Wave 2b, 2026-07-06): any 'paused_awaiting_window' job whose
+    window has since reopened gets auto-resumed by spawning a fresh
+    worker thread with the persisted params -- the sleep-in-thread that
+    was going to auto-resume died with the process, so restart it here.
+    Paused jobs whose window is still closed stay paused and their
+    thread will pick up on the NEXT process start.
     """
+    from county_registry import COUNTIES
     with _LOCK:
         jobs = _load_all()
         changed = False
+        to_resume: list[tuple[str, dict]] = []
         for cid, d in jobs.items():
             if d.get("status") == "running":
                 d["status"] = "interrupted"
@@ -125,8 +140,27 @@ def mark_interrupted_at_startup() -> None:
                     "ledger checkpoint is intact, click Resume to continue."
                 )
                 changed = True
+            elif d.get("status") == "paused_awaiting_window":
+                county = COUNTIES.get(cid)
+                if county is not None and service_windows.parcel_source_within_window(county.parcel_source):
+                    # Window is open again -- clear paused state and
+                    # mark queued so the runner picks up cleanly. We
+                    # spawn the thread OUTSIDE the lock (after this
+                    # block).
+                    d["status"] = "queued"
+                    d["error"] = None
+                    d["resume_at"] = None
+                    changed = True
+                    to_resume.append((cid, dict(d.get("params") or {})))
         if changed:
             _save_all(jobs)
+    # Spawn worker threads for auto-resumed jobs. Outside the _LOCK so
+    # start_full_county_job's own lock acquisition doesn't deadlock.
+    for cid, params in to_resume:
+        try:
+            start_full_county_job(cid, params)
+        except Exception:  # noqa: BLE001 -- best-effort auto-resume
+            pass
 
 
 def _run_job_loop(county_id: str, params: dict, cancel_flag: threading.Event) -> None:
@@ -159,6 +193,44 @@ def _run_job_loop(county_id: str, params: dict, cancel_flag: threading.Event) ->
                 state.finished_at = _now()
                 _save_state(state)
                 return
+
+            # Service-availability window (roadmap Wave 2b). If we've
+            # crossed into a blackout window (SWFWMD outside 6 AM - 10 PM
+            # Eastern), park the job in status='paused_awaiting_window'
+            # with a resume_at timestamp and sleep INSIDE this thread
+            # until the window reopens. On wake, transition back to
+            # running and continue the outer loop. If the process dies
+            # while sleeping, the persisted paused_awaiting_window state
+            # + resume_at lets mark_interrupted_at_startup pick it up on
+            # restart. Cancellation is respected: we sleep in short
+            # chunks so a cancel request lands within a minute.
+            if not service_windows.parcel_source_within_window(county.parcel_source):
+                wait_sec = service_windows.seconds_until_window_open(county.parcel_source)
+                from datetime import datetime, timezone, timedelta
+                resume_dt = datetime.now(timezone.utc) + timedelta(seconds=wait_sec)
+                state.status = "paused_awaiting_window"
+                state.resume_at = resume_dt.isoformat()
+                state.error = service_windows.parcel_source_window_message(county.parcel_source)
+                _save_state(state)
+                # Sleep in 60-second chunks so cancellation is responsive.
+                remaining = wait_sec
+                while remaining > 0:
+                    if cancel_flag.is_set():
+                        state.status = "cancelled"
+                        state.finished_at = _now()
+                        _save_state(state)
+                        return
+                    chunk = min(60, remaining)
+                    threading.Event().wait(chunk)
+                    remaining -= chunk
+                state.status = "running"
+                state.resume_at = None
+                state.error = None
+                _save_state(state)
+                # Loop back to the top -- re-check cancel, then window
+                # (belt-and-suspenders in case the clock skewed), then
+                # continue to the next ZCTA.
+                continue
 
             next_z = coverage_ledger.next_incomplete_zcta(county_id, zcta_codes)
             if next_z is None:
@@ -290,7 +362,19 @@ def start_full_county_job(county_id: str, params: dict) -> JobState:
     Kick off a background full-county scan. Idempotent: if a job is
     already running for this county, returns its current state instead
     of spawning a duplicate.
+
+    Wave 2b (2026-07-06): also refuses to start if the county's parcel
+    source is currently outside its availability window (e.g. SWFWMD
+    6 AM - 10 PM Eastern). main.py's /scan-entire-county endpoint
+    checks this first and returns 503; this second check catches
+    internal callers (like mark_interrupted_at_startup's auto-resume
+    of paused jobs when the window may have just closed again).
     """
+    from county_registry import COUNTIES
+    county = COUNTIES.get(county_id)
+    if county is not None and not service_windows.parcel_source_within_window(county.parcel_source):
+        raise RuntimeError(service_windows.parcel_source_window_message(county.parcel_source))
+
     with _LOCK:
         existing = get_state(county_id)
         if existing and existing.status == "running" and county_id in _LIVE_THREADS:

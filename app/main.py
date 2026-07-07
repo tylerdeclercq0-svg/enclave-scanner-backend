@@ -42,6 +42,7 @@ import diligence_tracker  # noqa: E402
 import coverage_ledger  # noqa: E402
 import zcta_client  # noqa: E402
 import background_jobs  # noqa: E402
+import service_windows  # noqa: E402
 from fastapi.responses import Response  # noqa: E402
 from dataclasses import asdict  # noqa: E402
 
@@ -199,6 +200,15 @@ def scan_county(
                 f"s. 163.3164(4)(f), F.S. -- agricultural-enclave pathway "
                 f"is not available for parcels in this county under SB 686."
             ),
+        )
+    # Service-availability window (roadmap Wave 2b, 2026-07-06). Some
+    # data sources (currently SWFWMD's shared parcel_search MapServer)
+    # aren't 24/7. Refuse to run outside their window with a clear
+    # message rather than silently 500ing partway through.
+    if not service_windows.parcel_source_within_window(county_entry.parcel_source):
+        raise HTTPException(
+            status_code=503,
+            detail=service_windows.parcel_source_window_message(county_entry.parcel_source),
         )
 
     try:
@@ -679,6 +689,11 @@ def coverage_advance(county_id: str, payload: CoverageAdvancePayload):
             status_code=400,
             detail=f"{county_entry.name} County exceeds the 1.75M population cap in s. 163.3164(4)(f), F.S.",
         )
+    if not service_windows.parcel_source_within_window(county_entry.parcel_source):
+        raise HTTPException(
+            status_code=503,
+            detail=service_windows.parcel_source_window_message(county_entry.parcel_source),
+        )
 
     try:
         zctas = zcta_client.get_county_zctas(county_id)
@@ -919,6 +934,18 @@ def scan_entire_county(county_id: str, payload: FullCountyScanPayload):
         raise HTTPException(
             status_code=400,
             detail=f"{county_entry.name} County exceeds the {POPULATION_CAP:,} population cap.",
+        )
+    # Service-availability window (roadmap Wave 2b). Refuse to kick off a
+    # background job outside the county's parcel-source availability
+    # window -- there's no point starting a job that would immediately
+    # fail on its first ArcGIS query. A job that's already running and
+    # crosses INTO a blackout window pauses cleanly inside the worker
+    # loop and auto-resumes when the window reopens (see
+    # background_jobs._run_job_loop).
+    if not service_windows.parcel_source_within_window(county_entry.parcel_source):
+        raise HTTPException(
+            status_code=503,
+            detail=service_windows.parcel_source_window_message(county_entry.parcel_source),
         )
     state = background_jobs.start_full_county_job(county_id, payload.model_dump())
     return asdict(state)

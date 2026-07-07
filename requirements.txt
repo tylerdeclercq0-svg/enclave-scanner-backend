@@ -5,3 +5,4 @@ certifi>=2024.0
 shapely>=2.0,<2.1
 pydantic>=2.9,<3.0
 openpyxl>=3.1,<4.0
+tzdata>=2024.1  # zoneinfo tz database, needed for Windows dev + safety on minimal Linux images (Wave 2b service-window enforcement)

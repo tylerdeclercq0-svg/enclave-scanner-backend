@@ -106,6 +106,18 @@ class CountyEndpoint:
     # ag-use-code/owner filtering should run against now, instead of the
     # statewide cadastral layer's broken CO_NO filter.
     parcel_service_url: Optional[str] = None
+    # Identifier for the underlying data source, used by service_windows.py
+    # to enforce availability constraints. None means "24/7 direct-county
+    # source, no window" (Pasco's mapping.pascopa.com, Nassau's/St.
+    # Johns'/Osceola's own layers, Duval's coj.net, Lee/Leon/Citrus's
+    # respective county services). Set to "swfwmd_parcel_search" for
+    # counties fetched via SWFWMD's shared parcel_search MapServer
+    # (docs: 6 AM - 10 PM Eastern availability only). CONCENTRATION-RISK
+    # NOTE: every county sharing the same non-None parcel_source depends
+    # on that single upstream mirror -- if it changes schema or goes
+    # down, every county through it is affected simultaneously, unlike
+    # the direct-county sources each of which has its own failure domain.
+    parcel_source: Optional[str] = None
     parcel_use_code_field: Optional[str] = None
     # Explicit confirmed use-code VALUES, not a range. Two counties tested
     # here (St. Johns, Osceola) use a 4-character local use-code scheme

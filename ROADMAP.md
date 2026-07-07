@@ -427,6 +427,37 @@ the index/checklist, not the full spec.
   real sizeable next opportunity. Do NOT start until the current
   batch's blockers close or Tyler explicitly reprioritizes.
 
+  **Wave 2b batch 2 outcome (2026-07-06):** worked through the 8
+  remaining SWFWMD-schema counties. Conversion: **2 of 8**.
+
+  | County | Outcome | Detail |
+  |---|---|---|
+  | **Hardee** | ✓ WIRED + verified live | Official at `gis.hardeecounty.net/arcgis/rest/services/LandUseZoning/MapServer/16` (Future Landuse County). Field `LANDUSECODE`, ag values `AGR` + `RVG` + `CON`. 3 known ag parcels correctly returned tier=unlikely with 0% qualifying (surrounded by ag/rural/conservation, not enclave candidates). |
+  | **Charlotte** | ✓ WIRED + verified live | Official at `agis.charlottecountyfl.gov/arcgis/rest/services/Essentials/CCGIS_Web_Layers2022/MapServer/42`. Field `NEWLU`, ag values `Agriculture` + `Rural Estate Residential` + `Rural Community Mixed Use` + `Preservation` + `Resource Conservation`. 3 known ag parcels (VITALE LARRY, ACORN PORT CHARLOTTE, NAJMI PROPERTIES) all returned **tier=confirmed_qualifying at 100% pct** -- exactly the enclave candidates the tool is designed to find (DOR-055 Timberland in Low Density Residential FLUM). |
+  | DeSoto | ✗ blocked | Direct county GIS URLs 404 / SSL fail. AGOL FLUM search returned zero viable hits after strict FL filtering. |
+  | Hernando | ✗ blocked | Same -- no viable AGOL hits, direct URLs unreachable. |
+  | Highlands | ✗ blocked | Same. |
+  | Lake | ✗ blocked | AGOL returned only wrong-location results ("District of Lake Country," Douglas NV). No FL Lake County FLUM surfaced despite it being a major county. |
+  | Levy | ✗ blocked | Same as DeSoto/Hernando. |
+  | Sumter | ✗ blocked | Same. |
+
+  Total Wave 2b wins across both batches: **4 counties** (Sarasota,
+  Manatee, Hardee, Charlotte). Total confirmed-live counties: **11**
+  of 30 target -- Pasco/Nassau/St. Johns/Osceola (pilots) + Lee/Leon/
+  Citrus (Wave 1) + Sarasota/Manatee/Hardee/Charlotte (Wave 2b).
+
+  **6 SWFWMD counties still parcel-ready + FLUM-blocked:** DeSoto,
+  Hernando, Highlands, Lake, Levy, Sumter. Same pattern as Marion,
+  Polk, Duval from earlier -- parcel infrastructure is proven, FLUM
+  needs a different (non-cheap) discovery approach. Reasonable next
+  angles when picked up again: (a) each county's Property Appraiser
+  site directly, checking for a `<county>pa.org` or similar GIS
+  subdomain not tried yet; (b) FGIO / MyRegion state clearinghouses;
+  (c) FDOT district FLUM services (D1 covers Charlotte/DeSoto/
+  Hardee/Highlands/Lee/Sarasota, D7 covers Citrus/Hernando/Pasco/
+  Pinellas -- worth checking for the same "county-per-layer" pattern
+  that unlocked SWFWMD).
+
 - [x] **10. VERIFY BACKGROUND SCAN JOB POST-RESTRUCTURING** *(done 2026-07-06, piggybacked on item 5's verification)*
   Kicked off a real "Scan entire county" background job on Nassau via
   `POST /api/coverage/nassau/scan-entire-county` with the deployed

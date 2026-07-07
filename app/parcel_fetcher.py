@@ -313,6 +313,7 @@ _AG_CLASSIFIERS: dict[str, tuple[Callable[[CountyEndpoint], str], Callable[[dict
     "manatee":   (_swfwmd_ag_where, _swfwmd_is_agricultural),
     "hardee":    (_swfwmd_ag_where, _swfwmd_is_agricultural),
     "charlotte": (_swfwmd_ag_where, _swfwmd_is_agricultural),
+    "marion":    (_swfwmd_ag_where, _swfwmd_is_agricultural),
 }
 
 

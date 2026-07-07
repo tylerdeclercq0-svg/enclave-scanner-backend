@@ -1072,6 +1072,67 @@ COUNTIES: dict[str, CountyEndpoint] = {
         sale_date_encoding="year_only",
         sale_year_field="SALE1_YEAR",
     ),
+    "marion": CountyEndpoint(
+        id="marion",
+        name="Marion",
+        fips=42,
+        # FLUM: Marion County's OWN official Growth Services Planning & Zoning
+        # department opendata portal. Underlying REST endpoint discovered via
+        # the Hub DCAT feed at data-marioncountyfl.opendata.arcgis.com. Hosted
+        # on Marion FL's real AGOL org (services1.arcgis.com/oMGpBoZpy1Db2sAl)
+        # -- different from the "Marion_County" org that turned out to be
+        # Marion County OREGON (Willamette Greenway / Measure 37/49). Real
+        # fields LANDUSECOD (Land Use Code) + GS_FLUM (Growth Services FLUM).
+        # GS_FLUM is the more granular authoritative field (LANDUSECOD is
+        # mostly 'RL' across parcels while GS_FLUM captures actual current
+        # designation).
+        # Full paginated distinct on GS_FLUM: RL (1896x = Rural Land, primary
+        # ag/rural), P (34x, Preservation/Public), LR (26x, Low Residential),
+        # MR (15x, Medium Residential), COM (12x, Commercial), EC (7x,
+        # Employment Center), PR (3x, Parks & Recreation), HR (2x, High
+        # Residential), M (2x, Municipal).
+        # FLUM-at-parcel-centroid on 3 known SWFWMD ag parcels (STEPHEN
+        # MCDONALD GRASSING LLC, PARUSECODE=069 ornamental ag, 21-28ac):
+        # all 3 correctly sit in GS_FLUM='RL'. ag_flu_values kept narrow
+        # ('RL',) since GS_FLUM='P' and 'PR' semantics are uncertain
+        # ('P' could be Public which IS a form of development). If a
+        # future scan surfaces obvious misclassification with the narrow
+        # set, expand then.
+        flum_service_url=(
+            "https://services1.arcgis.com/oMGpBoZpy1Db2sAl/arcgis/rest/"
+            "services/FutureLandUse/FeatureServer/0"
+        ),
+        flu_field="GS_FLUM",
+        jurisdiction_field=None,
+        acreage_field=None,
+        agricultural_flu_values=("RL",),
+        population=396435,  # BEBR 2024 estimate. Under 1.75M cap.
+        confirmed_live=True,
+        notes=(
+            "Wave 2b batch 3 (2026-07-06). PARCEL via SWFWMD layer 11. "
+            "FLUM discovered via Marion's OWN opendata portal "
+            "(data-marioncountyfl.opendata.arcgis.com) -- underlying REST "
+            "at Marion FL's actual AGOL org "
+            "services1.arcgis.com/oMGpBoZpy1Db2sAl. Field GS_FLUM (Growth "
+            "Services FLUM). ag_flu_values=('RL',) validated via "
+            "FLUM-at-parcel-centroid on 3 known ag parcels. LANDUSECOD is "
+            "a broader base zoning (mostly 'RL'); GS_FLUM is the actual "
+            "current FLUM designation and the right field for encirclement."
+        ),
+        parcel_service_url=(
+            "https://www25.swfwmd.state.fl.us/arcgis12/rest/services/"
+            "BaseVector/parcel_search/MapServer/11"
+        ),
+        parcel_source="swfwmd_parcel_search",
+        parcel_use_code_field="PARUSECODE",
+        parcel_agricultural_use_code_range=("050", "069"),
+        parcel_acreage_field="AREANO",
+        parcel_owner_field="OWNNAME",
+        parcel_owner_field_2=None,
+        parcel_id_field="PARNO",
+        sale_date_encoding="year_only",
+        sale_year_field="SALE1_YEAR",
+    ),
     "charlotte": CountyEndpoint(
         id="charlotte",
         name="Charlotte",

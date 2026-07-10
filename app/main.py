@@ -848,15 +848,29 @@ _TIER_SORT_ORDER = {
 
 
 @app.get("/api/property-db/all")
-def property_db_all():
+def property_db_all(
+    county_id: Optional[str] = None,
+    tier: Optional[str] = None,
+):
     """
     Every parcel ever scanned across every county, unsorted -- for the
-    master-database map view. Callers filter and color client-side
-    (tier/pathway/county/coverage-status). Each parcel row includes
-    `geometry_wgs84` (WGS84 lat/lon polygon coords) when available so
-    Leaflet can render real shapes, not just centroid pins.
+    master-database map view. Frontend calls this with no params and
+    filters client-side; the optional server-side county_id / tier
+    filters exist for automation and debug callers (added 2026-07-10
+    after a debug session found FastAPI was silently accepting +
+    ignoring unknown query params on this endpoint, so ?county_id=X
+    returned the full DB and mislabeled it as county X's data).
+    Each parcel row includes `geometry_wgs84` (WGS84 lat/lon polygon
+    coords) when available so Leaflet can render real shapes, not
+    just centroid pins.
     """
+    if county_id is not None and county_id not in COUNTIES:
+        raise HTTPException(status_code=404, detail=f"Unknown county: {county_id}")
     parcels = coverage_ledger.list_all_parcels_all_counties()
+    if county_id is not None:
+        parcels = [r for r in parcels if r.get("county_id") == county_id]
+    if tier is not None:
+        parcels = [r for r in parcels if (r.get("tier") or r.get("confidence_tier")) == tier]
     tier_totals: dict[str, int] = {}
     for r in parcels:
         t = r.get("tier") or r.get("confidence_tier") or "unlikely"

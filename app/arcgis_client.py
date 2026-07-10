@@ -198,7 +198,26 @@ def query_layer(
         exceeded = payload.get("exceededTransferLimit", False)
         if not exceeded or not features:
             break
-        offset += len(features)
+        # BUG FIX #3 (2026-07-10): advance by page_size, NOT len(features).
+        # `resultOffset` is a row-index counter into the server's result
+        # set, keyed by the ordinal of records that MATCH the query --
+        # not by the number of records the server actually returned last
+        # page. Some servers (confirmed live against SWFWMD's
+        # parcel_search MapServer, which has objectIdField=None and hits
+        # a server-side complexity cap when combining spatial +
+        # attribute filters) return fewer than resultRecordCount features
+        # per page even when exceededTransferLimit=True; advancing by
+        # len(features) then lands the next request mid-page-1, causing
+        # server-side pagination to re-yield the earlier rows.
+        # Concrete measured case: Hardee ZCTA 33834 yielded 972 features
+        # (474 unique, 498 duplicates) via the buggy advance and 475
+        # features (474 unique, 1 boundary duplicate) via this fix.
+        # Direct-source layers that always return full pages
+        # (services2.arcgis.com for Nassau, mapping.pascopa.com for
+        # Pasco, etc.) were unaffected because len(features) == page_size
+        # every iteration -- so this bug went undetected until the first
+        # SWFWMD-sourced full-county scan.
+        offset += page_size
 
 
 def describe_layer(layer_url: str) -> dict[str, Any]:

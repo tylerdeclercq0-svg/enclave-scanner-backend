@@ -42,6 +42,7 @@ import diligence_tracker  # noqa: E402
 import coverage_ledger  # noqa: E402
 import zcta_client  # noqa: E402
 import background_jobs  # noqa: E402
+import batch_jobs  # noqa: E402
 import service_windows  # noqa: E402
 from fastapi.responses import Response  # noqa: E402
 from dataclasses import asdict  # noqa: E402
@@ -52,6 +53,7 @@ from dataclasses import asdict  # noqa: E402
 # showing stale progress. Safe to call every restart; a no-op when
 # no interrupted jobs exist.
 background_jobs.mark_interrupted_at_startup()
+batch_jobs.mark_interrupted_at_startup()
 
 
 app = FastAPI(
@@ -967,3 +969,65 @@ def coverage_job_cancel(county_id: str):
         raise HTTPException(status_code=404, detail=f"Unknown county: {county_id}")
     state = background_jobs.cancel_job(county_id)
     return {"county_id": county_id, "job": asdict(state) if state else None}
+
+
+# =====================================================================
+# Multi-county batch orchestrator (roadmap item 13, 2026-07-09). Wraps
+# background_jobs.start_full_county_job across many counties in one shot,
+# prioritizing SWFWMD-sourced counties while their 6 AM - 10 PM Eastern
+# window is open and running direct-source counties in the remaining
+# time. See app/batch_jobs.py for design notes.
+# =====================================================================
+
+class BatchStartPayload(BaseModel):
+    # Empty list -> auto-populate with every county where confirmed_live=True.
+    county_ids: list[str] = []
+    max_parcels_per_run: int = 25
+    min_acreage: float = 20.0
+    max_acreage: float = 4480.0
+    require_single_owner: bool = False
+    min_encirclement_pct: Optional[float] = None
+    flum_character_filter: Optional[str] = None
+    surrounding_density_filter: Optional[str] = None
+
+
+@app.post("/api/batch/start")
+def batch_start(payload: BatchStartPayload):
+    """
+    Kick off (or return the already-running) multi-county batch. Empty
+    county_ids -> every confirmed_live county in the registry. Population-
+    cap violators are refused up front.
+    """
+    if payload.county_ids:
+        county_ids = list(payload.county_ids)
+        unknown = [c for c in county_ids if c not in COUNTIES]
+        if unknown:
+            raise HTTPException(status_code=404, detail=f"Unknown county ids: {unknown}")
+    else:
+        county_ids = [cid for cid, c in COUNTIES.items() if c.confirmed_live]
+    over_cap = [
+        cid for cid in county_ids
+        if COUNTIES[cid].population is not None and COUNTIES[cid].population > POPULATION_CAP
+    ]
+    if over_cap:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Counties exceed the {POPULATION_CAP:,} population cap: {over_cap}",
+        )
+    params = payload.model_dump(exclude={"county_ids"})
+    state = batch_jobs.start_batch(county_ids, params)
+    return asdict(state)
+
+
+@app.get("/api/batch/status")
+def batch_status():
+    """Current batch state (or null if nothing has ever been started)."""
+    state = batch_jobs.get_state()
+    return {"batch": asdict(state) if state else None}
+
+
+@app.post("/api/batch/cancel")
+def batch_cancel():
+    """Signal the batch coordinator to stop after the current county."""
+    state = batch_jobs.cancel_batch()
+    return {"batch": asdict(state) if state else None}

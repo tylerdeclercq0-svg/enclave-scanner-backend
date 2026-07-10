@@ -50,6 +50,16 @@ CENSUS_COUNTY_FIPS = {
     "nassau":   "089",
     "st_johns": "109",
     "osceola":  "097",
+    # Wave 1 + Wave 2b, verified live against TIGERweb tigerWMS_Current
+    # layer 82 on 2026-07-10 (Hardee is 049 not 055 -- 055 is Highlands;
+    # cross-referencing FL DOR county numbers here would be wrong).
+    "lee":       "071",
+    "citrus":    "017",
+    "leon":      "073",
+    "hardee":    "049",
+    "charlotte": "015",
+    "marion":    "083",
+    "polk":      "105",
     # These aren't scan-live yet, but recorded for future coverage:
     "hillsborough": "057",
     "orange":       "095",

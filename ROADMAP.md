@@ -761,6 +761,44 @@ the index/checklist, not the full spec.
   not started.** Full detailed instructions will be provided in a
   separate prompt when this item is actively being worked.
 
+- [ ] **14. LOW-PRIORITY: Pasco parcel-layer data quirks -- null and duplicate parcel IDs**
+  Surfaced during Bug 2 (query_layer pagination) verification on
+  2026-07-10 -- not caused by the pagination bug, was there beforehand
+  and is unrelated to the SWFWMD-specific fix. `fetch_candidate_parcels`
+  against Pasco ZCTA 33523 returns 1334 raw rows / 1306 unique
+  parcel_ids / **28 discrepancies broken down as: 22 rows with empty
+  (null/blank) parcel_id fields + 6 real duplicate parcel_ids** (likely
+  multi-polygon parcels stored as multiple rows on Pasco's source layer
+  at `mapping.pascopa.com`). Confirmed same behavior with and without
+  `orderByFields`, so it's a data-quality issue on the upstream layer,
+  not a client-side pagination artifact.
+
+  **Impact is bounded, not urgent**:
+  - Null-ID rows: `background_jobs._run_job_loop:297` filters
+    `[r.parcel_id for r in rows if r.parcel_id]` before writing to the
+    ledger, so null-ID rows are silently dropped from
+    `processed_parcel_ids` and the property DB. They DO still run
+    through the full scan pipeline first (encirclement + exclusions +
+    scoring + demographics if triggered), so wasted CPU per null-ID row
+    -- but no data corruption downstream.
+  - Real duplicate IDs: `save_parcel_results` keys by parcel_id, so the
+    second write overwrites the first. Similarly wasted CPU on the
+    duplicate scan run, but no data corruption.
+  - `mark_processed` uses set semantics so `processed_parcel_ids` stays
+    unique; `count_matching_candidates` sees the same 28 discrepancies
+    inflating `total_candidates`, but item 11's self-heal path already
+    handles that class of divergence.
+
+  **Investigate before fixing**: might be specific to ZCTA 33523 or a
+  systemic Pasco pattern -- 33523 was the largest sampled, others
+  weren't checked. Also worth checking whether other SWFWMD counties
+  (which now paginate cleanly) have similar quirks that were masked by
+  the pagination bug's ~2x inflation. Real fix options range from
+  cheap (dedup + null-filter at `fetch_candidate_parcels`) to
+  investigative (understand WHY Pasco publishes multi-row parcels and
+  whether merging is correct). Not worth doing under time pressure --
+  scan pipeline correctness downstream is intact.
+
 ## How to use this file
 
 - Mark items complete by changing `- [ ]` to `- [x]` and committing.

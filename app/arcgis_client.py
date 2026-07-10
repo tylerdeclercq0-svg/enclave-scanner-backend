@@ -159,6 +159,7 @@ def query_layer(
     spatial_rel: str = "esriSpatialRelIntersects",
     out_sr: Optional[int] = None,
     page_size: int = DEFAULT_PAGE_SIZE,
+    order_by: Optional[str] = None,
 ) -> Iterator[dict[str, Any]]:
     """
     Query an ArcGIS feature layer, transparently paging through results.
@@ -171,6 +172,17 @@ def query_layer(
     `describe_layer()` below before constructing a WHERE clause, since
     ArcGIS Server commonly truncates or abbreviates field names from
     their human-readable aliases.
+
+    `order_by`: optional `orderByFields` value (e.g. "PARNO ASC"). ArcGIS
+    documents `resultOffset` pagination stability as guaranteed ONLY when
+    the result set has a deterministic ordering -- either an implicit one
+    via a layer's `objectIdField`, or an explicit `orderByFields` clause.
+    Layers without an objectIdField (confirmed live for SWFWMD's
+    parcel_search MapServer) have no server-side default; without an
+    explicit order_by, pages CAN silently overlap or skip records under
+    server load. Callers that will paginate through a large result set
+    should pass a stable, indexed field. Layers WITH an objectIdField
+    still work correctly without it, so this parameter is optional.
     """
     offset = 0
     while True:
@@ -189,6 +201,8 @@ def query_layer(
             params["inSR"] = geometry.get("spatialReference", {}).get("wkid", 4326)
         if out_sr is not None:
             params["outSR"] = out_sr
+        if order_by is not None:
+            params["orderByFields"] = order_by
 
         payload = _request_with_retry(f"{layer_url}/query", params)
         features = payload.get("features", [])

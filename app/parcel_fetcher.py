@@ -398,11 +398,18 @@ def fetch_candidate_parcels(
                        county.sale_day_field, county.sale_date_field}
     out_fields = ",".join(f for f in out_fields_set if f)
 
+    # Stable pagination: every wired county has a parcel_id_field that's
+    # unique per row, so it's always a valid orderByFields for
+    # resultOffset stability. Required for SWFWMD's parcel_search
+    # MapServer (objectIdField=None; see arcgis_client.query_layer's
+    # own docstring for the ArcGIS pagination contract), a no-op cost on
+    # layers that already paginate by objectIdField implicitly.
     query_kwargs: dict = dict(
         where=where,
         out_fields=out_fields,
         return_geometry=True,
         out_sr=AREA_SR,
+        order_by=f"{county.parcel_id_field} ASC" if county.parcel_id_field else None,
     )
     # ZCTA-scoped fetch: server-side spatial filter cuts the returned set
     # to just parcels intersecting one ZIP-code polygon. Used by the

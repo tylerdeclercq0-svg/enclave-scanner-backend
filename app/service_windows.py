@@ -37,6 +37,7 @@ Add more sources here if other partial-availability endpoints appear.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -147,5 +148,10 @@ def seconds_until_window_open(parcel_source: Optional[str], now: Optional[dateti
     now_e = _to_eastern(now)
     if parcel_source == SWFWMD_PARCEL_SEARCH:
         nxt = next_swfwmd_window_open(now_e)
-        return max(0, int((nxt - now_e).total_seconds()))
+        # math.ceil, not int(). At 05:59:59.9 ET the delta is 0.1s;
+        # int() truncates to 0, which a caller can't distinguish from
+        # "no wait needed" (the branch above). ceil guarantees >=1s
+        # whenever the window is genuinely closed, so a 0 return here
+        # always means "already open."
+        return max(1, math.ceil((nxt - now_e).total_seconds()))
     return 0

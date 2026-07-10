@@ -209,7 +209,20 @@ def _run_batch_loop(cancel_flag: threading.Event) -> None:
 
             county_id, wait_sec = _pick_next_county(pending)
             if county_id is None:
-                if wait_sec and wait_sec > 0:
+                # Contract with _pick_next_county:
+                #   (None, None) = nothing pending at all -> complete
+                #   (None, int)  = wait `int` seconds then re-check
+                # Any non-None wait_sec (INCLUDING 0) must trigger the
+                # pause/re-check path; the coordinator must not conflate
+                # a 0-second wait with "give up." A production abandon-
+                # ment on 2026-07-10 traced back to conflating them
+                # (the paired int() truncation in service_windows was
+                # returning 0 at 05:59:59.9 ET when the window was still
+                # closed but <1s away). service_windows now guarantees
+                # >=1 when the window is closed, but this branch keeps
+                # the semantic split explicit so a future 0 return can't
+                # abandon pending work again.
+                if wait_sec is not None:
                     resume_dt = datetime.now(timezone.utc) + timedelta(seconds=wait_sec)
                     state.status = "paused_awaiting_window"
                     state.current_county_id = None
@@ -226,9 +239,7 @@ def _run_batch_loop(cancel_flag: threading.Event) -> None:
                     state.error = None
                     _save_state(state)
                     continue
-                # No eligible + no wait -> nothing to do (all pending
-                # sources have unknown/unreachable windows). Treat as
-                # complete-with-remainder so we don't spin.
+                # (None, None) -> nothing left. Genuinely complete.
                 state.status = "complete"
                 state.current_county_id = None
                 state.finished_at = _now()

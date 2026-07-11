@@ -761,43 +761,57 @@ the index/checklist, not the full spec.
   not started.** Full detailed instructions will be provided in a
   separate prompt when this item is actively being worked.
 
-- [ ] **14. LOW-PRIORITY: Pasco parcel-layer data quirks -- null and duplicate parcel IDs**
-  Surfaced during Bug 2 (query_layer pagination) verification on
-  2026-07-10 -- not caused by the pagination bug, was there beforehand
-  and is unrelated to the SWFWMD-specific fix. `fetch_candidate_parcels`
-  against Pasco ZCTA 33523 returns 1334 raw rows / 1306 unique
-  parcel_ids / **28 discrepancies broken down as: 22 rows with empty
-  (null/blank) parcel_id fields + 6 real duplicate parcel_ids** (likely
-  multi-polygon parcels stored as multiple rows on Pasco's source layer
-  at `mapping.pascopa.com`). Confirmed same behavior with and without
-  `orderByFields`, so it's a data-quality issue on the upstream layer,
-  not a client-side pagination artifact.
+- [x] **14. Null and duplicate parcel IDs from source layers** *(fixed 2026-07-10)*
+  Originally filed as "low-priority, bounded impact, not urgent" after
+  Bug 2's verification pass. That analysis turned out to be **wrong**
+  in a load-bearing way: this class of quirk was actively BLOCKING
+  Hardee's completion (and would block every SWFWMD county in item 13's
+  planned batch run), not merely wasting a few CPU cycles.
 
-  **Impact is bounded, not urgent**:
-  - Null-ID rows: `background_jobs._run_job_loop:297` filters
-    `[r.parcel_id for r in rows if r.parcel_id]` before writing to the
-    ledger, so null-ID rows are silently dropped from
-    `processed_parcel_ids` and the property DB. They DO still run
-    through the full scan pipeline first (encirclement + exclusions +
-    scoring + demographics if triggered), so wasted CPU per null-ID row
-    -- but no data corruption downstream.
-  - Real duplicate IDs: `save_parcel_results` keys by parcel_id, so the
-    second write overwrites the first. Similarly wasted CPU on the
-    duplicate scan run, but no data corruption.
-  - `mark_processed` uses set semantics so `processed_parcel_ids` stays
-    unique; `count_matching_candidates` sees the same 28 discrepancies
-    inflating `total_candidates`, but item 11's self-heal path already
-    handles that class of divergence.
+  Two live-confirmed causes on distinct source layers:
+  - Pasco ZCTA 33523: 22 rows with null/blank parcel_id + 6 real
+    duplicate parcel_ids out of 1334 raw fetched
+    (`mapping.pascopa.com`, likely multi-polygon parcels stored as
+    multiple rows).
+  - Hardee ZCTA 33873: 2 real duplicate parcel_ids out of 511 raw
+    fetched (SWFWMD's `parcel_search` MapServer, same pattern).
 
-  **Investigate before fixing**: might be specific to ZCTA 33523 or a
-  systemic Pasco pattern -- 33523 was the largest sampled, others
-  weren't checked. Also worth checking whether other SWFWMD counties
-  (which now paginate cleanly) have similar quirks that were masked by
-  the pagination bug's ~2x inflation. Real fix options range from
-  cheap (dedup + null-filter at `fetch_candidate_parcels`) to
-  investigative (understand WHY Pasco publishes multi-row parcels and
-  whether merging is correct). Not worth doing under time pressure --
-  scan pipeline correctness downstream is intact.
+  **Why the earlier "bounded impact" call was wrong**:
+  `count_matching_candidates` and `fetch_candidate_parcels` share the
+  same code path (item 11's design), so BOTH counted the duplicates --
+  inflating the ledger's `total_candidates`. Once every unique parcel
+  was processed, `mark_processed`'s set semantics correctly stored N
+  unique IDs, but the inflated total (N + dup_count) meant the ledger
+  never showed the ZCTA as complete. Next advance: fetch iterates all
+  N+dup_count raw rows, all N unique IDs are in skip_set (including
+  the dup copies), returns 0 rows. Self-heal calls
+  count_matching_candidates -- gets the same inflated total -- no
+  divergence to correct, aborts with "0 rows but N candidates
+  remaining." Broke Hardee's `scan-entire-county` job twice on 2026-07-10.
+
+  **Fix (parcel_fetcher.py `fetch_candidate_parcels`)**: two guards at
+  the top of the per-feature loop:
+  1. Skip rows whose `parcel_id_field` value is null/empty -- they
+     can't be tracked in the ledger anyway, running the full pipeline
+     on them is pure waste.
+  2. Dedup by parcel_id within a single fetch call via a per-call
+     `seen_in_this_call` set. Keeps the first occurrence, drops the
+     rest. `count_matching_candidates` inherits both guards since it
+     calls `fetch_candidate_parcels` internally.
+
+  **Verified live** (all four cases pass, no regression on clean layers):
+  | ZCTA | before | after |
+  |---|---|---|
+  | Hardee 33873 | 511 raw / 509 unique / 2 dups | 509 / 509 / 0 |
+  | Hardee 33834 | 171 (already self-healed) | 171 unchanged |
+  | Pasco 33523  | 1334 raw / 22 null / 28 dups+nulls | 425 unique / 0 null |
+  | Nassau 32046 | 846 unique / 0 dups | 846 unchanged |
+
+  Also verified: fetch with a skip_set containing all 509 unique IDs
+  of Hardee 33873 returns 0 rows (correct: no more phantom rows to
+  re-fetch), and count_matching_candidates returns 509 (matches
+  processed exactly), so the ledger will complete cleanly on the next
+  advance rather than tripping the item 11 self-heal.
 
 ## How to use this file
 

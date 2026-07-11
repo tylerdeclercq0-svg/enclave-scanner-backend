@@ -424,6 +424,32 @@ def fetch_candidate_parcels(
         query_kwargs["spatial_rel"] = "esriSpatialRelIntersects"
 
     skip_set: set[str] = skip_parcel_ids or set()
+    # Roadmap item 14 (closed 2026-07-10): dedup by parcel_id within a
+    # single fetch call, and skip rows whose parcel_id is null/empty.
+    # Two live-confirmed causes:
+    # - Pasco ZCTA 33523: 22 null-parcel_id rows + 6 real duplicate
+    #   parcel_ids out of 1334 fetched (data quirk on
+    #   mapping.pascopa.com's layer, most likely multi-polygon parcels
+    #   stored as multiple rows).
+    # - Hardee ZCTA 33873: 2 real duplicate parcel_ids out of 511
+    #   fetched (SWFWMD's parcel_search MapServer, same pattern).
+    # Originally filed as "bounded impact, not urgent" because
+    # background_jobs already filters null IDs before writing to the
+    # ledger and save_parcel_results overwrites by key. That analysis
+    # missed the real blocker: count_matching_candidates and
+    # fetch_candidate_parcels share this code path, so BOTH count the
+    # duplicates -- inflating `total_candidates` in the ledger. After
+    # every unique parcel is processed, `mark_processed`'s set semantics
+    # correctly stores N unique IDs, but the ledger's inflated total
+    # never reaches N, and the next advance returns 0 rows (all N
+    # unique IDs are in skip_set including the dup copies), tripping
+    # item 11's self-heal path. Self-heal re-verifies via
+    # count_matching_candidates -- gets the same inflated total -- no
+    # divergence to correct, aborts. Job errors with "0 rows but N
+    # candidates remaining." Broke Hardee's completion twice
+    # (ZCTA 33834: 189 dups + Hardee 33873: 2 dups after this
+    # session's other fixes).
+    seen_in_this_call: set[str] = set()
 
     candidates: list[CandidateParcel] = []
     for feat in query_layer(
@@ -433,10 +459,23 @@ def fetch_candidate_parcels(
         attrs = feat.get("attributes", {})
         geometry = feat.get("geometry")
 
+        # Null/empty parcel_id -> unusable downstream (ledger filters
+        # these; save_parcel_results has nothing to key on) and running
+        # the full pipeline on them is pure waste. Drop early.
+        parcel_id_val = attrs.get(county.parcel_id_field) if county.parcel_id_field else None
+        if not parcel_id_val:
+            continue
+
+        # Dedup within this call. Same parcel_id yielded twice by the
+        # source layer -> keep the first, drop the rest. Prevents
+        # count/fetch from double-counting real multi-row parcels.
+        if parcel_id_val in seen_in_this_call:
+            continue
+        seen_in_this_call.add(parcel_id_val)
+
         # Coverage-ledger skip: parcels already fully processed for this
         # county/ZCTA don't need to run through the pipeline again.
-        parcel_id_val = attrs.get(county.parcel_id_field) if county.parcel_id_field else None
-        if parcel_id_val and parcel_id_val in skip_set:
+        if parcel_id_val in skip_set:
             continue
 
         # Defense in depth: re-check the server-side WHERE clause's

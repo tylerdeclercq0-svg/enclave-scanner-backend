@@ -863,7 +863,20 @@ _TIER_SORT_ORDER = {
 }
 
 
+# 2026-07-12 roadmap item 16: fields that are only surfaced in the
+# parcel detail overlay + manual-review-checklist export in the
+# frontend. Stripped from the default /api/property-db/all response
+# because they dominate row size at scale and the list view never
+# reads them. Field-size measurement over 100 real production rows:
+# needs_manual_review = 1548 B avg/row, score_breakdown = 199 B,
+# geometry_wgs84 = variable but ~200-1000 B when present. At 17k
+# parcels, keeping them in the default response reliably 502'd
+# Render (initial fix stripped only geometry; response dropped from
+# 88 MB -> 45 MB, still flaky at 45 MB). Stripping all three drops
+# to ~14 MB, stable.
+_DETAIL_FIELDS = ("needs_manual_review", "score_breakdown")
 _GEOMETRY_FIELD = "geometry_wgs84"
+_HEAVY_FIELDS = (_GEOMETRY_FIELD, *_DETAIL_FIELDS)
 
 
 @app.get("/api/property-db/all")
@@ -871,23 +884,27 @@ def property_db_all(
     county_id: Optional[str] = None,
     tier: Optional[str] = None,
     include_geometry: bool = False,
+    include_detail: bool = False,
 ):
     """
     Every parcel ever scanned across every county, unsorted -- for the
-    master-database view. Frontend calls this with no params and filters
-    client-side; the optional server-side county_id / tier filters exist
-    for automation and debug callers.
+    master-database list + map view. Frontend calls this with no
+    params (returns a lightweight response) and filters client-side;
+    the optional server-side county_id / tier filters exist for
+    automation callers.
 
-    `include_geometry`: default False (2026-07-12 roadmap item 16 fix).
-    `geometry_wgs84` polygon coords are the biggest per-row field --
-    they inflate the response by ~5x. At the 17,188-parcel production
-    scale that made the full response ~88 MB and reliably 502'd on
-    Render. The list view (web/index.html `_dbListFilteredRows`) never
-    reads the field; the map view (`_renderDbLayer`) uses it only when
-    zoomed past `_DB_POLYGON_ZOOM` and already falls back gracefully
-    to circle markers when it's absent. So the default response now
-    strips this field, and callers that genuinely need polygons opt in
-    via `?include_geometry=true`.
+    `include_geometry`: default False. `geometry_wgs84` polygon coords
+    are heavy and only used by the map view when zoomed past
+    `_DB_POLYGON_ZOOM`; the map falls back to circleMarker gracefully
+    when absent. Callers that need polygons opt in.
+
+    `include_detail`: default False. `needs_manual_review` and
+    `score_breakdown` are ONLY read by the parcel detail overlay
+    (buildOverlayContent) and the manual-review-checklist export.
+    Stripping these dominates the size reduction (needs_manual_review
+    alone averages 1548 B/row at the current production scale). For
+    the detail overlay, use `/api/property-db/parcel/{county_id}/{parcel_id}`
+    instead -- it returns one full row with every field.
     """
     if county_id is not None and county_id not in COUNTIES:
         raise HTTPException(status_code=404, detail=f"Unknown county: {county_id}")
@@ -900,23 +917,42 @@ def property_db_all(
     for r in parcels:
         t = r.get("tier") or r.get("confidence_tier") or "unlikely"
         tier_totals[t] = tier_totals.get(t, 0) + 1
+    # Build the set of fields to strip based on include_ flags. Shallow-
+    # copy each row rather than mutating the underlying file-loaded
+    # dicts (list_all_parcels_all_counties returns those directly).
+    strip: set[str] = set()
     if not include_geometry:
-        # Shallow-copy each row without geometry_wgs84. Building new
-        # dicts here rather than mutating -- the underlying dicts came
-        # from coverage_ledger's per-county files and callers into
-        # list_all_parcels_all_counties may reuse the file-loaded dict
-        # elsewhere in the same request. Cheap: one shallow dict copy
-        # per row, no deep clone of nested structures.
-        parcels = [
-            {k: v for k, v in r.items() if k != _GEOMETRY_FIELD}
-            for r in parcels
-        ]
+        strip.add(_GEOMETRY_FIELD)
+    if not include_detail:
+        strip.update(_DETAIL_FIELDS)
+    if strip:
+        parcels = [{k: v for k, v in r.items() if k not in strip} for r in parcels]
     return {
         "total": len(parcels),
         "tier_distribution": tier_totals,
         "geometry_included": include_geometry,
+        "detail_included": include_detail,
         "parcels": parcels,
     }
+
+
+@app.get("/api/property-db/parcel/{county_id}/{parcel_id:path}")
+def property_db_parcel(county_id: str, parcel_id: str):
+    """
+    Return one parcel's full row (every field, including
+    geometry_wgs84 + needs_manual_review + score_breakdown). Used by
+    the frontend's parcel-detail overlay so the default
+    /api/property-db/all can stay light. The parcel_id uses `:path`
+    matching because real IDs contain slashes on some counties
+    (e.g. St. Johns "140970 0010" style is fine; if any future county
+    uses a slashed format, this endpoint accepts it).
+    """
+    if county_id not in COUNTIES:
+        raise HTTPException(status_code=404, detail=f"Unknown county: {county_id}")
+    for r in coverage_ledger.list_all_parcels(county_id):
+        if r.get("parcel_id") == parcel_id:
+            return {"parcel": r}
+    raise HTTPException(status_code=404, detail=f"parcel {parcel_id} not found in {county_id}")
 
 
 @app.get("/api/property-db/{county_id}/ranked")

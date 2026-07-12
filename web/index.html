@@ -2545,11 +2545,29 @@ function _colorForParcel(r, mode){
 // (i.e. not in the current scan `results` array). Populated by both
 // renderScanMap and _renderDbLayer.
 const _PARCEL_REGISTRY = new Map();
-window.openDetailFromMap = function(key){
+window.openDetailFromMap = async function(key){
   const r = _PARCEL_REGISTRY.get(key);
   if(!r) return;
-  // Merge into results so buildOverlayContent's lookup succeeds, then
-  // open the overlay via the standard path.
+  // The lightweight /api/property-db/all response strips
+  // needs_manual_review + score_breakdown + geometry_wgs84 (roadmap
+  // item 16, 2026-07-12). Fetch the full row here so the overlay
+  // gets the review notes, score breakdown, and polygon it needs.
+  // Degrade gracefully to the in-memory light row if the fetch
+  // fails -- the overlay is still useful without the review notes.
+  const base = apiBase();
+  if(r.county_id && r.parcel_id){
+    try {
+      const res = await fetch(`${base}/api/property-db/parcel/${encodeURIComponent(r.county_id)}/${encodeURIComponent(r.parcel_id)}`);
+      if(res.ok){
+        const data = await res.json();
+        if(data && data.parcel){
+          // Merge fetched fields into the registry copy (so subsequent
+          // reopens skip the fetch).
+          Object.assign(r, data.parcel);
+        }
+      }
+    } catch(_err){ /* fall through to in-memory row */ }
+  }
   if(!results.find(row => rowKey(row) === key)) results.push(r);
   openDetail(key);
 };

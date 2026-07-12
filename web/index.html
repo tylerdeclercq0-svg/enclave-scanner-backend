@@ -2678,12 +2678,16 @@ async function _loadDbParcels(){
   const meta = document.getElementById('dbMapMeta');
   meta.innerText = 'Loading master property database…';
   try {
+    // Default fetch is now geometry-stripped (server default per
+    // roadmap item 16, 2026-07-12) so the response is small enough
+    // to survive at 17k+ parcels. Map view still works via circle
+    // markers -- polygons will be a follow-up (lazy per-parcel or
+    // per-county opt-in via ?include_geometry=true).
     const res = await fetch(`${base}/api/property-db/all`);
     if(!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     _dbAllParcels = data.parcels || [];
-    const withGeom = _dbAllParcels.filter(r => (r.geometry_wgs84 || []).length).length;
-    meta.innerText = `${_dbAllParcels.length} parcels in database; ${withGeom} with polygon geometry.`;
+    meta.innerText = `${_dbAllParcels.length} parcels in database.`;
     return true;
   } catch(err){
     meta.innerText = 'Could not load database: ' + err.message;

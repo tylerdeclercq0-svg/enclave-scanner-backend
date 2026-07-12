@@ -863,22 +863,31 @@ _TIER_SORT_ORDER = {
 }
 
 
+_GEOMETRY_FIELD = "geometry_wgs84"
+
+
 @app.get("/api/property-db/all")
 def property_db_all(
     county_id: Optional[str] = None,
     tier: Optional[str] = None,
+    include_geometry: bool = False,
 ):
     """
     Every parcel ever scanned across every county, unsorted -- for the
-    master-database map view. Frontend calls this with no params and
-    filters client-side; the optional server-side county_id / tier
-    filters exist for automation and debug callers (added 2026-07-10
-    after a debug session found FastAPI was silently accepting +
-    ignoring unknown query params on this endpoint, so ?county_id=X
-    returned the full DB and mislabeled it as county X's data).
-    Each parcel row includes `geometry_wgs84` (WGS84 lat/lon polygon
-    coords) when available so Leaflet can render real shapes, not
-    just centroid pins.
+    master-database view. Frontend calls this with no params and filters
+    client-side; the optional server-side county_id / tier filters exist
+    for automation and debug callers.
+
+    `include_geometry`: default False (2026-07-12 roadmap item 16 fix).
+    `geometry_wgs84` polygon coords are the biggest per-row field --
+    they inflate the response by ~5x. At the 17,188-parcel production
+    scale that made the full response ~88 MB and reliably 502'd on
+    Render. The list view (web/index.html `_dbListFilteredRows`) never
+    reads the field; the map view (`_renderDbLayer`) uses it only when
+    zoomed past `_DB_POLYGON_ZOOM` and already falls back gracefully
+    to circle markers when it's absent. So the default response now
+    strips this field, and callers that genuinely need polygons opt in
+    via `?include_geometry=true`.
     """
     if county_id is not None and county_id not in COUNTIES:
         raise HTTPException(status_code=404, detail=f"Unknown county: {county_id}")
@@ -891,9 +900,21 @@ def property_db_all(
     for r in parcels:
         t = r.get("tier") or r.get("confidence_tier") or "unlikely"
         tier_totals[t] = tier_totals.get(t, 0) + 1
+    if not include_geometry:
+        # Shallow-copy each row without geometry_wgs84. Building new
+        # dicts here rather than mutating -- the underlying dicts came
+        # from coverage_ledger's per-county files and callers into
+        # list_all_parcels_all_counties may reuse the file-loaded dict
+        # elsewhere in the same request. Cheap: one shallow dict copy
+        # per row, no deep clone of nested structures.
+        parcels = [
+            {k: v for k, v in r.items() if k != _GEOMETRY_FIELD}
+            for r in parcels
+        ]
     return {
         "total": len(parcels),
         "tier_distribution": tier_totals,
+        "geometry_included": include_geometry,
         "parcels": parcels,
     }
 

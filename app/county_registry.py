@@ -274,7 +274,14 @@ COUNTIES: dict[str, CountyEndpoint] = {
         agricultural_flu_values=("A", "A/M", "A/R", "AE"),
         usb_layer_url=None,
         population=1584000,
-        confirmed_live=True,
+        # RECONCILED 2026-07-12: was True from a pre-Wave-1 ad-hoc
+        # heuristic that was never fully ground-truthed against a real
+        # scan (parcel-layer fields, ag-classifier, end-to-end
+        # fetch_candidate_parcels never verified live like Wave 1+
+        # counties were). Flipping to False so the batch's
+        # confirmed_live enumeration matches STATUS.md's 13-county
+        # canon. Flip back to True after a proper ground-truthing pass.
+        confirmed_live=False,
         notes=(
             "Confirmed live FeatureLayer with advanced queries, full polygon "
             "geometry, FLU code + description + acreage + jurisdiction. "
@@ -449,7 +456,11 @@ COUNTIES: dict[str, CountyEndpoint] = {
         acreage_field=None,
         agricultural_flu_values=("AGRIC",),
         population=647000,
-        confirmed_live=True,
+        # RECONCILED 2026-07-12: same story as hillsborough above --
+        # pre-Wave-1 heuristic, never ground-truthed end-to-end via a
+        # real live scan. Flipping to False so the batch enumeration
+        # matches STATUS.md's 13-county canon.
+        confirmed_live=False,
         notes=(
             "Fully resolved. Native spatial reference is WKID 2881 "
             "(Florida State Plane East, feet) -- reproject before combining "
@@ -471,7 +482,10 @@ COUNTIES: dict[str, CountyEndpoint] = {
         acreage_field=None,
         agricultural_flu_values=("RURAL",),
         population=583000,
-        confirmed_live=True,
+        # RECONCILED 2026-07-12: same pre-Wave-1 heuristic story --
+        # never ground-truthed via a real live scan. Flipped to False
+        # so batch enumeration matches STATUS.md's 13-county canon.
+        confirmed_live=False,
         notes=(
             "Fully resolved. Native spatial reference is WKID 2881, same "
             "as Brevard -- reproject before combining with web-mercator "

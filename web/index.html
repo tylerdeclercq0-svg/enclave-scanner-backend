@@ -312,11 +312,25 @@
     box-shadow:0 2px 10px rgba(30,42,36,.18);
     max-width:700px;width:100%;padding:32px;position:relative;
   }
-  /* Master DB map takes the full overlay -- override the parcel-detail
-     overlay's tight padding + width for a real map surface. */
+  /* Master property database panel. Was a map+list split until 2026-07-12
+     when the map was removed (roadmap item 17). Now list-only. */
   #dbMapPanel{padding:0;height:calc(100vh - 100px);display:flex;flex-direction:column;overflow:hidden;}
-  #dbMapPanel .overlay-close{z-index:5;background:var(--paper-raised);border:1px solid var(--line-strong);}
-  #dbMap{flex:1 1 auto;}
+  /* Multi-select filters (2026-07-12, roadmap item 18). Trigger button
+     styled like a select; panel is a popover with a checkbox scroll list. */
+  .ms-field{position:relative;}
+  .ms-trigger{width:100%;padding:6px 10px;background:var(--paper-raised);border:1px solid var(--line-strong);border-radius:2px;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--ink);text-align:left;cursor:pointer;line-height:1.4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .ms-trigger:after{content:"▾";float:right;color:var(--ink-faint);margin-left:8px;}
+  .ms-trigger:hover{border-color:var(--brass);}
+  .ms-trigger.ms-active{border-color:var(--brass);color:var(--brass-800);}
+  .ms-panel{position:absolute;top:calc(100% + 4px);left:0;min-width:220px;max-width:320px;max-height:340px;background:var(--paper-raised);border:1px solid var(--line-strong);border-radius:3px;box-shadow:0 2px 8px rgba(0,0,0,0.08);z-index:20;display:none;flex-direction:column;}
+  .ms-panel.open{display:flex;}
+  .ms-panel-toolbar{padding:6px 10px;border-bottom:1px solid var(--line);font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--ink-faint);display:flex;gap:12px;}
+  .ms-panel-toolbar button{background:none;border:none;color:var(--brass-800);font-family:inherit;font-size:11px;cursor:pointer;padding:0;text-transform:uppercase;letter-spacing:.04em;}
+  .ms-panel-toolbar button:hover{text-decoration:underline;}
+  .ms-panel-list{overflow-y:auto;padding:4px 0;}
+  .ms-panel-list label{display:flex;align-items:center;gap:8px;padding:5px 12px;font-family:'IBM Plex Mono',monospace;font-size:12px;cursor:pointer;color:var(--ink);}
+  .ms-panel-list label:hover{background:var(--brass-dim);}
+  .ms-panel-list input[type="checkbox"]{margin:0;}
   /* Master DB list-view specifics. Sort indicators are subtle glyphs on the
      active sort column; column defs live in DB_LIST_COLUMNS (JS) so adding
      metro-proximity columns later is one array push, not a table rewrite. */
@@ -526,61 +540,32 @@
     <div class="db-inline-panel" id="dbMapPanel">
       <div style="padding:18px 22px 12px;">
         <div class="overlay-title">Master property database</div>
-        <div class="overlay-sub">Every parcel scanned across every county, over every run. Switch between the map (spatial overview) and the list (sortable, filterable, exportable). To add more data, use the Data Collection tab above.</div>
+        <div class="overlay-sub">Every parcel scanned across every county, over every run. Sortable, filterable, exportable. To add more data, use the Data Collection tab above.</div>
         <div id="dbMapControls" style="display:flex;gap:14px;margin:14px 0;flex-wrap:wrap;align-items:center;">
-          <div class="field">
-            <label>View</label>
-            <div class="view-toggle">
-              <button data-dbview="map" id="dbViewMapBtn">Map</button>
-              <button class="active" data-dbview="list" id="dbViewListBtn">List</button>
-            </div>
-          </div>
-          <!-- Map-only controls -->
-          <div class="field db-map-only" style="min-width:220px;display:none;">
-            <label>Color by</label>
-            <select id="dbColorBy" class="mono">
-              <option value="tier">Qualification tier</option>
-              <option value="pathway">Best pathway match</option>
-              <option value="county">County</option>
-              <option value="coverage">ZIP coverage status</option>
-            </select>
-          </div>
-          <div class="field db-map-only" style="display:none;">
-            <label>Basemap</label>
-            <div class="view-toggle">
-              <button class="active" data-basemap="satellite" id="dbBasemapSat">Satellite</button>
-              <button data-basemap="street" id="dbBasemapStreet">Street</button>
-            </div>
-          </div>
-          <!-- List-only controls: county + tier filters. Populated at render time
-               from the actual loaded data so we don't hardcode a county list. -->
-          <div class="field db-list-only" style="min-width:180px;">
+          <!-- Multi-select filters (2026-07-12). Each opens a popover
+               with checkboxes for its options. Selection state is a
+               Set<string> per filter; empty set = "no filter, all pass".
+               Logic: AND across filters, OR within each filter (see
+               _dbListFilteredRows). -->
+          <div class="field ms-field" style="min-width:180px;">
             <label>County</label>
-            <select id="dbListFilterCounty" class="mono"><option value="">All counties</option></select>
+            <button type="button" class="ms-trigger mono" data-msfilter="county">All counties</button>
           </div>
-          <div class="field db-list-only" style="min-width:180px;">
+          <div class="field ms-field" style="min-width:180px;">
             <label>Tier</label>
-            <select id="dbListFilterTier" class="mono">
-              <option value="">All tiers</option>
-              <option value="confirmed_qualifying">Confirmed qualifying</option>
-              <option value="strong_candidate">Strong candidate</option>
-              <option value="watch_list">Watch list</option>
-              <option value="unlikely">Unlikely</option>
-              <option value="excluded">Excluded</option>
-            </select>
+            <button type="button" class="ms-trigger mono" data-msfilter="tier">All tiers</button>
           </div>
-          <div class="field db-list-only" style="min-width:180px;">
+          <div class="field ms-field" style="min-width:180px;">
             <label>Metro</label>
-            <select id="dbListFilterMetro" class="mono"><option value="">Any metro</option></select>
+            <button type="button" class="ms-trigger mono" data-msfilter="metro">Any metro</button>
           </div>
-          <label class="db-list-only" style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--ink-faint);display:flex;align-items:center;gap:6px;cursor:pointer;">
+          <label style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--ink-faint);display:flex;align-items:center;gap:6px;cursor:pointer;">
             <input type="checkbox" id="dbListShowExcluded"> Show excluded
           </label>
-          <button class="db-list-only" id="dbListExportBtn" style="padding:6px 12px;font-family:'IBM Plex Mono',monospace;font-size:12px;background:var(--ink);color:var(--paper);border:none;border-radius:3px;cursor:pointer;">Export selected (.xlsx)</button>
+          <button id="dbListExportBtn" style="padding:6px 12px;font-family:'IBM Plex Mono',monospace;font-size:12px;background:var(--ink);color:var(--paper);border:none;border-radius:3px;cursor:pointer;">Export selected (.xlsx)</button>
           <div id="dbMapMeta" class="empty-note" style="margin-left:auto;font-size:12px;"></div>
         </div>
       </div>
-      <div id="dbMap" style="display:none;flex:1 1 auto;min-height:520px;border-top:1px solid var(--line);"></div>
       <div id="dbListContainer" style="flex:1 1 auto;display:flex;flex-direction:column;overflow:auto;border-top:1px solid var(--line);padding:0 22px 22px;"></div>
     </div>
   </div>
@@ -767,11 +752,6 @@
   </div>
   </div> <!-- /#dataCollectionView -->
 
-  <!-- Hidden sentinel for legacy openDbMap/dbMapClose handlers -- the real
-       DB UI now lives inline under #databaseView (see the script that fills
-       it in on load), so any classList.add/remove('open') calls here are
-       no-ops that don't break the code path. -->
-  <div id="dbMapBackdrop" style="display:none;"></div>
 
 </div>
 
@@ -2540,10 +2520,10 @@ function _colorForParcel(r, mode){
   return '#8A8574';
 }
 
-// A shared registry mapping parcel keys to rows, so map popups can open
-// the full parcel-detail overlay for parcels that came from the DB map
-// (i.e. not in the current scan `results` array). Populated by both
-// renderScanMap and _renderDbLayer.
+// A shared registry mapping parcel keys to rows, so scan-map popups can
+// open the full parcel-detail overlay for parcels that came from the
+// current-scan map (the DB map was removed 2026-07-12 -- see roadmap
+// item 17 -- so this now only serves renderScanMap).
 const _PARCEL_REGISTRY = new Map();
 window.openDetailFromMap = async function(key){
   const r = _PARCEL_REGISTRY.get(key);
@@ -2684,23 +2664,20 @@ document.getElementById('mapViewBtn').addEventListener('click', () => {
 // ------- View 2: master DB map -------
 // Performance: full parcel polygons at zoom 13 and higher, centroid
 // markers below that. Rationale: at zoom 13 each tile spans ~2.4 km, so
-// a 40-acre parcel (~400 m across) is still recognizable but the total
-// polygon count in view stays manageable. Below zoom 13, polygons
-// collapse into visual noise anyway.
-const _DB_POLYGON_ZOOM = 13;
-let _dbMap = null, _dbMapSat = null, _dbMapStreet = null, _dbLayerGroup = null;
-let _dbAllParcels = [], _dbColorMode = 'tier';
+// Property Database is list-only. The map view was removed 2026-07-12
+// after Leaflet tile-init issues (see roadmap item 17): tiles loaded
+// but stayed at opacity 0 and the map got stuck at zoom 19 with no
+// way to recover from user interaction. Fix was non-trivial (Leaflet
+// state corruption) and the map was already a low-value feature
+// relative to the list -- removed cleanly rather than left half-
+// working.
+let _dbAllParcels = [];
 
 async function _loadDbParcels(){
   const base = getApiBase();
   const meta = document.getElementById('dbMapMeta');
   meta.innerText = 'Loading master property database…';
   try {
-    // Default fetch is now geometry-stripped (server default per
-    // roadmap item 16, 2026-07-12) so the response is small enough
-    // to survive at 17k+ parcels. Map view still works via circle
-    // markers -- polygons will be a follow-up (lazy per-parcel or
-    // per-county opt-in via ?include_geometry=true).
     const res = await fetch(`${base}/api/property-db/all`);
     if(!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
@@ -2713,76 +2690,22 @@ async function _loadDbParcels(){
   }
 }
 
-function _renderDbLayer(){
-  if(_dbLayerGroup){ _dbMap.removeLayer(_dbLayerGroup); _dbLayerGroup = null; }
-  const bounds = _dbMap.getBounds();
-  const useFullPolygons = _dbMap.getZoom() >= _DB_POLYGON_ZOOM;
-  const layers = [];
-  _dbAllParcels.forEach(r => {
-    if(r.centroid_lat == null) return;
-    if(!bounds.contains([r.centroid_lat, r.centroid_lon])) return;
-    const color = _colorForParcel(r, _dbColorMode);
-    if(useFullPolygons && (r.geometry_wgs84 || []).length){
-      const partsLL = r.geometry_wgs84.map(part => part.map(ring => ring.map(([lon, lat]) => [lat, lon])));
-      const poly = L.polygon(partsLL, {color, weight: 1.5, fillOpacity: 0.35});
-      poly.bindPopup(_quickPopupHtml(r), {maxWidth: 300});
-      layers.push(poly);
-    } else {
-      const m = L.circleMarker([r.centroid_lat, r.centroid_lon], {
-        radius: useFullPolygons ? 4 : 3, color, fillColor: color, fillOpacity: 0.7, weight: 1,
-      });
-      m.bindPopup(_quickPopupHtml(r), {maxWidth: 300});
-      layers.push(m);
-    }
-  });
-  _dbLayerGroup = L.featureGroup(layers).addTo(_dbMap);
-}
-
-function _setDbBasemap(kind){
-  document.querySelectorAll('#dbMapControls .view-toggle button').forEach(b =>
-    b.classList.toggle('active', b.dataset.basemap === kind));
-  if(kind === 'satellite'){ _dbMap.removeLayer(_dbMapStreet); _dbMapSat.addTo(_dbMap); }
-  else { _dbMap.removeLayer(_dbMapSat); _dbMapStreet.addTo(_dbMap); }
-}
-
-async function openDbMap(){
-  // Kept for backward-compat with any code path that used to open the DB
-  // as a modal. The DB is now the primary landing view (see showView), so
-  // this just loads data + inits map/list without touching the sentinel
-  // backdrop. Idempotent -- safe to call from showView('database') too.
-  if(!_dbMap){
-    _dbMap = L.map('dbMap', {zoomControl: true});
-    _dbMapSat = _makeSatLayer().addTo(_dbMap);
-    _dbMapStreet = _makeStreetLayer();
-    _dbMap.setView([28.5, -82.0], 7);  // Florida default
-    document.getElementById('dbBasemapSat').addEventListener('click', () => _setDbBasemap('satellite'));
-    document.getElementById('dbBasemapStreet').addEventListener('click', () => _setDbBasemap('street'));
-    document.getElementById('dbColorBy').addEventListener('change', (e) => {
-      _dbColorMode = e.target.value;
-      _renderDbLayer();
-    });
-    _dbMap.on('moveend zoomend', _renderDbLayer);
-  }
-  setTimeout(() => _dbMap && _dbMap.invalidateSize(), 60);
+async function loadDatabase(){
+  // Loads real production data then renders the list. Idempotent --
+  // second call is essentially a re-render (_loadDbParcels re-fetches
+  // and repopulates _dbAllParcels).
   const ok = await _loadDbParcels();
   if(!ok) return;
-  // Fit map to whatever's in the DB.
-  const withCentroid = _dbAllParcels.filter(r => r.centroid_lat != null);
-  if(withCentroid.length){
-    const bounds = L.latLngBounds(withCentroid.map(r => [r.centroid_lat, r.centroid_lon]));
-    _dbMap.fitBounds(bounds, {padding: [40, 40]});
-  }
-  _renderDbLayer();
+  _populateDbCountyFilter();
+  _populateDbMetroFilter();
+  _renderDbList();
 }
-// dbMapLink and dbMapClose were removed with the modal wrapper. The DB is
-// now the primary landing view, reached via the top-level "Property
-// Database" tab (see showView / #viewTabs handlers below).
 
 // ---------------------------------------------------------------------
 // Primary view switching -- Property Database (default) vs. Data
 // Collection. The Data Collection tab still runs the same 4-step scan
 // workflow; the tab just gates whether that whole section is visible.
-// The DB list/map lives inline under #databaseView and stays initialized
+// The DB list lives inline under #databaseView and stays initialized
 // even when the Data Collection tab is showing, so switching tabs
 // doesn't re-hit /api/property-db/all.
 // ---------------------------------------------------------------------
@@ -2797,13 +2720,11 @@ async function showView(kind){
     el.classList.toggle('active', el.dataset.view === kind));
   if(kind === 'database' && !_dbInitialized){
     _dbInitialized = true;
-    await openDbMap();
-    _setDbView('list');  // land users on the ranked list, not the map
-  } else if(kind === 'database' && _dbMap){
-    // Coming back from Data Collection -- Leaflet needs a nudge in case
-    // the container was resized while hidden.
-    setTimeout(() => _dbMap && _dbMap.invalidateSize(), 60);
-    if(_dbView === 'map') _renderDbLayer();
+    await loadDatabase();
+  } else if(kind === 'database' && _dbAllParcels.length === 0){
+    // Coming back from Data Collection after a failed initial load --
+    // retry the fetch so the user isn't stuck with an empty view.
+    await loadDatabase();
   }
   window.scrollTo(0, 0);
 }
@@ -2900,16 +2821,34 @@ const DB_LIST_COLUMNS = [
     sortValue: r => r.metro_pull_score ?? -1 },
 ];
 
+// Multi-select filter configs (2026-07-12, roadmap item 18). Each
+// filter's active selection is a Set<string> on `_msState`. Empty Set
+// = "no filter, all pass" (consistent with the original select-with-
+// empty-string-value semantics). Semantics: AND across filters, OR
+// within each filter.
 const DB_LIST_FILTERS = [
-  { key: 'county_id', elementId: 'dbListFilterCounty', accessor: r => r.county_id || '' },
-  { key: 'tier',      elementId: 'dbListFilterTier',   accessor: r => _dbTier(r) },
+  { key: 'county', accessor: r => r.county_id || '', triggerLabel: 'counties' },
+  { key: 'tier',   accessor: r => _dbTier(r),        triggerLabel: 'tiers' },
   // Metro-name filter: lets the user pivot into "everything near Tampa"
-  // / "everything near Orlando" per item 6's original spec. Populated
-  // at render time from the actual loaded data (same pattern as County).
-  { key: 'metro_place_basename', elementId: 'dbListFilterMetro', accessor: r => r.metro_place_basename || '' },
+  // / "everything near Orlando" per item 6's original spec.
+  { key: 'metro',  accessor: r => r.metro_place_basename || '', triggerLabel: 'metros' },
 ];
+const _msState = {
+  county: new Set(),
+  tier:   new Set(),
+  metro:  new Set(),
+};
+// Options per filter, populated from real data or fixed lists at load
+// time. Tier is fixed; county/metro come from _dbAllParcels.
+const _TIER_OPTIONS = [
+  ['confirmed_qualifying', 'Confirmed qualifying'],
+  ['strong_candidate',     'Strong candidate'],
+  ['watch_list',           'Watch list'],
+  ['unlikely',             'Unlikely'],
+  ['excluded',             'Excluded'],
+];
+const _msOptions = { county: [], tier: _TIER_OPTIONS.slice(), metro: [] };
 
-let _dbView = 'map';
 // Default sort (2026-07-06 pass, item 6): tier ascending (qualifying
 // tiers first) then metro_pull_score descending (bigger nearby metro
 // = higher demand pull). Score / acres / etc. are still available as
@@ -2922,36 +2861,31 @@ const _dbSelectedKeys = new Set();
 
 function _dbListFilteredRows(){
   // Excluded-tier parcels are hidden by default (roadmap item 4). The
-  // "Show excluded" toggle reveals them; explicitly filtering the tier
-  // dropdown to "excluded" also overrides the hide rule so the user can
-  // still pull them up on demand without touching the toggle.
+  // "Show excluded" toggle reveals them; explicitly selecting "excluded"
+  // in the tier multi-select also overrides the hide rule so the user
+  // can pull them up without touching the toggle.
   const showExcluded = document.getElementById('dbListShowExcluded')?.checked;
-  const tierFilterEl = document.getElementById('dbListFilterTier');
-  const tierFilterVal = tierFilterEl && tierFilterEl.value;
+  const tierExplicitExcluded = _msState.tier.has('excluded');
   return _dbAllParcels.filter(r => {
     for(const f of DB_LIST_FILTERS){
-      const el = document.getElementById(f.elementId);
-      const val = el && el.value;
-      if(val && f.accessor(r) !== val) return false;
+      const sel = _msState[f.key];
+      if(sel.size > 0 && !sel.has(f.accessor(r))) return false;
     }
-    if(!showExcluded && tierFilterVal !== 'excluded' && _dbTier(r) === 'excluded') return false;
+    if(!showExcluded && !tierExplicitExcluded && _dbTier(r) === 'excluded') return false;
     return true;
   });
 }
 
 function _dbListHiddenExcludedCount(){
   const showExcluded = document.getElementById('dbListShowExcluded')?.checked;
-  const tierFilterEl = document.getElementById('dbListFilterTier');
-  const tierFilterVal = tierFilterEl && tierFilterEl.value;
-  if(showExcluded || tierFilterVal === 'excluded') return 0;
-  // Count excluded rows that would otherwise satisfy the other filters.
+  const tierExplicitExcluded = _msState.tier.has('excluded');
+  if(showExcluded || tierExplicitExcluded) return 0;
   return _dbAllParcels.filter(r => {
     if(_dbTier(r) !== 'excluded') return false;
     for(const f of DB_LIST_FILTERS){
       if(f.key === 'tier') continue;
-      const el = document.getElementById(f.elementId);
-      const val = el && el.value;
-      if(val && f.accessor(r) !== val) return false;
+      const sel = _msState[f.key];
+      if(sel.size > 0 && !sel.has(f.accessor(r))) return false;
     }
     return true;
   }).length;
@@ -2977,12 +2911,9 @@ function _dbListSortedRows(rows){
 }
 
 function _populateDbCountyFilter(){
-  const sel = document.getElementById('dbListFilterCounty');
-  const current = sel.value;
-  const counties = [...new Set(_dbAllParcels.map(r => r.county_id).filter(Boolean))].sort();
-  sel.innerHTML = '<option value="">All counties</option>'
-    + counties.map(c => `<option value="${c}">${c}</option>`).join('');
-  sel.value = current;
+  _msOptions.county = [...new Set(_dbAllParcels.map(r => r.county_id).filter(Boolean))]
+    .sort().map(c => [c, c]);
+  _msUpdateTriggerLabel('county');
 }
 
 function _populateDbMetroFilter(){
@@ -2990,14 +2921,138 @@ function _populateDbMetroFilter(){
   // run, so we don't hardcode a list of ~955 FL places. Rows scanned
   // before the metro-proximity wiring landed have null metro_place_
   // basename and don't contribute an option here.
-  const sel = document.getElementById('dbListFilterMetro');
-  if(!sel) return;
-  const current = sel.value;
-  const metros = [...new Set(_dbAllParcels.map(r => r.metro_place_basename).filter(Boolean))].sort();
-  sel.innerHTML = '<option value="">Any metro</option>'
-    + metros.map(m => `<option value="${m}">${m}</option>`).join('');
-  sel.value = current;
+  _msOptions.metro = [...new Set(_dbAllParcels.map(r => r.metro_place_basename).filter(Boolean))]
+    .sort().map(m => [m, m]);
+  _msUpdateTriggerLabel('metro');
 }
+
+// ---- Multi-select widget wiring (roadmap item 18) ----
+// One popover open at a time. Click outside closes it. Selection state
+// lives on _msState; UI is regenerated from that state each time the
+// panel opens or an option is toggled.
+let _msOpen = null;
+
+function _msDefaultLabel(key){
+  if(key === 'county') return 'All counties';
+  if(key === 'tier')   return 'All tiers';
+  if(key === 'metro')  return 'Any metro';
+  return 'All';
+}
+
+function _msTriggerLabel(key){
+  const sel = _msState[key];
+  const opts = _msOptions[key];
+  if(sel.size === 0) return _msDefaultLabel(key);
+  if(sel.size === opts.length) return _msDefaultLabel(key);
+  // Build a compact label: first 2 selected values by name, then "+N more"
+  const labelByValue = new Map(opts);
+  const names = [...sel].map(v => labelByValue.get(v) || v);
+  if(names.length <= 2) return names.join(', ');
+  return `${names[0]}, ${names[1]} +${names.length - 2}`;
+}
+
+function _msUpdateTriggerLabel(key){
+  const btn = document.querySelector(`.ms-trigger[data-msfilter="${key}"]`);
+  if(!btn) return;
+  btn.textContent = _msTriggerLabel(key);
+  btn.classList.toggle('ms-active', _msState[key].size > 0 && _msState[key].size < _msOptions[key].length);
+}
+
+function _msRenderPanel(key){
+  const opts = _msOptions[key];
+  const sel = _msState[key];
+  const rows = opts.map(([value, label]) => {
+    const checked = sel.has(value) ? 'checked' : '';
+    // Escape value for the HTML attribute; labels are trusted from our data.
+    const v = String(value).replace(/"/g, '&quot;');
+    return `<label><input type="checkbox" data-msvalue="${v}" ${checked}> ${label}</label>`;
+  }).join('');
+  return `<div class="ms-panel-toolbar">`
+    + `<button type="button" data-msaction="all">Select all</button>`
+    + `<button type="button" data-msaction="none">Clear</button>`
+    + `</div>`
+    + `<div class="ms-panel-list">${rows || '<label style="color:var(--ink-faint);cursor:default;">(no options)</label>'}</div>`;
+}
+
+function _msClosePanel(){
+  if(!_msOpen) return;
+  const panel = document.querySelector(`.ms-panel[data-msfilter="${_msOpen}"]`);
+  if(panel) panel.remove();
+  _msOpen = null;
+}
+
+function _msOpenPanel(key){
+  if(_msOpen === key){ _msClosePanel(); return; }
+  _msClosePanel();
+  const trigger = document.querySelector(`.ms-trigger[data-msfilter="${key}"]`);
+  if(!trigger) return;
+  const panel = document.createElement('div');
+  panel.className = 'ms-panel open';
+  panel.dataset.msfilter = key;
+  panel.innerHTML = _msRenderPanel(key);
+  trigger.parentElement.appendChild(panel);
+  _msOpen = key;
+
+  panel.addEventListener('click', e => e.stopPropagation());
+  panel.querySelectorAll('input[type="checkbox"][data-msvalue]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const v = cb.dataset.msvalue;
+      if(cb.checked) _msState[key].add(v);
+      else _msState[key].delete(v);
+      _msUpdateTriggerLabel(key);
+      _renderDbList();
+    });
+  });
+  panel.querySelectorAll('button[data-msaction]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if(btn.dataset.msaction === 'all'){
+        _msState[key] = new Set(_msOptions[key].map(o => o[0]));
+      } else {
+        _msState[key] = new Set();
+      }
+      // Re-render panel checkboxes to reflect new state
+      panel.innerHTML = _msRenderPanel(key);
+      _msUpdateTriggerLabel(key);
+      _renderDbList();
+      // Re-wire handlers since we blew away innerHTML
+      _msOpenPanel._rebind(panel, key);
+    });
+  });
+}
+// Small helper to re-bind after innerHTML replacement inside a panel
+_msOpenPanel._rebind = function(panel, key){
+  panel.querySelectorAll('input[type="checkbox"][data-msvalue]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const v = cb.dataset.msvalue;
+      if(cb.checked) _msState[key].add(v);
+      else _msState[key].delete(v);
+      _msUpdateTriggerLabel(key);
+      _renderDbList();
+    });
+  });
+  panel.querySelectorAll('button[data-msaction]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if(btn.dataset.msaction === 'all'){
+        _msState[key] = new Set(_msOptions[key].map(o => o[0]));
+      } else {
+        _msState[key] = new Set();
+      }
+      panel.innerHTML = _msRenderPanel(key);
+      _msUpdateTriggerLabel(key);
+      _renderDbList();
+      _msOpenPanel._rebind(panel, key);
+    });
+  });
+};
+
+document.querySelectorAll('.ms-trigger').forEach(btn => {
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    _msOpenPanel(btn.dataset.msfilter);
+  });
+});
+document.addEventListener('click', () => _msClosePanel());
+document.addEventListener('keydown', e => { if(e.key === 'Escape') _msClosePanel(); });
 
 function _renderDbList(){
   const container = document.getElementById('dbListContainer');
@@ -3012,8 +3067,15 @@ function _renderDbList(){
   const excludedNote = hiddenExcluded > 0
     ? ` &middot; <span style="color:var(--clay);">${hiddenExcluded} excluded hidden</span>`
     : '';
+  // Compact multi-select summary: only show filters with an active
+  // selection (empty Set = no filter, not worth mentioning).
+  const filterParts = DB_LIST_FILTERS
+    .filter(f => _msState[f.key].size > 0 && _msState[f.key].size < _msOptions[f.key].length)
+    .map(f => `${f.triggerLabel}: ${[..._msState[f.key]].length}`);
+  const filterNote = filterParts.length ? ` &middot; filters: ${filterParts.join(', ')}` : '';
   const summary = `<div class="db-list-summary">`
     + `Showing <strong>${sorted.length}</strong> of ${_dbAllParcels.length} parcels`
+    + filterNote
     + excludedNote
     + ` &middot; ${_dbSelectedKeys.size} selected`
     + ` &middot; sort: ${_dbListSort.key} ${_dbListSort.dir}`
@@ -3076,41 +3138,9 @@ function _renderDbList(){
   });
 }
 
-function _setDbView(kind){
-  _dbView = kind;
-  document.querySelectorAll('#dbMapControls .view-toggle button[data-dbview]').forEach(b =>
-    b.classList.toggle('active', b.dataset.dbview === kind));
-  const mapEl = document.getElementById('dbMap');
-  const listEl = document.getElementById('dbListContainer');
-  const showList = kind === 'list';
-  mapEl.style.display = showList ? 'none' : '';
-  listEl.style.display = showList ? 'flex' : 'none';
-  listEl.style.flexDirection = 'column';
-  document.querySelectorAll('.db-map-only').forEach(el => { el.style.display = showList ? 'none' : ''; });
-  document.querySelectorAll('.db-list-only').forEach(el => {
-    // BUTTON -> inline-block, LABEL -> flex (checkbox + text alignment),
-    // everything else -> '' to fall back to CSS defaults.
-    const show = el.tagName === 'BUTTON' ? 'inline-block'
-               : el.tagName === 'LABEL'  ? 'flex'
-               : '';
-    el.style.display = showList ? show : 'none';
-  });
-  if(showList){
-    _populateDbCountyFilter();
-    _populateDbMetroFilter();
-    _renderDbList();
-  } else {
-    setTimeout(() => _dbMap && _dbMap.invalidateSize(), 60);
-    _renderDbLayer();
-  }
-}
-
-document.getElementById('dbViewMapBtn').addEventListener('click', () => _setDbView('map'));
-document.getElementById('dbViewListBtn').addEventListener('click', () => _setDbView('list'));
-DB_LIST_FILTERS.forEach(f => {
-  const el = document.getElementById(f.elementId);
-  if(el) el.addEventListener('change', _renderDbList);
-});
+// (Filter change handlers are wired inside _msOpenPanel per checkbox
+// interaction; no top-level select .change listeners needed after the
+// multi-select conversion.)
 document.getElementById('dbListShowExcluded').addEventListener('change', _renderDbList);
 
 document.getElementById('dbListExportBtn').addEventListener('click', () => {

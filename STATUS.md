@@ -1866,3 +1866,309 @@ per-batch breakdown. Snapshot for whoever picks up next:
    jobs but doesn't currently sequence multiple counties. If you want to
    run all 13 in a batch, sequence the 6 SWFWMD-sourced ones during
    morning window and the 7 direct-source ones any time.
+
+
+## 2026-07-09 through 2026-07-12 session -- item 13 populated + eight new commits
+
+Multi-day extension of the Wave 2b closeout above. Final state summary
+at bottom; individual pieces documented in chronological order.
+
+### Batch orchestrator + first pilot (2026-07-09)
+`app/batch_jobs.py` (new, commit 4d3be72): coordinator daemon that
+sequences scan-entire-county runs across many counties in one shot.
+Prefers a pending SWFWMD-sourced county when the 6 AM-10 PM Eastern
+window is open (scarce resource) and takes the next direct-source
+county otherwise; parks at paused_awaiting_window when only SWFWMD
+counties remain outside window and sleeps in-thread until reopen.
+One batch at a time (idempotent second start).
+
+New endpoints on main.py: POST /api/batch/start (empty county_ids
+maps to every confirmed_live), GET /api/batch/status, POST
+/api/batch/cancel. Startup hook mark_interrupted_at_startup on
+batch_jobs picks a batch back up after process death.
+
+First pilot (Nassau + Hardee) uncovered real bugs detailed below.
+
+### SWFWMD boundary abandonment fix (2026-07-10, a7fc89d)
+Nassau finished cleanly (1858 parcels, 191 batches, 3h6m). Hardee got
+abandoned at 05:59:59.918 UTC = 82 ms before the 06:00 ET SWFWMD
+window opened. Two bugs stacked:
+
+- service_windows.seconds_until_window_open truncated via int(); at
+  05:59:59.9 ET the 0.1s remainder floored to 0 while
+  is_within_swfwmd_window still reported False. Fix: math.ceil with
+  max(1, ...) so any closed-window path returns at least 1s.
+- Batch coordinator's pause guard was "if wait_sec and wait_sec > 0"
+  which fell through to the no-eligible-plus-no-wait complete branch
+  when wait_sec=0. Conflated (None, 0) = "check again in 0s" with
+  (None, None) = "nothing pending". Fix: "if wait_sec is not None:"
+  so any integer wait triggers pause+recheck.
+
+Regression tests in .venv312 covered 05:59:59.9, 05:59:59.1,
+05:59:58.5, 06:00:00.0, 21:59:59.5, 22:00:00.0.
+
+### Missing Census FIPS for Wave 1 + Wave 2b (2026-07-10, af2e76f)
+zcta_client.CENSUS_COUNTY_FIPS only had the 4 pilots plus a few
+pre-Wave-1 carryovers. Every Wave 1 (Lee, Citrus, Leon) and Wave 2b
+(Hardee, Charlotte, Marion, Polk) county was missing -- every
+scan-entire-county on those errored immediately with "Could not find
+Census TIGERweb county boundary". Verified each addition against
+live tigerWMS_Current/MapServer/82 (Hardee = 049 not 055 as memory
+first suggested -- 055 is Highlands).
+
+### query_layer pagination bug (2026-07-10, 7f7e7f1 + f41fd84)
+Hardee ZCTA 33834 error surfaced a fetcher-level duplicate bug
+disguised as an item-11 self-heal abort. Root cause: query_layer
+advanced offset += len(features), but resultOffset is a row-index
+counter, not "features previously returned". SWFWMD's parcel_search
+MapServer returns partial pages (145 features for a 500 request) due
+to server-side complexity limits on combined spatial+attr queries --
+offset+=145 landed the next request mid-page-1 and re-yielded the
+earlier rows.
+
+Concrete before/after on Hardee 33834:
+- Buggy: 972 yielded, 474 unique, 498 duplicates
+- Fixed: 475 yielded, 474 unique, 1 boundary dup
+- count_matching_candidates: 360 (inflated) -> 171 (true)
+
+Direct-source layers always returned full 500-feature pages so the
+bug never manifested. Nassau 32046 unchanged before/after: 846 unique
+0 dups.
+
+f41fd84 added an optional order_by param and wired
+fetch_candidate_parcels to pass "<parcel_id_field> ASC" -- matches
+ArcGIS's documented resultOffset stability contract for layers that
+lack an objectIdField (SWFWMD confirmed objectIdField: None). Zero
+cost on layers with implicit-OID ordering.
+
+### Null + duplicate parcel_ids in fetcher (2026-07-10, 2d705b8, closes item 14)
+Filed as "low-priority, bounded impact" during the pagination-fix
+pass. Wrong -- turned out to be actively blocking Hardee's
+completion at ZCTA 33873.
+
+count_matching_candidates and fetch_candidate_parcels share code per
+item 11's design, so both counted duplicates. mark_processed's set
+semantics deduped -- stored processed count never matched inflated
+total_candidates -- next advance returned 0 rows (all N unique IDs
+in skip_set including dup copies) -- item 11 self-heal re-verified
+via same code path, saw same inflated count, aborted.
+
+Two live-confirmed sources:
+- Pasco 33523: 1334 raw / 22 null parcel_id / 6 real dup pids
+- Hardee 33873: 511 raw / 0 null / 2 real dup pids
+
+Fix in fetch_candidate_parcels: skip rows with null/empty
+parcel_id_field early plus dedup within a single call via a per-call
+seen_in_this_call set.
+
+Post-fix Hardee re-run: 100.0% coverage across all 13 ZCTAs, 2238
+processed of 2238 candidates, 0 self-heals fired.
+
+### Full 13-county batch and item 13 close (2026-07-11 through 2026-07-12)
+Ran the actual data-population pass. Sarasota completed first
+(SWFWMD-first priority), then Manatee, Hardee, Charlotte, Marion,
+Polk during the window; Pasco started 3 minutes before window close
+so the pause path never got exercised in production. Direct-source
+counties (Pasco, Nassau, St. Johns, Osceola, Lee, Leon, Citrus)
+followed.
+
+Real result across 13 counties: 17,188 unique parcels.
+
+| tier | count |
+|---|---|
+| confirmed_qualifying | 1,040 |
+| strong_candidate | 206 |
+| watch_list | 211 |
+| unlikely | 14,929 |
+| excluded | 802 |
+
+1,291 pathway matches total. Highest-yield: Osceola (439), Pasco
+(422), Nassau (200), St. Johns (91), Charlotte (53), Manatee (30).
+Zero-yield in Leon, Citrus, Sarasota, Marion, Polk -- real data
+finding: ag parcels sit in contiguous ag zones with no residential-
+FLUM neighbors. Polk had the biggest exclusion count (560) from
+parcels over 1,280 ac failing s. 163.3164(4)(e)'s 75% test.
+
+Top-15 highest-attractiveness parcels (score=90, 100% qualifying)
+were all Pasco: Depue Ranch LLC, Nutt Family Trust, Sanctuary Farms,
+Hilton Stanley, Sid Larkin & Son, Prospect Road Land Investments.
+
+### 512 MB OOM + property-DB split (2026-07-12, d3f1835, closes item 13 root cause)
+Backend crashed 10 hours into the 13-county run at 8 counties done +
+pasco in progress. Render dashboard confirmed OOM (512 MB Starter).
+Root cause was systemic: coverage_ledger.json held BOTH per-ZCTA
+progress (small) AND the full property database (grew unbounded,
+geometry_wgs84 heavy). Every mark_processed and save_parcel_results
+call did a full json.load/json.dump cycle over the whole thing --
+peak per-op memory tracked total DB size, not operation size.
+
+Fix: split parcels into per-county files
+property_db_<county>.json. Ledger stays small (ZCTA progress only)
+forever. save_parcel_results now loads/saves one county's file --
+memory bounded per county. list_all_parcels_all_counties enumerates
+per-county files + falls back to legacy for anything not yet
+migrated.
+
+migrate_legacy_parcels_at_startup runs at main.py import time,
+before mark_interrupted_at_startup or any request handler. One-time
+per deploy: reads legacy once, writes each county's parcels to its
+own file, rewrites the ledger without parcels.
+
+Verified: batch auto-resumed via mark_interrupted_at_startup, then
+lee/leon/citrus completed cleanly (no repeat OOM past the previous
+8-county threshold). St. Johns + Osceola were mid-scan at OOM and
+got interrupted, flipped to interrupted status. Batch coordinator
+treated as errored. Manually re-kicked with just those two, both
+completed cleanly in 13 minutes.
+
+### /api/property-db/all response-size fix (2026-07-12, 1908dfb + cbc9192, closes item 16)
+After the write-side OOM fix, the READ path for the unfiltered
+endpoint still concatenated all per-county files into one ~88 MB
+response and reliably 502'd.
+
+Field-size profiling over 100 real production rows found the real
+bulk was NOT geometry as first assumed:
+- needs_manual_review  1548 B/row  (78% of row size)
+- score_breakdown       199 B/row
+- geometry_wgs84       200-1000 B when present
+
+First pass (1908dfb) stripped only geometry: 45 MB, still flaky (~50%
+success). Second pass (cbc9192) stripped needs_manual_review +
+score_breakdown too: 18.8 MB, 5/5 successful sequential attempts,
+5.87-6.51s response time.
+
+Added ?include_geometry=true / ?include_detail=true opt-in params
+plus per-parcel endpoint GET /api/property-db/parcel/{cid}/{pid}
+(5.4 KB, 257 ms). Frontend openDetailFromMap fetches the per-parcel
+endpoint before opening the overlay; degrades gracefully to the
+in-memory light row on fetch failure.
+
+### Map view removed (2026-07-12, 8970cdd, closes item 17)
+User reported the map showed zoom controls but a dark blank
+rectangle. Diagnosis:
+
+- Esri tiles loaded successfully (complete=true, naturalWidth=256)
+  but every tile had style="opacity:0" inline set by Leaflet's fade
+  animation, never cleared.
+- Map was also stuck at zoom level 19 (Esri tile URLs at that zoom
+  are geographically off the coast of Africa). Ten zoom-out clicks
+  had zero effect on the tile grid -- Leaflet's internal state was
+  corrupted.
+
+Not a one-line fix. Per user's explicit direction ("if it's not
+obviously quick, remove the map view entirely"), removed cleanly:
+
+- HTML: dropped #dbMap container, Map/List view toggle, basemap
+  toggle, "Color by" dropdown, dbMapBackdrop legacy sentinel
+- JS: dropped _renderDbLayer, _setDbBasemap, _setDbView, openDbMap,
+  _dbView, _dbMap, _dbMapSat, _dbMapStreet, _dbLayerGroup,
+  _dbColorMode, _DB_POLYGON_ZOOM
+- Intro copy updated to "Sortable, filterable, exportable"
+- _PARCEL_REGISTRY kept -- still used by renderScanMap on the Data
+  Collection tab
+
+### Multi-select filters (2026-07-12, 8970cdd, closes item 18)
+Same commit. Converted County / Tier / Metro filters from
+single-select dropdowns to multi-select popovers:
+
+- Each filter is a trigger button that opens a popover with
+  checkboxes
+- State per filter is a Set<string>; empty Set = "no filter, all
+  pass"
+- Semantics: AND across filters, OR within each filter
+- Trigger label shows compact selection ("Pasco, Osceola +N")
+- Summary line shows active-filter counts inline
+
+Verified against production data: county={pasco,osceola} alone gave
+2700 rows (1237+1586-123 excluded = 2700 exact); combined with
+tier={confirmed,strong} gave 861 rows (299+123 Pasco + 364+75
+Osceola = 861 exact).
+
+### Auto-populating weekly re-verification (2026-07-12, 96cb5ba, closes item 19)
+Ongoing-population design so the Property Database stays current as
+counties add new ag parcels or existing ones sell / subdivide / get
+reclassified.
+
+coverage_ledger.flag_parcel_no_longer_matching(county_id, parcel_id,
+zcta5): appends a manual-review note and sets a
+disappeared_from_upstream_at ISO timestamp on the parcel row.
+Idempotent.
+
+background_jobs.revalidate_complete_zctas(county_id, params):
+iterates every ZCTA marked complete for the county. Three outcomes
+per ZCTA:
+- upstream count == stored: unchanged
+- upstream count > stored: set_zcta_total updates the total, flips
+  complete to False. Coordinator's next advance picks it up (with
+  skip_parcel_ids containing already-scanned IDs so only NEW parcels
+  are processed).
+- upstream count < stored: fetch current matching set, diff against
+  processed_parcel_ids, flag each missing pid via
+  flag_parcel_no_longer_matching. Update total; parcel history stays
+  intact.
+
+Wired into _run_job_loop reading params["revalidate_before_scan"].
+FullCountyScanPayload + BatchStartPayload got the flag. POST
+/api/coverage/{county_id}/revalidate for synchronous ad-hoc use.
+
+Cron: scripts/weekly_batch_scan.py uses urllib to POST
+/api/batch/start with revalidate_before_scan=True and empty
+county_ids (server-expanded to every confirmed_live county).
+render.yaml blueprint declares both the existing web service and
+the new cron service:
+
+    schedule: 0 12 * * 0    # Sundays at 12:00 UTC
+                            # = 08:00 EDT / 07:00 EST
+                            # always after SWFWMD's 06:00 ET open
+
+Verified live: ad-hoc reverify of Nassau completed 15/15 ZCTAs in
+51s (0 grew / 15 unchanged / 0 shrank). Cron script invocation
+returned 200 with the batch queued for all 13 canon counties and
+revalidate_before_scan=true in the payload.
+
+### Registry reconciliation (2026-07-12, b583632)
+hillsborough, brevard, volusia were flagged confirmed_live=True by a
+pre-Wave-1 heuristic that was never ground-truthed end-to-end. Batch
+enumeration gave 16 counties instead of the canonical 13; cron would
+have shipped scans to three untested counties every week.
+
+Flipped all three to confirmed_live=False. Notes preserve the
+original "confirmed live FeatureLayer" claim for FLUM only -- that
+part is still true, just insufficient for a full scan. Flip back
+after a proper ground-truthing pass.
+
+Registry confirmed_live=True set is now exactly the STATUS.md canon:
+Pasco, Nassau, St. Johns, Osceola (pilots) + Lee, Leon, Citrus
+(Wave 1) + Sarasota, Manatee, Hardee, Charlotte, Marion, Polk
+(Wave 2b) = 13 counties.
+
+## Final state (2026-07-12)
+
+Backend: enclave-scanner-backend.onrender.com, commit b583632 live,
+data on 5 GB persistent disk at /var/data (item 12), single uvicorn
+worker, threaded server.
+
+Frontend: enclave-scanner-backend.netlify.app,
+web/index.html served from web/ build root, points at Render for
+API. List view only (item 17 closed).
+
+Data: 17,188 unique parcels across 13 counties. Property DB
+persists to per-county files property_db_<county>.json at /var/data.
+
+Weekly auto-refresh: Sundays 12:00 UTC via
+scripts/weekly_batch_scan.py invoked from the cron service in
+render.yaml. Cron requires a one-time "New > Blueprint" apply in
+the Render dashboard to provision.
+
+What's fully verified end-to-end at production scale:
+- List view rendering, sorting, filtering (16,386 rows visible,
+  excluded-tier default-hidden)
+- Multi-select filters with AND-across / OR-within semantics
+- CSV / xlsx export via the diligence tracker
+- Per-parcel detail overlay via /api/property-db/parcel/{cid}/{pid}
+- Coverage ledger self-heal path (item 11)
+- Batch orchestrator restart-safety through OOM (item 12 persistent
+  disk + mark_interrupted_at_startup)
+- Weekly-cron endpoint path (POST /api/batch/start with
+  revalidate_before_scan=True) -- proven via the actual
+  scripts/weekly_batch_scan.py entrypoint

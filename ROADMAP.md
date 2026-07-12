@@ -919,6 +919,108 @@ the index/checklist, not the full spec.
   Small change scoped to `batch_jobs._run_batch_loop`; not doing
   under time pressure to avoid mixing scope with the OOM fix.
 
+- [x] **17. Master DB map view removed** *(2026-07-12, commit 8970cdd)*
+  Leaflet tile-init issue: tiles loaded successfully (Esri returned 200,
+  `complete: true`, `naturalWidth: 256`) but every tile had inline
+  `style="opacity: 0"` set by Leaflet's fade animation and never
+  cleared, AND the map was stuck at zoom level 19 with zero response
+  to zoom controls -- Leaflet's internal state was corrupted, not
+  just a display issue. Not a one-CSS-line fix. Per Tyler's explicit
+  direction ("if it's not obviously quick, remove the map view
+  entirely -- don't leave it half-working"), removed cleanly:
+  #dbMap container, Map/List view toggle, basemap toggle, "Color by"
+  dropdown, dbMapBackdrop legacy sentinel, all associated JS
+  (`_renderDbLayer`, `_setDbBasemap`, `_setDbView`, `openDbMap`,
+  `_dbView`, `_dbMap*`, `_dbLayerGroup`, `_dbColorMode`,
+  `_DB_POLYGON_ZOOM`), intro copy updated. `_PARCEL_REGISTRY` kept
+  since it's still used by renderScanMap on the Data Collection tab.
+
+- [x] **18. Multi-select filters on the Master DB list view** *(2026-07-12, commit 8970cdd)*
+  Converted County / Tier / Metro filters from single-select
+  dropdowns to popover checkbox lists. State per filter is a
+  `Set<string>`; empty Set = "no filter, all pass" (matches original
+  select-with-empty-string-value semantics). Logic: AND across
+  filters, OR within each filter. Trigger label shows compact
+  selection ("Pasco, Osceola +N"); summary line shows active-filter
+  counts inline. "Show excluded" toggle preserved with original
+  override semantics. Verified against production data:
+  county={pasco,osceola} -> 2700 rows (1237+1586-123 excluded, exact);
+  combined with tier={confirmed,strong} -> 861 rows
+  ((299+123) + (364+75), exact match to CLI aggregation).
+
+- [x] **19. Auto-populating weekly re-verification** *(2026-07-12, commit 96cb5ba)*
+  Ongoing-population design so the Property Database stays current
+  as counties add new ag parcels or existing ones sell / subdivide
+  / get reclassified out of agricultural use.
+
+  Backend adds:
+  - `coverage_ledger.flag_parcel_no_longer_matching(cid, pid, zcta5)`
+    appends a manual-review note and sets
+    `disappeared_from_upstream_at` ISO timestamp on the parcel row.
+    Idempotent. Real diligence signal, not just a data-quality log.
+  - `background_jobs.revalidate_complete_zctas(cid, params)` iterates
+    every complete ZCTA. Three outcomes per ZCTA:
+      * count == stored: unchanged
+      * count > stored: `set_zcta_total` updates the total and flips
+        complete=False since processed < new_total. Coordinator's
+        next advance picks it up (skip_parcel_ids contains
+        already-scanned IDs so only NEW parcels get processed).
+      * count < stored: fetch current matching set, diff against
+        `processed_parcel_ids`, flag each missing parcel_id via
+        `flag_parcel_no_longer_matching`. Update total; parcel
+        history stays intact.
+  - Wired into `_run_job_loop`: reads
+    `params["revalidate_before_scan"]` and runs the pass before the
+    main advance loop.
+  - `FullCountyScanPayload` + `BatchStartPayload` get
+    `revalidate_before_scan: bool = False`.
+  - `POST /api/coverage/{county_id}/revalidate` for synchronous
+    ad-hoc calls (enforces SWFWMD window).
+
+  Cron:
+  - `scripts/weekly_batch_scan.py` uses stdlib `urllib` to POST
+    `/api/batch/start` with `revalidate_before_scan=True` and empty
+    `county_ids` (server-expanded to every `confirmed_live`).
+  - `render.yaml` blueprint declares both the existing web service
+    (with its persistent disk mount) and the new cron service:
+    `schedule: 0 12 * * 0` = **Sundays 12:00 UTC** = 08:00 EDT /
+    07:00 EST, always after SWFWMD's 06:00 ET open. Sunday morning
+    chosen for lowest upstream county-GIS load.
+  - Render blueprint requires a one-time "New > Blueprint" apply in
+    the dashboard to provision the cron service. Once provisioned,
+    Render runs the script on the schedule.
+
+  Verified live: ad-hoc reverify of Nassau completed 15/15 ZCTAs in
+  51s (0 grew / 15 unchanged / 0 shrank -- expected for a scan run
+  yesterday). Cron script invocation returned 200 with the batch
+  queued for all 13 canon counties and revalidate_before_scan=true.
+
+  Companion cleanup: `hillsborough`, `brevard`, `volusia` flipped to
+  `confirmed_live=False` (commit `b583632`) since their pre-Wave-1
+  heuristic flag was never ground-truthed end-to-end. Registry
+  confirmed_live set now exactly matches STATUS.md's 13-county
+  canon.
+
+## Open items -- what's left after this session
+
+Everything except three items is closed. Still open:
+
+- **Item 9 (Scale-Up Phase 3 to 30+ counties)** -- partial, 13
+  wired. The 7 SWFWMD-schema counties still parcel-ready + FLUM-
+  blocked (DeSoto, Hernando, Highlands, Lake, Levy, Sumter, Duval)
+  need either per-county interactive investigation or (for Duval
+  specifically) shapefile-ingestion infrastructure. Automatable
+  discovery is exhausted.
+- **Item 15 (auto-retry interrupted before erroring)** -- small
+  scope, not urgent. Batch coordinator currently treats
+  `interrupted` as terminal-error rather than "resume once, then
+  error". Only bites during process crashes mid-scan.
+- **Ground-truth `hillsborough`, `brevard`, `volusia`** (or others
+  from Phase 1 that had FeatureLayer-only confirmation) -- their
+  confirmed_live=False today reflects the fact that they were never
+  scanned end-to-end. A proper item-9-style pass could flip them
+  back to True.
+
 ## How to use this file
 
 - Mark items complete by changing `- [ ]` to `- [x]` and committing.

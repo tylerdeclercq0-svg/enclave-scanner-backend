@@ -163,6 +163,117 @@ def mark_interrupted_at_startup() -> None:
             pass
 
 
+def revalidate_complete_zctas(county_id: str, params: dict) -> dict:
+    """
+    Roadmap item 19 (2026-07-12): re-verify every ZCTA marked complete
+    for this county against upstream. Cheap first-pass: for each
+    complete ZCTA call parcel_fetcher.count_matching_candidates (item
+    11's shared-with-fetcher code path) and compare to stored total.
+
+    - upstream count > stored: new candidates appeared. Update the
+      total via set_zcta_total, which automatically flips complete to
+      False since processed < new_total. Batch coordinator's next
+      advance loop picks the ZCTA back up and only fetches the new
+      parcels (via skip_parcel_ids).
+    - upstream count == stored: still complete, skip.
+    - upstream count < stored: a parcel disappeared from the ag set --
+      likely sold to a non-ag owner, subdivided, or reclassified out
+      of agriculture. Fetch the current matching set, diff against the
+      stored processed_parcel_ids, flag every missing parcel via
+      coverage_ledger.flag_parcel_no_longer_matching (real diligence
+      signal, not just a data-quality log line). Update the stored
+      total so the ledger stays consistent.
+
+    Individual ZCTA failures don't abort the pass -- other ZCTAs
+    continue and errors are counted in the return summary.
+    """
+    from county_registry import COUNTIES
+    import coverage_ledger
+    import zcta_client
+    from parcel_fetcher import count_matching_candidates, fetch_candidate_parcels
+
+    county = COUNTIES.get(county_id)
+    if county is None:
+        return {"county_id": county_id, "error": "unknown county"}
+
+    try:
+        zctas = zcta_client.get_county_zctas(county_id)
+    except Exception as exc:  # noqa: BLE001
+        return {"county_id": county_id, "error": f"zcta lookup failed: {exc}"}
+
+    state = coverage_ledger.get_county_state(county_id)
+    zctas_state = state.get("zctas", {})
+
+    fetch_kwargs = dict(
+        min_acreage=params.get("min_acreage", 20.0),
+        max_acreage=params.get("max_acreage", 4480.0),
+        require_single_owner=params.get("require_single_owner", False),
+    )
+
+    summary = {
+        "county_id": county_id,
+        "complete_zctas_checked": 0,
+        "grew": 0,
+        "unchanged": 0,
+        "shrank": 0,
+        "errors": 0,
+        "flagged_parcel_ids": [],
+    }
+
+    for z in zctas:
+        zcode = z["zcta5"]
+        entry = zctas_state.get(zcode, {})
+        if not entry.get("complete"):
+            continue
+        stored_total = entry.get("total_candidates") or 0
+        summary["complete_zctas_checked"] += 1
+        try:
+            new_total = count_matching_candidates(
+                county_id=county_id,
+                zcta_geometry=z["geometry"],
+                **fetch_kwargs,
+            )
+        except Exception:  # noqa: BLE001
+            summary["errors"] += 1
+            continue
+
+        if new_total == stored_total:
+            summary["unchanged"] += 1
+            continue
+
+        if new_total > stored_total:
+            coverage_ledger.set_zcta_total(county_id, zcode, new_total)
+            summary["grew"] += 1
+            continue
+
+        # new_total < stored_total: identify the specific missing IDs
+        # and flag them. Fetch the current matching set unbounded, no
+        # skip -- we're building a diff, not paginating.
+        try:
+            current = fetch_candidate_parcels(
+                county_id=county_id,
+                zcta_geometry=z["geometry"],
+                max_candidates=10**9,
+                **fetch_kwargs,
+            )
+        except Exception:  # noqa: BLE001
+            summary["errors"] += 1
+            continue
+        current_ids = {p.parcel_id for p in current if p.parcel_id}
+        processed_ids = set(entry.get("processed_parcel_ids", []))
+        gone_ids = sorted(processed_ids - current_ids)
+        for pid in gone_ids:
+            coverage_ledger.flag_parcel_no_longer_matching(county_id, pid, zcode)
+        # Keep the ledger's total_candidates in sync. processed_ids stays
+        # unchanged (those parcels DID get scanned once; their history is
+        # preserved and the flag lives on the parcel row itself).
+        coverage_ledger.set_zcta_total(county_id, zcode, new_total)
+        summary["shrank"] += 1
+        summary["flagged_parcel_ids"].extend(gone_ids)
+
+    return summary
+
+
 def _run_job_loop(county_id: str, params: dict, cancel_flag: threading.Event) -> None:
     """
     The actual worker. Runs in a daemon thread. Advances one ZCTA batch
@@ -182,6 +293,18 @@ def _run_job_loop(county_id: str, params: dict, cancel_flag: threading.Event) ->
     _save_state(state)
 
     try:
+        # Roadmap item 19: optional upstream re-verification pass. Runs
+        # BEFORE the main advance loop so any ZCTA whose upstream count
+        # grew flips back to incomplete and gets picked up naturally by
+        # next_incomplete_zcta below. Shrinking ZCTAs flag their gone
+        # parcels via coverage_ledger.flag_parcel_no_longer_matching.
+        # Cheap: one count_matching_candidates per complete ZCTA.
+        if params.get("revalidate_before_scan"):
+            try:
+                revalidate_complete_zctas(county_id, params)
+            except Exception:  # noqa: BLE001 -- non-fatal
+                pass
+
         county = COUNTIES[county_id]
         zctas = zcta_client.get_county_zctas(county_id)
         zcta_codes = [z["zcta5"] for z in zctas]

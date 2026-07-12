@@ -1,0 +1,56 @@
+# Render Blueprint (2026-07-12, roadmap item 19).
+#
+# Declares the existing web service AND a new Cron Job service that
+# triggers the weekly auto-populating batch scan.
+#
+# Manual apply (one-time, in the Render dashboard):
+#   1. New > Blueprint > point at this repo
+#   2. Render will preserve the existing web service settings
+#      (persistent disk mount at /var/data, env vars for
+#      CENSUS_API_KEY / DEBUG_API_KEY / FRONTEND_ORIGIN, etc.) but
+#      add the cron entry defined below.
+#   3. Confirm the schedule shows "Sundays at 12:00 UTC".
+#
+# The cron POSTs to /api/batch/start with revalidate_before_scan=True
+# so each per-county job re-verifies its complete ZCTAs against
+# upstream first; new candidates flip their ZCTA back to incomplete
+# and get re-processed, while parcels that disappeared from upstream
+# get flagged with a manual-review note on the parcel row itself
+# (real diligence signal -- likely sold, subdivided, or reclassified).
+
+services:
+  - type: web
+    name: enclave-scanner-backend
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    disk:
+      name: enclave-data
+      mountPath: /var/data
+      sizeGB: 5
+    envVars:
+      - key: DATA_DIR
+        value: /var/data
+
+  - type: cron
+    name: enclave-weekly-batch
+    runtime: python
+    plan: starter
+    # 0 12 * * 0 = every Sunday at 12:00 UTC.
+    #   EDT (summer): 08:00 -- well after SWFWMD's 06:00 ET window opens
+    #   EST (winter): 07:00 -- also after 06:00 ET (SWFWMD uses local
+    #                          time; window opens at 6 AM regardless of
+    #                          DST via zoneinfo in service_windows.py)
+    # Sunday morning was picked over weekdays for two reasons:
+    #   1. Upstream county GIS servers see their lowest load on Sunday,
+    #      so our ~200 lightweight count calls + any actual re-scan
+    #      work don't stack on top of business traffic.
+    #   2. Any per-county surprise (schema drift, mass-reclassification
+    #      alert on the ledger) surfaces before the workweek starts.
+    schedule: "0 12 * * 0"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python scripts/weekly_batch_scan.py
+    envVars:
+      - key: BACKEND_URL
+        value: https://enclave-scanner-backend.onrender.com

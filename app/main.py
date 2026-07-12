@@ -1007,6 +1007,15 @@ class FullCountyScanPayload(BaseModel):
     min_encirclement_pct: Optional[float] = None
     flum_character_filter: Optional[str] = None
     surrounding_density_filter: Optional[str] = None
+    # Roadmap item 19 (2026-07-12). When True, the per-county runner
+    # re-verifies every complete ZCTA against upstream before its main
+    # advance loop. ZCTAs whose upstream count grew flip back to
+    # incomplete and get re-processed. ZCTAs whose count shrank get the
+    # missing parcels flagged with a manual-review note. Cheap: one
+    # count_matching_candidates call per complete ZCTA. Default False
+    # to preserve existing ad-hoc scan semantics; the weekly cron sets
+    # it True.
+    revalidate_before_scan: bool = False
 
 
 @app.post("/api/coverage/{county_id}/scan-entire-county")
@@ -1058,6 +1067,32 @@ def coverage_job_cancel(county_id: str):
     return {"county_id": county_id, "job": asdict(state) if state else None}
 
 
+class RevalidatePayload(BaseModel):
+    min_acreage: float = 20.0
+    max_acreage: float = 4480.0
+    require_single_owner: bool = False
+
+
+@app.post("/api/coverage/{county_id}/revalidate")
+def coverage_revalidate(county_id: str, payload: RevalidatePayload):
+    """
+    Ad-hoc upstream re-verification for one county's complete ZCTAs
+    (roadmap item 19). Runs synchronously and returns a summary.
+    Cheap: one count_matching_candidates call per complete ZCTA. Same
+    logic the batch coordinator runs when revalidate_before_scan=True.
+    """
+    if county_id not in COUNTIES:
+        raise HTTPException(status_code=404, detail=f"Unknown county: {county_id}")
+    county_entry = COUNTIES[county_id]
+    if not service_windows.parcel_source_within_window(county_entry.parcel_source):
+        raise HTTPException(
+            status_code=503,
+            detail=service_windows.parcel_source_window_message(county_entry.parcel_source),
+        )
+    summary = background_jobs.revalidate_complete_zctas(county_id, payload.model_dump())
+    return summary
+
+
 # =====================================================================
 # Multi-county batch orchestrator (roadmap item 13, 2026-07-09). Wraps
 # background_jobs.start_full_county_job across many counties in one shot,
@@ -1076,6 +1111,11 @@ class BatchStartPayload(BaseModel):
     min_encirclement_pct: Optional[float] = None
     flum_character_filter: Optional[str] = None
     surrounding_density_filter: Optional[str] = None
+    # Roadmap item 19 (2026-07-12). Threaded through to each per-county
+    # runner. When True, every complete ZCTA is re-verified against
+    # upstream before the runner's advance loop. The weekly cron sets
+    # it True; ad-hoc kicks leave it default False.
+    revalidate_before_scan: bool = False
 
 
 @app.post("/api/batch/start")

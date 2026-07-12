@@ -306,6 +306,42 @@ def county_summary(county_id: str, all_zctas: list[str]) -> dict[str, Any]:
     }
 
 
+def flag_parcel_no_longer_matching(county_id: str, parcel_id: str, zcta5: str) -> None:
+    """
+    Mark a parcel that appeared in a previous scan but is NO LONGER in
+    the upstream ag-candidate set for its ZCTA at revalidation time
+    (roadmap item 19, 2026-07-12). Real diligence signal: the parcel
+    was likely sold to a non-ag owner, subdivided, or reclassified out
+    of agricultural use. Appends a manual-review note and sets a
+    `disappeared_from_upstream_at` ISO timestamp on the row.
+
+    Idempotent: repeat calls update the timestamp but don't stack
+    duplicate notes.
+    """
+    if not parcel_id:
+        return
+    with _LOCK:
+        parcels = _load_county_parcels(county_id)
+        row = parcels.get(parcel_id)
+        if row is None:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        note = (
+            f"Parcel no longer matches ag-candidate criteria upstream "
+            f"in ZCTA {zcta5} as of {now[:10]}. Likely sold, subdivided, "
+            f"or reclassified out of agricultural use -- verify current "
+            f"status with the county Property Appraiser before pursuing."
+        )
+        review = list(row.get("needs_manual_review") or [])
+        if not any(str(n).startswith("Parcel no longer matches") for n in review):
+            review.append(note)
+            row["needs_manual_review"] = review
+        row["disappeared_from_upstream_at"] = now
+        row["last_scanned_at"] = row.get("last_scanned_at") or now
+        parcels[parcel_id] = row
+        _save_county_parcels(county_id, parcels)
+
+
 def save_parcel_results(county_id: str, rows: list[dict[str, Any]]) -> None:
     """
     Persist a batch of scan-result rows into the master property

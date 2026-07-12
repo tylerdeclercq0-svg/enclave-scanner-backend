@@ -742,24 +742,85 @@ the index/checklist, not the full spec.
   to item 11's evidence where 4 complete Nassau ZCTAs vanished ~15
   min later without even a redeploy.
 
-- [ ] **13. POPULATE REAL DATA -- FULL SCANS ACROSS ALL ACTIVE COUNTIES**
-  Once every other roadmap item is complete (including item 8's pipeline
-  reordering, item 9's expansion to 30+ confirmed-live counties,
-  item 11's ledger-completeness fix, and **item 12's durable
-  persistence fix**), run real "Scan entire county" background jobs
-  across every confirmed-live county to populate the Property Database
-  with real data. **Deliberately sequenced last**: no point generating
-  a real dataset before the pipeline computation itself (exclusion
-  order, county count, metro-proximity fields) is finalized, the
-  completeness signal is trustworthy, and the data has somewhere
-  durable to land -- would mean re-scanning every parcel later anyway,
-  or worse, running with silently-partial county coverage or watching
-  the whole database vanish on the next Render instance restart. This
-  is the point where the Property Database home screen actually becomes
-  populated with the real, usable candidate list instead of test/mock
-  data. **Blocked on items 5, 7, 8, 9, 10, 11, and 12.** **Status:
-  not started.** Full detailed instructions will be provided in a
-  separate prompt when this item is actively being worked.
+- [x] **13. POPULATE REAL DATA -- FULL SCANS ACROSS ALL 13 CONFIRMED-LIVE COUNTIES** *(done 2026-07-12)*
+  Ran real "Scan entire county" background jobs across all 13
+  confirmed-live counties via the batch orchestrator (item 13
+  infrastructure, commits 4d3be72 + a7fc89d + af2e76f + 7f7e7f1 +
+  f41fd84 + 2d705b8 + d3f1835). Total runtime ~24 hours end-to-end
+  across the primary batch + a retry batch for two counties
+  interrupted by a 512 MB OOM (see item 16). Zero data loss:
+  durable-disk persistence (item 12) held through the crash and every
+  county resumed cleanly from its last ledger checkpoint.
+
+  **Grand total: 17,188 unique parcels across 13 counties.**
+
+  | tier | count |
+  |---|---|
+  | confirmed_qualifying | 1,040 |
+  | strong_candidate | 206 |
+  | watch_list | 211 |
+  | unlikely | 14,929 |
+  | excluded | 802 |
+
+  **1,291 pathway matches total.** Highest-yield: Osceola (439),
+  Pasco (422), Nassau (200), St. Johns (91), Charlotte (53), Manatee
+  (30). Zero-yield counties (Leon, Citrus, Sarasota, Marion, Polk)
+  are a real data finding, not a scanner bug -- their ag parcels sit
+  inside contiguous ag zones with no residential-FLUM enclave
+  neighbors. Polk had the biggest exclusion count (560) from parcels
+  >1,280 ac failing the >=75% qualifying threshold via
+  s. 163.3164(4)(e).
+
+  Top-15 highest-attractiveness parcels (score=90, 100% qualifying)
+  are all Pasco: Depue Ranch, Nutt Family, Sanctuary Farms, Hilton
+  Stanley, Sid Larkin & Son, Prospect Road Land Investments, etc.
+  Pasco remains the highest-yield county both by count and by top-
+  end score, matching Tyler's earlier expectation.
+
+  **Session-level bugs discovered and fixed while running item 13**
+  (all closed under their own commits):
+  - `a7fc89d` -- batch coordinator abandoned SWFWMD counties at the
+    5:59:59.9 ET boundary because of a 1-second window-math bug
+  - `af2e76f` -- Wave 1 + Wave 2b counties missing from
+    CENSUS_COUNTY_FIPS; Hardee was 049 not 055
+  - `7f7e7f1` + `f41fd84` -- query_layer offset-math and stability
+    contract bugs (SWFWMD-specific manifestation)
+  - `2d705b8` -- null and duplicate parcel_ids in fetcher output
+    (roadmap item 14, closed inline)
+  - `d3f1835` -- 512 MB OOM from ledger design flaw (roadmap item 16
+    below, closed inline in same commit)
+
+- [ ] **16. `/api/property-db/all` unfiltered response scales with total DB size**
+  Surfaced during item 13 wrap-up on 2026-07-12. After the OOM fix
+  in d3f1835 split the property database into per-county files
+  (peak per-write memory now bounded per county), the write path is
+  safe. But the READ path for `/api/property-db/all` with no
+  filters still enumerates every per-county file and concatenates
+  the results into one JSON response. At 17,188 parcels totaling
+  ~88 MB serialized JSON, this 502'd on Render even at the current
+  data size. Filtered requests (`?county_id=X`) work fine because
+  they only touch one file.
+
+  **Frontend impact**: `web/index.html:2681` calls the unfiltered
+  endpoint on Property Database page load to populate the map view
+  (`_dbAllParcels`). Currently DOESN'T work against the real 17k-
+  parcel DB -- either times out via Render's proxy or crashes the
+  service. Was fine when the DB was small during development but
+  now hits the wall.
+
+  **Fix options** (ranked cheapest first):
+  1. Strip `geometry_wgs84` from the default response, add a
+     separate `/api/property-db/geometry/<parcel_id>` for on-demand
+     polygon fetches when a row is clicked. Most of the 88 MB is
+     geometry; removing it drops response size to a few MB.
+  2. Server-side pagination: `?limit=N&offset=M`, or cursor-based.
+  3. Streaming response via FastAPI's StreamingResponse -- emit
+     parcels as an NDJSON stream instead of one giant array.
+
+  Option 1 is likely the right one: the map view only needs
+  centroids + tier/score for rendering pins, and polygons only for
+  the clicked row's detail overlay. Not doing tonight; documented
+  and awaiting explicit prioritization.
 
 - [x] **14. Null and duplicate parcel IDs from source layers** *(fixed 2026-07-10)*
   Originally filed as "low-priority, bounded impact, not urgent" after

@@ -790,37 +790,53 @@ the index/checklist, not the full spec.
   - `d3f1835` -- 512 MB OOM from ledger design flaw (roadmap item 16
     below, closed inline in same commit)
 
-- [ ] **16. `/api/property-db/all` unfiltered response scales with total DB size**
-  Surfaced during item 13 wrap-up on 2026-07-12. After the OOM fix
-  in d3f1835 split the property database into per-county files
-  (peak per-write memory now bounded per county), the write path is
-  safe. But the READ path for `/api/property-db/all` with no
-  filters still enumerates every per-county file and concatenates
-  the results into one JSON response. At 17,188 parcels totaling
-  ~88 MB serialized JSON, this 502'd on Render even at the current
-  data size. Filtered requests (`?county_id=X`) work fine because
-  they only touch one file.
+- [x] **16. `/api/property-db/all` unfiltered response scaled with total DB size** *(fixed 2026-07-12, commits 1908dfb + cbc9192)*
+  Surfaced during item 13 wrap-up. After the OOM fix in d3f1835
+  split the write path into per-county files, the READ path still
+  concatenated every per-county file into one response. At 17,188
+  parcels the unfiltered `/api/property-db/all` reached ~88 MB and
+  reliably 502'd on Render, blocking the Property Database
+  landing page.
 
-  **Frontend impact**: `web/index.html:2681` calls the unfiltered
-  endpoint on Property Database page load to populate the map view
-  (`_dbAllParcels`). Currently DOESN'T work against the real 17k-
-  parcel DB -- either times out via Render's proxy or crashes the
-  service. Was fine when the DB was small during development but
-  now hits the wall.
+  **Field-size profiling over 100 real production rows** found the
+  real bulk was NOT geometry as first assumed:
+  - `needs_manual_review`   1548 B avg/row  (~78% of row size)
+  - `score_breakdown`        199 B avg/row
+  - `geometry_wgs84`        ~200-1000 B when present
 
-  **Fix options** (ranked cheapest first):
-  1. Strip `geometry_wgs84` from the default response, add a
-     separate `/api/property-db/geometry/<parcel_id>` for on-demand
-     polygon fetches when a row is clicked. Most of the 88 MB is
-     geometry; removing it drops response size to a few MB.
-  2. Server-side pagination: `?limit=N&offset=M`, or cursor-based.
-  3. Streaming response via FastAPI's StreamingResponse -- emit
-     parcels as an NDJSON stream instead of one giant array.
+  **First-pass fix (`1908dfb`)**: stripped only `geometry_wgs84`,
+  added `?include_geometry=true` opt-in. Response dropped 88 MB
+  -> 45 MB but was still flaky (3/5 attempts 200, 2/5 502) --
+  needs_manual_review was the true dominant field.
 
-  Option 1 is likely the right one: the map view only needs
-  centroids + tier/score for rendering pins, and polygons only for
-  the clicked row's detail overlay. Not doing tonight; documented
-  and awaiting explicit prioritization.
+  **Second-pass fix (`cbc9192`)**: also stripped
+  `needs_manual_review` + `score_breakdown` from the default. New
+  `?include_detail=true` opt-in re-adds them. New per-parcel
+  endpoint `GET /api/property-db/parcel/{county_id}/{parcel_id:path}`
+  returns one full row with every field, used by the frontend's
+  `openDetailFromMap` for on-click overlay hydration. Frontend list
+  view + filters use only small fields so were unaffected.
+
+  **Verified end-to-end at production scale** (17,188 real parcels
+  on the live deploy):
+  - `/api/property-db/all` unfiltered: 18.8 MB, 5.87-6.51s,
+    **5/5 successful attempts** (up from ~50%)
+  - `/api/property-db/parcel/pasco/<id>`: 5.4 KB, 257 ms
+  - Live Netlify UI: list view rendered 16,386 rows (17,188 minus
+    802 excluded), county filter narrowed to 1,196 Pasco rows
+    matching CLI aggregation, sort-by-score put the DEPUE RANCH
+    parcels (score=90) at the top exactly as the batch data
+    predicted. `geometry_included`/`detail_included` flags on the
+    response correctly indicate stripped state.
+
+  The detail overlay's polygon-rendering-at-high-zoom path now
+  requires a follow-up if we want it back: either lazy per-parcel
+  geometry fetch on click (map already falls back to circleMarker
+  gracefully when geometry is absent, so no visible bug -- just
+  polygons don't render at any zoom until wired), or a
+  visible-bounds bulk geometry fetch triggered when the user zooms
+  past `_DB_POLYGON_ZOOM`. Not a blocker for the list view or
+  export workflows.
 
 - [x] **14. Null and duplicate parcel IDs from source layers** *(fixed 2026-07-10)*
   Originally filed as "low-priority, bounded impact, not urgent" after

@@ -52,6 +52,22 @@ from dataclasses import asdict  # noqa: E402
 # -> "interrupted" so the frontend can offer a resume rather than
 # showing stale progress. Safe to call every restart; a no-op when
 # no interrupted jobs exist.
+# One-time property-database migration (2026-07-12 OOM fix): move any
+# `parcels` dicts still in the legacy coverage_ledger.json out to
+# per-county property_db_<county>.json files. This is intentionally
+# ordered BEFORE mark_interrupted_at_startup -- once done, every
+# subsequent mark_processed reads a small stripped ledger instead of
+# the full multi-hundred-MB dict that caused the 512 MB Render OOM.
+# Best-effort: if migration fails, log and continue -- the on-demand
+# path in _load_county_parcels handles per-county migration lazily
+# anyway.
+try:
+    _migrated = coverage_ledger.migrate_legacy_parcels_at_startup()
+    if _migrated:
+        print(f"[coverage_ledger] migrated legacy parcels to per-county files: {_migrated}", flush=True)
+except Exception as _exc:  # noqa: BLE001 -- startup shouldn't hard-fail on migration
+    print(f"[coverage_ledger] startup migration failed: {type(_exc).__name__}: {_exc}", flush=True)
+
 background_jobs.mark_interrupted_at_startup()
 batch_jobs.mark_interrupted_at_startup()
 

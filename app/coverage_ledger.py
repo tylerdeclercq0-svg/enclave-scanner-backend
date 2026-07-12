@@ -62,6 +62,19 @@ from typing import Any, Optional
 _LEDGER_DIR = os.environ.get("DATA_DIR") or os.path.join(os.path.dirname(__file__), "..", "data")
 _LEDGER_PATH = os.path.join(_LEDGER_DIR, "coverage_ledger.json")
 
+# 2026-07-12: split the property database out of the ledger. Previously
+# every mark_processed and save_parcel_results call did a full load-save
+# of coverage_ledger.json -- which held BOTH per-ZCTA progress (small)
+# AND per-county parcels dicts (grew unbounded, with heavy
+# geometry_wgs84 fields). Peak per-op memory tracked total DB size, not
+# operation size; caused a 512 MB Render OOM at ~8 counties scanned.
+# Fix: parcels for county X now live in property_db_X.json. Ledger stays
+# small; each save touches only one county's file. Legacy parcels still
+# in coverage_ledger.json get migrated on first read (one-time cost per
+# county).
+def _parcels_path(county_id: str) -> str:
+    return os.path.join(_LEDGER_DIR, f"property_db_{county_id}.json")
+
 # Simple in-process lock to make concurrent /api/coverage/... calls safe
 # even under a threaded uvicorn worker. This isn't multi-process safe
 # (uvicorn on Render is single-worker by default), but a threaded server
@@ -90,6 +103,93 @@ def _save(data: dict[str, Any]) -> None:
     with open(tmp_path, "w") as f:
         json.dump(data, f, indent=2, sort_keys=True)
     os.replace(tmp_path, _LEDGER_PATH)
+
+
+def _load_county_parcels(county_id: str) -> dict[str, Any]:
+    """
+    Read one county's parcels dict. Migrates legacy data on first read:
+    if property_db_<county>.json doesn't exist but coverage_ledger.json
+    has this county's parcels dict, move them out of the ledger into
+    the per-county file (and strip from the ledger). Both writes done
+    under _LOCK so a concurrent mark_processed can't race.
+    """
+    path = _parcels_path(county_id)
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+    # Migrate from legacy coverage_ledger.json if present.
+    legacy = _load()
+    legacy_county = legacy.get("counties", {}).get(county_id, {})
+    legacy_parcels = legacy_county.get("parcels", {})
+    if not legacy_parcels:
+        # Nothing to migrate; create empty per-county file so the check
+        # above short-circuits next time.
+        _save_county_parcels(county_id, {})
+        return {}
+    # Migrate + strip.
+    _save_county_parcels(county_id, dict(legacy_parcels))
+    if "parcels" in legacy_county:
+        del legacy_county["parcels"]
+        _save(legacy)
+    return dict(legacy_parcels)
+
+
+def _save_county_parcels(county_id: str, parcels: dict[str, Any]) -> None:
+    os.makedirs(_LEDGER_DIR, exist_ok=True)
+    path = _parcels_path(county_id)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(parcels, f, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def migrate_legacy_parcels_at_startup() -> dict[str, int]:
+    """
+    Eagerly move every `parcels` dict out of coverage_ledger.json into
+    per-county property_db_<county>.json files. Called from main.py at
+    import time, BEFORE any scan thread or request handler runs -- this
+    is the lowest-memory-pressure moment in the process lifetime.
+    Without this, every subsequent mark_processed call would keep
+    reading the full legacy ledger (parcels included) and the OOM would
+    repeat. One-time cost per deploy: peaks at the size of the loaded
+    legacy dict, then falls back to bounded ZCTA-progress-only memory.
+    Returns {county_id: migrated_parcel_count} for logging.
+    """
+    if not os.path.exists(_LEDGER_PATH):
+        return {}
+    with _LOCK:
+        # This _load is the ONLY point where the full legacy file gets
+        # loaded post-fix; every mark_processed after this reads the
+        # stripped, small ledger.
+        data = _load()
+        counties = data.get("counties", {})
+        migrated: dict[str, int] = {}
+        any_stripped = False
+        for cid, cs in counties.items():
+            legacy_parcels = cs.get("parcels")
+            if not legacy_parcels:
+                continue
+            # Skip if the per-county file already exists (a previous
+            # partial migration or an on-demand _load_county_parcels
+            # call may have created it); leave the legacy copy in place
+            # rather than overwrite, so no data is silently lost.
+            if os.path.exists(_parcels_path(cid)):
+                # But still strip the legacy copy since the per-county
+                # file is now the source of truth.
+                del cs["parcels"]
+                any_stripped = True
+                continue
+            _save_county_parcels(cid, dict(legacy_parcels))
+            del cs["parcels"]
+            migrated[cid] = len(legacy_parcels)
+            any_stripped = True
+        if any_stripped:
+            _save(data)
+        return migrated
 
 
 def get_county_state(county_id: str) -> dict[str, Any]:
@@ -159,12 +259,19 @@ def is_processed(county_id: str, zcta5: str, parcel_id: str) -> bool:
 
 
 def reset_county(county_id: str) -> None:
-    """Wipe a county's coverage (start fresh)."""
+    """Wipe a county's coverage AND its property DB (start fresh)."""
     with _LOCK:
         data = _load()
         if county_id in data["counties"]:
             del data["counties"][county_id]
             _save(data)
+        # Also wipe the per-county property DB file (post-2026-07-12 split).
+        path = _parcels_path(county_id)
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 def county_summary(county_id: str, all_zctas: list[str]) -> dict[str, Any]:
@@ -207,14 +314,17 @@ def save_parcel_results(county_id: str, rows: list[dict[str, Any]]) -> None:
     but first_scanned_at is preserved -- Tyler wants to know when a
     parcel first entered the database, not just when it was last
     touched.
+
+    Since the 2026-07-12 split, each county's parcels live in their own
+    property_db_<county>.json file. Only that one file is loaded/saved
+    per call -- memory footprint scales with one county's parcel count,
+    not the entire cross-county DB.
     """
     if not rows:
         return
     now = datetime.now(timezone.utc).isoformat()
     with _LOCK:
-        data = _load()
-        cs = data["counties"].setdefault(county_id, {"zctas": {}})
-        parcels = cs.setdefault("parcels", {})
+        parcels = _load_county_parcels(county_id)
         for row in rows:
             pid = row.get("parcel_id")
             if not pid:
@@ -224,25 +334,53 @@ def save_parcel_results(county_id: str, rows: list[dict[str, Any]]) -> None:
             row_copy["first_scanned_at"] = existing.get("first_scanned_at") or now
             row_copy["last_scanned_at"] = now
             parcels[pid] = row_copy
-        _save(data)
+        _save_county_parcels(county_id, parcels)
 
 
 def list_all_parcels(county_id: str) -> list[dict[str, Any]]:
     """Every parcel ever scanned for this county, unsorted."""
     with _LOCK:
-        data = _load()
-        cs = data["counties"].get(county_id, {})
-        return list(cs.get("parcels", {}).values())
+        return list(_load_county_parcels(county_id).values())
 
 
 def list_all_parcels_all_counties() -> list[dict[str, Any]]:
     """
-    Every parcel ever scanned across every county, unsorted.
+    Every parcel ever scanned across every county, unsorted. Iterates
+    per-county files (post-split) plus anything still in the legacy
+    ledger's parcels dicts (for counties not yet migrated). Legacy
+    entries are only surfaced when a per-county file doesn't exist
+    yet; once _load_county_parcels has migrated a county, its legacy
+    parcels are gone from the ledger and only the per-county file
+    counts.
     """
     with _LOCK:
-        data = _load()
         rows: list[dict[str, Any]] = []
-        for cs in data["counties"].values():
+        # Enumerate per-county files on disk, PLUS any counties present
+        # in the legacy ledger that haven't been migrated yet. Together
+        # this is a full sweep.
+        try:
+            per_county_files = [
+                fn for fn in os.listdir(_LEDGER_DIR)
+                if fn.startswith("property_db_") and fn.endswith(".json")
+            ]
+        except FileNotFoundError:
+            per_county_files = []
+        seen: set[str] = set()
+        for fn in per_county_files:
+            cid = fn[len("property_db_"):-len(".json")]
+            seen.add(cid)
+            try:
+                with open(os.path.join(_LEDGER_DIR, fn), "r") as f:
+                    d = json.load(f)
+                if isinstance(d, dict):
+                    rows.extend(d.values())
+            except (OSError, json.JSONDecodeError):
+                continue
+        # Legacy fallback for anything not yet migrated.
+        legacy = _load()
+        for cid, cs in legacy.get("counties", {}).items():
+            if cid in seen:
+                continue
             rows.extend(cs.get("parcels", {}).values())
         return rows
 

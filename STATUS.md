@@ -2172,3 +2172,50 @@ What's fully verified end-to-end at production scale:
 - Weekly-cron endpoint path (POST /api/batch/start with
   revalidate_before_scan=True) -- proven via the actual
   scripts/weekly_batch_scan.py entrypoint
+
+## Paste-into-fresh-conversation summary (2026-07-12)
+
+Copy the block below into the first message of a new session so context
+picks up cleanly.
+
+---
+
+Falcone Group ag enclave scanner (FL SB 686 / Ch. 2026-34) -- backend
+at enclave-scanner-backend.onrender.com (Render Starter + 5 GB
+persistent disk at /var/data via DATA_DIR), frontend at
+enclave-scanner-backend.netlify.app, repo owned by
+tylerdeclercq0-svg. Current real state (2026-07-12): 13 confirmed-
+live counties -- Pasco/Nassau/St. Johns/Osceola (pilots) + Lee/Leon/
+Citrus (Wave 1) + Sarasota/Manatee/Hardee/Charlotte/Marion/Polk
+(Wave 2b, six of them behind SWFWMD's 6 AM-10 PM ET shared
+parcel_search MapServer). Property Database populated with 17,188
+unique parcels (1,040 confirmed_qualifying / 206 strong_candidate /
+211 watch_list / 14,929 unlikely / 802 excluded; 1,291 pathway
+matches total; Osceola/Pasco/Nassau are highest-yield). Auto-
+refreshes weekly via a Render cron service defined in render.yaml
+running scripts/weekly_batch_scan.py every Sunday 12:00 UTC
+(= 08:00 EDT / 07:00 EST); it POSTs /api/batch/start with
+revalidate_before_scan=True so each county's complete ZCTAs get
+re-checked against upstream -- new candidates get re-scanned
+automatically, parcels that disappeared upstream get a manual-review
+note ("Parcel no longer matches ag-candidate criteria upstream in
+ZCTA X as of YYYY-MM-DD. Likely sold, subdivided, or reclassified")
+on their row (real diligence signal). Fully verified end-to-end at
+production scale: coverage-ledger self-heal (item 11), durable
+persistence through OOM (item 12), fetcher dedup + null-ID skip
+(item 14), lightweight /api/property-db/all read path with per-
+parcel detail endpoint (item 16, 18.8 MB stable response), 5-for-5
+successful list-view load and filter tests, multi-select filter
+with AND-across / OR-within semantics against real 17k data. Open
+items if you're continuing: (a) item 9 partial -- 7 SWFWMD-schema
+counties still parcel-ready but FLUM-blocked (DeSoto/Hernando/
+Highlands/Lake/Levy/Sumter/Duval); automatable discovery is
+exhausted so this needs per-county interactive investigation or
+shapefile ingestion for Duval; (b) item 15 -- batch coordinator
+should auto-retry `interrupted` counties once before erroring
+(small scope, only bites during process crashes mid-scan);
+(c) Hillsborough/Brevard/Volusia are confirmed_live=False awaiting
+a proper ground-truth pass. Always read STATUS.md through the
+"Final state (2026-07-12)" section and ROADMAP.md before starting
+work. Auto mode expected. Never push destructive git commands or
+skip pre-commit hooks unless explicitly asked.

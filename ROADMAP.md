@@ -813,6 +813,35 @@ the index/checklist, not the full spec.
   processed exactly), so the ledger will complete cleanly on the next
   advance rather than tripping the item 11 self-heal.
 
+- [ ] **15. Batch coordinator: auto-retry interrupted counties once before erroring**
+  Surfaced during the 2026-07-12 512MB OOM incident (roadmap item 16 /
+  d3f1835). When the Render service crashed mid-batch, both st_johns
+  and osceola had per-county jobs in `status=running`.
+  `background_jobs.mark_interrupted_at_startup` correctly flipped them
+  to `status=interrupted` on restart. `batch_jobs._poll_until_terminal`
+  treats `interrupted` as terminal, so the batch coordinator moved
+  them into `errored_county_ids` -- accountability-correct (no silent
+  drops) but wasteful, since `interrupted` genuinely means "was running,
+  needs to be resumed" not "actually failed." Both counties then
+  required a manual re-kick after the batch finished the still-pending
+  counties (lee, leon, citrus).
+
+  **Proposed behavior**: when `_poll_until_terminal` sees
+  `interrupted`, coordinator retries the county ONCE via
+  `background_jobs.start_full_county_job` -- which auto-resumes from
+  the last ledger checkpoint since the ZCTA state is durable. If the
+  retry also ends in `interrupted` (e.g. another process crash mid-
+  retry), THEN surface as an error and move on. Rationale: the durable-
+  disk design (item 12) already guarantees resume-safety; the batch
+  coordinator should trust it once per county before giving up.
+
+  **Not urgent**: st_johns and osceola were manually re-kicked and
+  finished; no data loss. But this class of mid-batch crash is
+  plausible again (OOM, Render platform blip, deploy during scan), and
+  currently every crash costs one county per running-slot in the batch.
+  Small change scoped to `batch_jobs._run_batch_loop`; not doing
+  under time pressure to avoid mixing scope with the OOM fix.
+
 ## How to use this file
 
 - Mark items complete by changing `- [ ]` to `- [x]` and committing.

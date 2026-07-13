@@ -489,9 +489,12 @@ def run_county_scan(
                         needs_review.append(
                             f"Self-surrounding risk detected: the parcel owner "
                             f"appears on {adjacent_parcels.SELF_SURROUNDING_MIN_MATCHES}+ "
-                            f"adjacent parcels. Option 1 (existing development) "
-                            f"perimeter capped at 0 -- you cannot self-qualify. "
-                            f"Verify aerials and consider whether Options 3-5 apply."
+                            f"adjacent parcels totaling more than "
+                            f"{adjacent_parcels.SELF_SURROUNDING_MIN_TOTAL_ACRES:.0f} "
+                            f"acres (institutional-landholder pattern). Option 1 "
+                            f"(existing development) perimeter capped at 0 -- "
+                            f"you cannot self-qualify. Verify aerials and "
+                            f"consider whether Options 3-5 apply."
                         )
                     # 2026-07-13 fix (3 of 6): surrounding_density derived
                     # from the adjacent-parcel population (built fraction +

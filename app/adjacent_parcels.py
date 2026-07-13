@@ -84,11 +84,24 @@ BUILT_DOR_CLASSES = frozenset(range(1, 28)) | frozenset(range(71, 90))
 # floating-point noise) without silently truncating some.
 ADJACENT_PARCEL_BUFFER_FEET = 50.0
 
-# Self-surrounding threshold from the fix spec: an owner appearing on
-# >=3 adjacent parcels flags institutional-landholder risk. Kept as
-# a module-level constant so the backfill script and the live scan
-# path use the same value.
+# Self-surrounding thresholds. An owner appearing on >=MIN_MATCHES
+# adjacent parcels AND owning at least MIN_TOTAL_ACRES of those same-
+# owner adjacents together flags institutional-landholder risk. Kept
+# as module-level constants so the backfill and live scan use the
+# same values.
+#
+# The acreage AND-gate was added 2026-07-13 after the initial three-
+# parcel verification correctly flagged Farmland Reserve Inc (8/8
+# adjacents, all owned by Farmland Reserve, huge Osceola timberland
+# tracts easily >1,000 ac combined) but OVER-flagged Mathis Edward
+# Neil (3/21 adjacents share the name -- a legitimate individual
+# landowner with a few contiguous small holdings, not an institutional
+# landholder). Requiring MIN_TOTAL_ACRES separates the two: individual
+# owners rarely control 500+ ac of contiguous adjacent parcels;
+# institutional ranchers/timber/religious/development entities routinely
+# do.
 SELF_SURROUNDING_MIN_MATCHES = 3
+SELF_SURROUNDING_MIN_TOTAL_ACRES = 500.0
 
 
 @dataclass
@@ -405,22 +418,38 @@ def detect_self_surrounding(
     subject_owner: Optional[str],
     adjacent_parcels: list[AdjacentParcel],
     min_matches: int = SELF_SURROUNDING_MIN_MATCHES,
+    min_total_acres: float = SELF_SURROUNDING_MIN_TOTAL_ACRES,
 ) -> bool:
     """
     True if the candidate's own owner name appears on `min_matches`
-    or more adjacent parcels. Guards against institutional landholders
-    (Farmland Reserve Inc / Deseret Ranch, Walt Disney Parks and
-    Resorts / R.C.I.D., Rayonier timberland tracts, etc.) whose
-    adjacent parcels are their own other holdings -- you cannot
-    self-qualify for Option 1's built-encirclement test. The scan
-    orchestrator caps option1_pct at 0 whenever this returns True.
+    or more adjacent parcels AND those same-owner adjacents together
+    exceed `min_total_acres`. Both gates must fire.
+
+    Purpose: guard against institutional landholders (Farmland Reserve
+    Inc / Deseret Ranch, Walt Disney Parks and Resorts / R.C.I.D.,
+    Rayonier timberland tracts, etc.) whose adjacent parcels are their
+    own other holdings -- you cannot self-qualify for Option 1's
+    built-encirclement test. The scan orchestrator caps option1_pct
+    at 0 whenever this returns True.
+
+    Why the acreage AND-gate: the count-only rule over-flagged
+    legitimate individual landowners with a few small adjacent
+    holdings (Mathis Edward Neil in Pasco: 3/21 adjacent parcels
+    shared the name, but they were small parcels totaling far under
+    500 ac -- not the institutional pattern this flag exists to
+    catch). Institutional landholders effectively always control 500+
+    ac of contiguous same-owner land; ordinary individual landowners
+    almost never do.
 
     Case-insensitive, whitespace-trimmed exact match on owner_name.
-    An owner-string similarity check (fuzzy match on "SMITH FAMILY LLC"
-    vs "SMITH FAMILY REVOCABLE TRUST") would catch related-entity
-    ownership too, but is deliberately out of scope here -- explicit
-    exact match is easier to explain in a diligence report and doesn't
-    silently flag unrelated same-family owners.
+    Adjacent parcels with acres=None (rare: degenerate geometry that
+    also has no county acreage_field) contribute 0 to the acres
+    total -- documented, not a bug. An owner-string similarity check
+    (fuzzy match on "SMITH FAMILY LLC" vs "SMITH FAMILY REVOCABLE
+    TRUST") would catch related-entity ownership too, but is
+    deliberately out of scope here -- explicit exact match is easier
+    to explain in a diligence report and doesn't silently flag
+    unrelated same-family owners.
     """
     if not subject_owner:
         return False
@@ -429,11 +458,12 @@ def detect_self_surrounding(
         return False
 
     match_count = 0
+    total_acres = 0.0
     for p in adjacent_parcels:
         if not p.owner_name:
             continue
         if p.owner_name.upper().strip() == owner_upper:
             match_count += 1
-            if match_count >= min_matches:
-                return True
-    return False
+            if p.acres is not None:
+                total_acres += p.acres
+    return match_count >= min_matches and total_acres >= min_total_acres

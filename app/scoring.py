@@ -526,7 +526,8 @@ def assign_master_tier(
         if self_surrounding_risk:
             driving_notes.append(
                 "Self-surrounding risk: candidate's owner appears on 3+ "
-                "adjacent parcels; you cannot self-qualify for Option 1"
+                "adjacent parcels totaling more than 500 acres (institutional-"
+                "landholder pattern); you cannot self-qualify for Option 1"
             )
         return "flum_only_verify", driving_notes
 

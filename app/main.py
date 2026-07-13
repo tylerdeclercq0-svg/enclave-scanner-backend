@@ -1158,3 +1158,50 @@ def batch_cancel():
     """Signal the batch coordinator to stop after the current county."""
     state = batch_jobs.cancel_batch()
     return {"batch": asdict(state) if state else None}
+
+
+@app.post("/api/property-db/rescore/{county_id}/{parcel_id:path}")
+def property_db_rescore_one(
+    county_id: str,
+    parcel_id: str,
+    x_debug_key: Optional[str] = Header(None, description="Shared secret matching DEBUG_API_KEY env var"),
+    debug_key: Optional[str] = None,
+):
+    """
+    Re-classify one parcel's built-status signal (2026-07-13 fix backfill).
+    Fetches adjacent parcels from the county's parcel layer, recomputes
+    option1_pct + self_surrounding_risk + surrounding_density, re-runs
+    assign_master_tier, and writes the updated row back to the property
+    DB. Returns the before/after tier + a plain-English tier_downgrade_
+    reason (populated only when the tier changed).
+
+    Gated by DEBUG_API_KEY like the debug endpoints -- rescoring modifies
+    production data so callers must authenticate. Fails closed with 503
+    if the env var isn't configured.
+
+    Called from scripts/rescore_master_db.py in a loop over the 1,457
+    tier-eligible parcels; kept as a per-parcel synchronous endpoint
+    rather than a background job because the batch/background-job infra
+    already exists elsewhere in this project and adding another one for
+    a one-shot backfill is more infra than the workload needs.
+    """
+    _require_debug_key(x_debug_key, debug_key)
+    if county_id not in COUNTIES:
+        raise HTTPException(status_code=404, detail=f"Unknown county: {county_id}")
+
+    import rescore_backfill
+    try:
+        result = rescore_backfill.rescore_one_parcel(county_id, parcel_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001 -- surface any error to the caller
+        import traceback
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "exception_type": type(exc).__name__,
+                "exception_str": str(exc),
+                "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            },
+        )
+    return result

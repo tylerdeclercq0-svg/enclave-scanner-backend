@@ -995,15 +995,67 @@ the index/checklist, not the full spec.
   yesterday). Cron script invocation returned 200 with the batch
   queued for all 13 canon counties and revalidate_before_scan=true.
 
+  **Live end-to-end proof at production scale (2026-07-12 -> 2026-07-13,
+  commit 8b77d3f):** the first real reverify batch across all 13
+  confirmed-live counties completed cleanly -- 13/13 in
+  `completed_county_ids`, zero errored. A bug in
+  `coverage_ledger.set_zcta_total` (used `==` for the complete-flag
+  recompute where `mark_processed` uses `>=`) was diagnosed and fixed
+  mid-batch when it hung st_johns's revalidate-shrink path for 3h 40m;
+  full write-up in STATUS.md's "Session 2026-07-13" section. Real
+  data-quality observability gap surfaced at the same time -- filed
+  as item 20 below, does NOT block this item's closure.
+
   Companion cleanup: `hillsborough`, `brevard`, `volusia` flipped to
   `confirmed_live=False` (commit `b583632`) since their pre-Wave-1
   heuristic flag was never ground-truthed end-to-end. Registry
   confirmed_live set now exactly matches STATUS.md's 13-county
   canon.
 
+- [ ] **20. Flag-persistence gap in item 19's disappeared-parcel path** *(new 2026-07-13)*
+  Surfaced during item 19's first live production reverify batch.
+  Two related issues, both fail-open (missing flag, not corrupted
+  data), so not urgent -- but the item 19 diligence signal can be
+  silently lost today.
+
+  **Issue A: `flag_parcel_no_longer_matching` silently no-ops when
+  the parcel isn't in the property DB.**
+  `coverage_ledger.py` line 334: `if row is None: return`. Item 19's
+  shrink branch (`background_jobs.revalidate_complete_zctas` line
+  266) depends on this function to record the "sold / subdivided /
+  reclassified" note on disappeared parcels. If the pid was in
+  `processed_parcel_ids` but never landed in the property DB, the
+  flag call disappears without a trace. Should log a warning
+  instead of returning quietly, at minimum, so the observability
+  gap is visible.
+
+  **Issue B: real ledger-vs-DB save-side drift.**
+  Post-fix state on st_johns shows 8 processed_parcel_ids across 5
+  ZCTAs (32081 +1, 32084 +1, 32092 +3, 32110 +1, 32131 +2) that
+  exist in the coverage ledger's `processed_parcel_ids` but not in
+  `property_db_st_johns.json`. Not all are disappeared parcels --
+  most look like save-side losses from the ORIGINAL scan (parcels
+  marked-processed but whose row never persisted). This means
+  Issue A actually bites in practice: st_johns's first buggy
+  reverify tried to flag 7 disappeared parcels (1 in 32081 + 6 in
+  32092), and only 1 persisted (an unrelated 32086 parcel from the
+  post-fix rerun) -- the 6 disappeared-flags for 32092 all went to
+  the silent-no-op path.
+
+  **Where to look for Issue B's root cause:** `_run_job_loop` lines
+  420-424 pair `mark_processed` and `save_parcel_results` with the
+  same `rows`, but `mark_processed` extracts `r.parcel_id` from
+  ScanResultRow objects while `save_parcel_results` receives dicts
+  via `scan_orchestrator.rows_to_dicts(rows)`. If `rows_to_dicts`
+  drops any row (e.g. missing a required field), or if the pipeline
+  ever marks-processed without also saving (an early-return path
+  after `mark_processed`), that's the leak. Audit worth doing
+  before item 19's next scheduled cron run since every reverify
+  amplifies the same silent drop.
+
 ## Open items -- what's left after this session
 
-Everything except three items is closed. Still open:
+Everything except four items is closed. Still open:
 
 - **Item 9 (Scale-Up Phase 3 to 30+ counties)** -- partial, 13
   wired. The 7 SWFWMD-schema counties still parcel-ready + FLUM-
@@ -1015,11 +1067,24 @@ Everything except three items is closed. Still open:
   scope, not urgent. Batch coordinator currently treats
   `interrupted` as terminal-error rather than "resume once, then
   error". Only bites during process crashes mid-scan.
+- **Item 20 (flag-persistence gap in item 19's disappeared-parcel
+  path)** -- new this session. Item 19's shrink-branch diligence
+  note fails-open when a processed_parcel_id isn't in the property
+  DB (8-pid drift on st_johns alone), silently losing "sold /
+  subdivided / reclassified" flags. Two subitems: A) log warnings
+  on silent no-op, B) audit `mark_processed` /
+  `save_parcel_results` pairing for the save-side leak.
 - **Ground-truth `hillsborough`, `brevard`, `volusia`** (or others
   from Phase 1 that had FeatureLayer-only confirmation) -- their
   confirmed_live=False today reflects the fact that they were never
   scanned end-to-end. A proper item-9-style pass could flip them
   back to True.
+- **One-time Render Blueprint apply** (not a code item, but
+  required for weekly cron to start firing on its own):
+  Render dashboard -> New -> Blueprint -> point at this repo. The
+  cron path itself (POST /api/batch/start with
+  revalidate_before_scan=True) is proven live; only the blueprint-
+  provisioning step is pending.
 
 ## How to use this file
 

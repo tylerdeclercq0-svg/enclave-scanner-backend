@@ -2173,7 +2173,150 @@ What's fully verified end-to-end at production scale:
   revalidate_before_scan=True) -- proven via the actual
   scripts/weekly_batch_scan.py entrypoint
 
-## Paste-into-fresh-conversation summary (2026-07-12)
+## Session 2026-07-13: first live reverify batch closed cleanly, completion-check bug fixed
+
+Picked up mid-batch from 2026-07-12's session. The first-ever live
+reverify batch (item 19) was started at 2026-07-12 20:18 UTC and had
+completed 7 counties (pasco, sarasota, manatee, hardee, polk, marion,
+charlotte) before hanging on st_johns. Diagnosis + fix + verification
+below.
+
+### Symptom
+
+`GET /api/batch/status` at 2026-07-13 00:31 UTC showed
+`current_county_id=st_johns`, `status=running`, but the batch's
+`last_updated_at` had not moved since 2026-07-12 20:51 UTC -- ~3h 40m
+of no progress. Health endpoint returned 200 (`code_version=7269606`,
+data_dir=/var/data), so the service itself was alive; something
+inside the st_johns job was stuck.
+
+Per-county job status for st_johns (`GET /api/coverage/st_johns/job-status`)
+had `status=running`, `last_updated_at` freshly ticking (00:32:15
+UTC, seconds ago), and BOTH `processed_this_run=0` and
+`batches_this_run=0` despite running for ~3h 40m. That combination
+-- fresh state saves + zero forward progress -- means the runner is
+looping without ever reaching the `run_county_scan` call at line 406
+of background_jobs.py.
+
+The batch coordinator's `last_updated_at` only ticks between per-
+county transitions (`_save_state` is called when picking / completing
+/ erroring a county, not during a scan), so the stale batch timestamp
+was a red herring -- the per-county job's state is the authoritative
+signal during a scan.
+
+### Root cause
+
+`coverage_ledger.set_zcta_total` line 226 used `==` for the complete-
+flag recompute where `mark_processed` line 253 uses `>=`:
+
+```python
+# set_zcta_total (buggy):
+z["complete"] = (total_candidates == len(z["processed_parcel_ids"]))
+# mark_processed (correct):
+z["complete"] = (len(z["processed_parcel_ids"]) >= z["total_candidates"])
+```
+
+Item 19's `revalidate_complete_zctas` shrink branch
+(background_jobs.py:270) calls `set_zcta_total(new_total)` when
+upstream count dropped below stored total. If processed_count already
+exceeded new_total (very common for a shrink: parcels that were
+already scanned dropped off upstream), `total == processed` is false,
+`complete` stays False forever.
+
+Then `_run_job_loop`'s line-401 early-out for "processed already
+covers total" ALSO calls `set_zcta_total(zcta_total)` to "force complete
+flag" -- and hits the same bug, since the total is unchanged and the
+`==` is still false. `next_incomplete_zcta` on the next iteration
+returns the same ZCTA, and the loop spins on it indefinitely.
+
+Live evidence on st_johns's stuck state:
+- ZCTA 32081: `processed_count=18`, `total_candidates=17` (revalidate
+  shrunk it from 18 to 17), `complete=False`
+- ZCTA 32092: `processed_count=150`, `total_candidates=144` (revalidate
+  shrunk from 150 to 144), `complete=False`
+- The other 20 ZCTAs: `complete=True`, unchanged
+
+### Fix
+
+One-liner in `app/coverage_ledger.py` (commit 8b77d3f) -- `==` to
+`>=`, matching `mark_processed`'s own semantics. Comment added
+inline pointing at the concrete failure mode for future engineers.
+
+### Verification
+
+Redeploy landed at ~00:36:14 UTC. On restart:
+1. `background_jobs.mark_interrupted_at_startup` flipped the running
+   st_johns job to `interrupted`.
+2. `batch_jobs.mark_interrupted_at_startup` saw the batch still had
+   `status=running` with `pending=[st_johns, nassau, osceola, lee,
+   citrus, leon]`, reset volatile fields, respawned the coordinator.
+3. Coordinator picked st_johns (first direct-source pending), called
+   `start_full_county_job` (which spawned a fresh job because
+   `existing.status=="interrupted"` is not the "already running"
+   guard on line 503).
+4. `_run_job_loop` ran `revalidate_complete_zctas` again -- skipped
+   32081/32092 because they were now `complete=False` (from the buggy
+   first run), touched the other 20 ZCTAs.
+5. Main loop picked 32081 as `next_incomplete_zcta`. Line 401 hit:
+   `len(already_processed)=18 >= zcta_total=17` → True. Called
+   `set_zcta_total(county_id, 32081, 17)`. With the fix,
+   `complete = (18 >= 17) = True`. Continued.
+6. Same for 32092: `150 >= 144` → True → `complete=True` → continued.
+7. `next_incomplete_zcta` returned None → job status=complete.
+
+Total st_johns wall-clock: 14 seconds (00:36:14 → 00:36:28). Batch
+then chewed through nassau, osceola, lee, citrus, leon in ~2 minutes
+total. Final batch state at 00:38:54 UTC: `status=complete`,
+`completed_county_ids=[sarasota, manatee, hardee, polk, marion,
+charlotte, pasco, st_johns, nassau, osceola, lee, citrus, leon]`
+(13/13), `errored_county_ids=[]` (zero errored). This is the first
+end-to-end proof of item 19's weekly auto-refresh path against real
+production data across all 13 counties.
+
+### Observability gap discovered while investigating (not fixed this session)
+
+`flag_parcel_no_longer_matching` silently no-ops when the parcel_id
+isn't in the property DB (line 334: `if row is None: return`). Item
+19's shrink branch depends on this function to record the "sold /
+subdivided / reclassified" diligence note on disappeared parcels --
+if the pid was in `processed_parcel_ids` but never made it to the
+property DB, the flag call silently does nothing and the diligence
+signal is lost.
+
+Live evidence on st_johns's post-fix state -- comparing the
+coverage-ledger's `processed_count` per ZCTA against the actual DB
+row count in `property_db_st_johns.json`:
+
+| ZCTA | ledger.processed | ledger.total | DB rows | drift |
+|---|---|---|---|---|
+| 32081 |  18 |  17 |  17 | +1 |
+| 32084 |  18 |  18 |  17 | +1 |
+| 32092 | 150 | 144 | 147 | +3 |
+| 32110 |   1 |   1 |   0 | +1 |
+| 32131 |   7 |   7 |   5 | +2 |
+
+Combined 8 processed_parcel_ids across st_johns exist in the ledger
+but not in the DB. Not all of these are disappeared parcels -- most
+appear to be save-side losses during the ORIGINAL scan (parcels that
+were classified/marked-processed but whose row never persisted to
+`property_db_st_johns.json`). The first buggy reverify tried to flag
+7 disappeared parcels total in 32081 (1) + 32092 (6); only 1 landed
+in the DB (parcel 140400 0010, in ZCTA 32086, flagged during the
+POST-fix rerun -- unrelated to the 7 that got swallowed). The other
+6 disappeared-flags never persisted because their pids weren't in
+the DB when `flag_parcel_no_longer_matching` looked for them.
+
+Fail-open (missing flag, not corrupted data) so not urgent, but real
+data-quality follow-up. Two loose ends worth chasing when picked
+back up: (1) `flag_parcel_no_longer_matching` should log a warning
+on the silent-no-op path rather than return quietly; (2) audit the
+`mark_processed`-vs-`save_parcel_results` pairing at
+`_run_job_loop` lines 420-424 to find where a processed pid can
+silently skip the save (possibly `scan_orchestrator.rows_to_dicts`
+dropping some rows, or filtered pipeline branches marking-without-
+saving). Filed as roadmap item 20.
+
+## Paste-into-fresh-conversation summary (2026-07-13)
 
 Copy the block below into the first message of a new session so context
 picks up cleanly.
@@ -2184,38 +2327,44 @@ Falcone Group ag enclave scanner (FL SB 686 / Ch. 2026-34) -- backend
 at enclave-scanner-backend.onrender.com (Render Starter + 5 GB
 persistent disk at /var/data via DATA_DIR), frontend at
 enclave-scanner-backend.netlify.app, repo owned by
-tylerdeclercq0-svg. Current real state (2026-07-12): 13 confirmed-
-live counties -- Pasco/Nassau/St. Johns/Osceola (pilots) + Lee/Leon/
-Citrus (Wave 1) + Sarasota/Manatee/Hardee/Charlotte/Marion/Polk
-(Wave 2b, six of them behind SWFWMD's 6 AM-10 PM ET shared
-parcel_search MapServer). Property Database populated with 17,188
-unique parcels (1,040 confirmed_qualifying / 206 strong_candidate /
-211 watch_list / 14,929 unlikely / 802 excluded; 1,291 pathway
-matches total; Osceola/Pasco/Nassau are highest-yield). Auto-
-refreshes weekly via a Render cron service defined in render.yaml
-running scripts/weekly_batch_scan.py every Sunday 12:00 UTC
-(= 08:00 EDT / 07:00 EST); it POSTs /api/batch/start with
-revalidate_before_scan=True so each county's complete ZCTAs get
-re-checked against upstream -- new candidates get re-scanned
-automatically, parcels that disappeared upstream get a manual-review
-note ("Parcel no longer matches ag-candidate criteria upstream in
-ZCTA X as of YYYY-MM-DD. Likely sold, subdivided, or reclassified")
-on their row (real diligence signal). Fully verified end-to-end at
-production scale: coverage-ledger self-heal (item 11), durable
-persistence through OOM (item 12), fetcher dedup + null-ID skip
-(item 14), lightweight /api/property-db/all read path with per-
-parcel detail endpoint (item 16, 18.8 MB stable response), 5-for-5
-successful list-view load and filter tests, multi-select filter
-with AND-across / OR-within semantics against real 17k data. Open
-items if you're continuing: (a) item 9 partial -- 7 SWFWMD-schema
-counties still parcel-ready but FLUM-blocked (DeSoto/Hernando/
-Highlands/Lake/Levy/Sumter/Duval); automatable discovery is
-exhausted so this needs per-county interactive investigation or
-shapefile ingestion for Duval; (b) item 15 -- batch coordinator
-should auto-retry `interrupted` counties once before erroring
-(small scope, only bites during process crashes mid-scan);
-(c) Hillsborough/Brevard/Volusia are confirmed_live=False awaiting
-a proper ground-truth pass. Always read STATUS.md through the
-"Final state (2026-07-12)" section and ROADMAP.md before starting
-work. Auto mode expected. Never push destructive git commands or
-skip pre-commit hooks unless explicitly asked.
+tylerdeclercq0-svg. Current real state (2026-07-13, commit 8b77d3f
+live): 13 confirmed-live counties -- Pasco/Nassau/St. Johns/Osceola
+(pilots) + Lee/Leon/Citrus (Wave 1) + Sarasota/Manatee/Hardee/
+Charlotte/Marion/Polk (Wave 2b, six of them behind SWFWMD's
+6 AM-10 PM ET shared parcel_search MapServer). Property Database
+populated with 17,188 unique parcels (1,040 confirmed_qualifying /
+206 strong_candidate / 211 watch_list / 14,929 unlikely / 802
+excluded; 1,291 pathway matches; Osceola/Pasco/Nassau highest-yield).
+Weekly auto-refresh (item 19) proven end-to-end at production scale
+on 2026-07-12/13: real reverify batch across all 13 counties
+completed cleanly (0 errored), fixing a subtle
+coverage_ledger.set_zcta_total bug (used `==` where mark_processed
+uses `>=`, spun st_johns's loop 3h 40m before the fix) as it
+surfaced. Fully verified end-to-end at production scale in prior
+sessions: coverage-ledger self-heal (item 11), durable persistence
+through OOM (item 12), fetcher dedup + null-ID skip (item 14),
+lightweight /api/property-db/all read path with per-parcel detail
+endpoint (item 16, 18.8 MB stable response), 5-for-5 successful
+list-view load and filter tests, multi-select filter with AND-across
+/ OR-within semantics against real 17k data. Open items if you're
+continuing: (a) item 9 partial -- 7 SWFWMD-schema counties still
+parcel-ready but FLUM-blocked (DeSoto/Hernando/Highlands/Lake/Levy/
+Sumter/Duval); automatable discovery is exhausted so this needs
+per-county interactive investigation or shapefile ingestion for
+Duval; (b) item 15 -- batch coordinator should auto-retry
+`interrupted` counties once before erroring (small scope, only bites
+during process crashes mid-scan); (c) item 20 (new this session) --
+flag_parcel_no_longer_matching silently no-ops on parcels not in
+the property DB, and there's real ledger-vs-DB save-side drift
+(8 processed pids across 5 st_johns ZCTAs never made it to the
+DB), so item 19's disappeared-parcel diligence flags fail-open;
+(d) Hillsborough/Brevard/Volusia still confirmed_live=False
+awaiting a proper ground-truth pass. One-time human action still
+pending: Render dashboard -> New -> Blueprint -> point at this repo
+to provision the cron service that render.yaml declares (Render
+can't auto-provision from the blueprint without an initial apply);
+the cron endpoint path itself is proven live via the actual
+scripts/weekly_batch_scan.py entrypoint. Always read STATUS.md
+through the "Session 2026-07-13" section and ROADMAP.md before
+starting work. Auto mode expected. Never push destructive git
+commands or skip pre-commit hooks unless explicitly asked.

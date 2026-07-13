@@ -192,25 +192,35 @@ def classify_confidence(
     return "unlikely"
 
 
-# -------- Master tier ranking (2026-07-06 pass) --------------------
+# -------- Master tier ranking (2026-07-06 pass, refined 2026-07-13) --
 #
 # Turns the per-scan pathway results into a single primary signal per
-# parcel -- one of five tiers -- so the ranked property database can be
+# parcel -- one of six tiers -- so the ranked property database can be
 # sorted by tier first, per-pathway detail second. Deliberately NOT a
 # fabricated composite score: each tier's assignment is grounded in
 # real pathway percentages against their real statutory thresholds.
 #
 # Tiers (ordered top-to-bottom in the sort):
 #   1. confirmed_qualifying -- >=1 pathway matched AND no unresolved fails
-#   2. strong_candidate     -- >=1 pathway matched BUT has fail(s) that
+#   2. flum_only_verify     -- FLUM-designation proxy shows >=75%
+#                              qualifying perimeter but the REAL built-
+#                              status Option 1 test (option1_pct against
+#                              actual county parcel use codes, added
+#                              2026-07-13) fell short of 75%. These are
+#                              the FLUM-only false positives -- they look
+#                              qualified on the county's future-land-use
+#                              map but the neighboring parcels aren't
+#                              actually developed. Need human aerial
+#                              review before outreach.
+#   3. strong_candidate     -- >=1 pathway matched BUT has fail(s) that
 #                              could flip verification (co-owner recorded,
 #                              post-2025 sale, etc.)
-#   3. watch_list           -- no pathway currently matches, but one or
+#   4. watch_list           -- no pathway currently matches, but one or
 #                              more pathways show 30-59% real potential
 #                              (a plausible future match if surrounding
 #                              development continues or a fail resolves)
-#   4. unlikely             -- every pathway below the watch-list floor
-#   5. excluded             -- hard statutory exclusion hit (Wekiva,
+#   5. unlikely             -- every pathway below the watch-list floor
+#   6. excluded             -- hard statutory exclusion hit (Wekiva,
 #                              Everglades, ACSC, acreage > 4,480, county
 #                              population > 1.75M). Sits alone at the
 #                              bottom of the ranked list, never mixed
@@ -421,6 +431,16 @@ def assign_master_tier(
     single_owner_signal: Optional[bool],
     sold_since_2025: Optional[bool],
     county_has_usb_layer: bool = True,
+    # 2026-07-13 built-encirclement fix. option1_pct is the REAL
+    # Option 1 signal against the county's OWN parcel layer's DOR
+    # use codes (see adjacent_parcels.py) -- distinct from pct_perimeter_
+    # qualifying which is the FLUM-designation proxy. Both are needed
+    # here: option1_pct is what determine_pathways uses for the
+    # (c)1.a match, and pct_perimeter_qualifying flags the FLUM-only
+    # false-positive case (FLUM >=75% + built <75% -> flum_only_verify
+    # tier below). None when the adjacent-parcel fetch could not run.
+    option1_pct: Optional[float] = None,
+    self_surrounding_risk: bool = False,
 ) -> tuple[str, list[str]]:
     """
     Returns (tier, driving_pathway_labels). Called from scan_orchestrator
@@ -466,6 +486,49 @@ def assign_master_tier(
             driving = driving + [f"Unresolved: {n}" for n in fail_notes]
             return "strong_candidate", driving
         return "confirmed_qualifying", driving
+
+    # 3.5 (2026-07-13). FLUM-only-verify: the FLUM-designation proxy
+    # says >=75% qualifying perimeter (which would have fired the OLD
+    # Option 1 check pre-fix), but the REAL built-status test came
+    # back below the 75% threshold. Route these to their own tier so
+    # they get human aerial review before outreach rather than either
+    # (a) silently sitting in "confirmed_qualifying" (the false-
+    # positive path this whole fix exists to close) or (b) silently
+    # dropping to "unlikely" (which would lose the FLUM signal
+    # entirely -- the underlying county HAS designated the surrounding
+    # land for development, that just hasn't happened yet).
+    #
+    # Self-surrounding-risk parcels (Farmland Reserve / Deseret Ranch
+    # etc.) also route here when FLUM >=75%, since the scan
+    # orchestrator caps their option1_pct at 0 -- the FLUM designation
+    # is still real but the surrounding parcels are all the same
+    # owner, so no genuine Option 1 encirclement exists.
+    if (
+        pct_perimeter_qualifying is not None
+        and pct_perimeter_qualifying >= 75
+        and (option1_pct is None or option1_pct < 75)
+    ):
+        driving_notes: list[str] = [
+            f"FLUM proxy: {pct_perimeter_qualifying:.0f}% qualifying perimeter "
+            f"(pre-2026-07-13 would have fired Option 1)",
+        ]
+        if option1_pct is not None:
+            driving_notes.append(
+                f"Real built-status: {option1_pct:.0f}% of perimeter touches "
+                f"actually-developed adjacent parcels (needs 75% for genuine "
+                f"Option 1)"
+            )
+        else:
+            driving_notes.append(
+                "Real built-status: could not be measured -- adjacent-parcel "
+                "fetch did not run; verify manually via aerials"
+            )
+        if self_surrounding_risk:
+            driving_notes.append(
+                "Self-surrounding risk: candidate's owner appears on 3+ "
+                "adjacent parcels; you cannot self-qualify for Option 1"
+            )
+        return "flum_only_verify", driving_notes
 
     # 4. Watch-list: no pathway matched, but at least one pathway's
     # readiness value is in the 30-59% band. Report every pathway that

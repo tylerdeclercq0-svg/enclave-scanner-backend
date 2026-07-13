@@ -246,6 +246,7 @@
   .tier-confident .tier-badge{background:var(--brass-dim);color:var(--brass-800);}
   .tier-watch .tier-badge{background:#FFEB9C;color:var(--brass-800);}
   .tier-confirmed_qualifying .tier-badge{background:var(--brass-dim);color:var(--brass-800);}
+  .tier-flum_only_verify .tier-badge{background:#F9E7C4;color:var(--brass-800);}
   .tier-strong_candidate .tier-badge{background:#EEE3C2;color:var(--brass-800);}
   .tier-watch_list .tier-badge{background:#FFEB9C;color:var(--brass-800);}
   .tier-excluded .tier-badge{background:var(--clay-dim);color:var(--clay);}
@@ -261,6 +262,11 @@
     border:1px solid transparent;
   }
   .master-tier-pill.tier-confirmed_qualifying{background:#C6EFCE;color:var(--brass-800);border-color:#8FCFA0;}
+  /* 2026-07-13: flum_only_verify sits between confirmed and strong --
+     the FLUM says it's qualified but the real built-status test came
+     back below threshold. Warmer than strong (still "positive signal"
+     from the FLUM), softer than confirmed (needs human aerial review). */
+  .master-tier-pill.tier-flum_only_verify{background:#F9E7C4;color:var(--brass-800);border-color:var(--brass);}
   .master-tier-pill.tier-strong_candidate{background:#EEE3C2;color:var(--brass-800);border-color:var(--brass);}
   .master-tier-pill.tier-watch_list{background:#FFEB9C;color:var(--brass-800);border-color:#DBB800;}
   .master-tier-pill.tier-unlikely{background:var(--line);color:var(--ink-faint);border-color:var(--line-strong);}
@@ -1270,6 +1276,7 @@ document.getElementById('sortSelect').addEventListener('change', renderResults);
 function tierLabelText(t){
   return {
     confirmed_qualifying: 'Confirmed',
+    flum_only_verify: 'FLUM-only',
     strong_candidate: 'Strong',
     watch_list: 'Watch',
     unlikely: 'Unlikely',
@@ -1319,8 +1326,8 @@ function renderResults(){
   // signal from assign_master_tier server-side. Fall back to the legacy
   // `confidence_tier` for any older rows that predate the migration.
   const tiers = {
-    confirmed_qualifying: [], strong_candidate: [], watch_list: [],
-    unlikely: [], excluded: [],
+    confirmed_qualifying: [], flum_only_verify: [], strong_candidate: [],
+    watch_list: [], unlikely: [], excluded: [],
   };
   const legacyMap = {confident: 'confirmed_qualifying', possible: 'strong_candidate', watch: 'watch_list'};
   sorted.forEach(r => {
@@ -1331,6 +1338,7 @@ function renderResults(){
   const countyNames = [...new Set(results.map(r => r.county_id))].join(', ');
   summary.innerHTML =
     `<strong>${tiers.confirmed_qualifying.length}</strong> confirmed qualifying · ` +
+    `<strong>${tiers.flum_only_verify.length}</strong> FLUM-only (verify) · ` +
     `<strong>${tiers.strong_candidate.length}</strong> strong · ` +
     `<strong>${tiers.watch_list.length}</strong> watch list · ` +
     `<strong>${tiers.unlikely.length}</strong> unlikely (hidden) · ` +
@@ -1364,6 +1372,7 @@ function renderResults(){
 
   let html = '';
   html += renderTier('confirmed_qualifying', 'Confirmed qualifying', 'At least one pathway meets its statutory threshold AND no unresolved risk signal from the data.', tiers.confirmed_qualifying);
+  html += renderTier('flum_only_verify', 'FLUM-only (verify encirclement)', 'FLUM designation suggests eventual encirclement but adjacent parcels are not actually developed today — human aerial review required before outreach.', tiers.flum_only_verify);
   html += renderTier('strong_candidate', 'Strong candidate — with unresolved risk signal', 'A pathway meets threshold, but the data shows a specific at-risk finding (post-1/1/2025 sale, co-owner recorded). Verify before relying on it.', tiers.strong_candidate);
   html += renderTier('watch_list', 'Watch list — near miss, revisit later', 'No pathway currently matches, but at least one pathway shows real potential (30–59%). Worth revisiting as surrounding development changes.', tiers.watch_list);
 
@@ -1630,11 +1639,14 @@ function ownershipLine(r){
 function tierBadgeHtml(tier){
   const labels = {
     confident: 'Confident', possible: 'Possible', watch: 'Watch list', unlikely: 'Unlikely',
-    confirmed_qualifying: 'Confirmed qualifying', strong_candidate: 'Strong candidate',
+    confirmed_qualifying: 'Confirmed qualifying',
+    flum_only_verify: 'FLUM-only (verify)',
+    strong_candidate: 'Strong candidate',
     watch_list: 'Watch list', excluded: 'Excluded',
   };
   let style = '';
   if(tier === 'confident' || tier === 'confirmed_qualifying') style = 'background:#C6EFCE;color:var(--brass-800);';
+  else if(tier === 'flum_only_verify') style = 'background:#F9E7C4;color:var(--brass-800);';
   else if(tier === 'strong_candidate' || tier === 'possible') style = 'background:#EEE3C2;color:var(--brass-800);';
   else if(tier === 'watch' || tier === 'watch_list') style = 'background:#FFEB9C;color:var(--brass-800);';
   else if(tier === 'excluded') style = 'background:#FFC7CE;color:var(--clay);';
@@ -1816,8 +1828,15 @@ function buildOverlayContent(r, key){
     <div class="overlay-section">
       <h4>Encirclement &amp; pathways</h4>
       ${r.pct_perimeter_qualifying==null ? '<div class="empty-note">Not computed.</div>' : `
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--ink-faint);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;">FLUM designation (Option 4 signal / Option 3 combined w/ interstate)</div>
         <div class="adj-cell" style="margin-bottom:10px;"><div class="adj-bar"><div class="adj-fill" style="width:${r.pct_perimeter_qualifying}%"></div></div><div class="adj-pct">${r.pct_perimeter_qualifying.toFixed(0)}%</div></div>
       `}
+      ${r.option1_pct==null ? '<div class="empty-note" style="margin-bottom:10px;">Built-status (Option 1): not measured — adjacent-parcel fetch did not run for this parcel.</div>' : `
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--ink-faint);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;">Built status (Option 1 signal &mdash; % perimeter touching actually-developed adjacent parcels)</div>
+        <div class="adj-cell" style="margin-bottom:6px;"><div class="adj-bar"><div class="adj-fill" style="width:${r.option1_pct}%;background:${r.self_surrounding_risk ? 'var(--clay)' : 'var(--brass)'};"></div></div><div class="adj-pct">${r.option1_pct.toFixed(0)}%</div></div>
+        ${(r.adjacent_built_count != null) ? `<div style="font-size:11.5px;color:var(--ink-faint);margin-bottom:10px;">${r.adjacent_built_count} adjacent parcel${r.adjacent_built_count===1?'':'s'} classified as built (DOR residential/commercial/industrial/institutional)</div>` : ''}
+      `}
+      ${r.self_surrounding_risk ? `<div style="background:var(--clay-dim);color:var(--clay);padding:8px 10px;border-radius:2px;margin-bottom:10px;font-size:12.5px;line-height:1.4;"><strong>Self-surrounding risk.</strong> This parcel's owner appears on 3+ adjacent parcels. Option 1 (existing-development) perimeter capped at 0 — you cannot self-qualify. Verify aerials; institutional landholders (Farmland Reserve / Deseret Ranch, Rayonier timberland, Walt Disney Parks / R.C.I.D.) are the canonical example.</div>` : ''}
       ${pathways.length ? `<ul class="flag-list">${pathways.map(p => `<li><strong>#${p}</strong> — ${PATHWAY_DESCRIPTIONS[p] || 'No description.'}</li>`).join('')}</ul>` : '<div class="empty-note">No qualifying pathway matched.</div>'}
     </div>
 
@@ -2406,6 +2425,10 @@ async function exportDiligenceTracker(parcels){
         use_code: r.use_code,
         jurisdiction: r.jurisdiction,
         pct_perimeter_qualifying: r.pct_perimeter_qualifying,
+        option1_pct: r.option1_pct,
+        adjacent_built_count: r.adjacent_built_count,
+        self_surrounding_risk: r.self_surrounding_risk || false,
+        tier_downgrade_reason: r.tier_downgrade_reason || null,
         likely_pathways: r.likely_pathways || [],
         confidence_tier: r.confidence_tier,
         tier: r.tier,
@@ -2472,6 +2495,7 @@ document.getElementById('exportDiligenceBtn').addEventListener('click', () => {
 // color scheme for the same concept.
 const TIER_COLORS = {
   confirmed_qualifying: '#4EAE64',
+  flum_only_verify:     '#C9911F',  // brass-toned: FLUM says yes, aerials say verify
   strong_candidate:     '#B58A2A',
   watch_list:           '#DBB800',
   unlikely:             '#8A8574',
@@ -2559,7 +2583,9 @@ function _quickPopupHtml(r){
   const legacyMap = {confident:'confirmed_qualifying', possible:'strong_candidate', watch:'watch_list'};
   const tier = r.tier || legacyMap[r.confidence_tier] || r.confidence_tier || 'unlikely';
   const tierLabel = {
-    confirmed_qualifying:'Confirmed qualifying', strong_candidate:'Strong candidate',
+    confirmed_qualifying:'Confirmed qualifying',
+    flum_only_verify:'FLUM-only (verify encirclement)',
+    strong_candidate:'Strong candidate',
     watch_list:'Watch list', unlikely:'Unlikely', excluded:'Excluded',
   }[tier] || tier;
   const bp = _bestPathway(r);
@@ -2745,7 +2771,12 @@ document.querySelectorAll('#viewTabs button').forEach(btn => {
 // for DB_LIST_FILTERS.
 // ---------------------------------------------------------------------
 const _DB_TIER_ORDER = {
-  confirmed_qualifying: 0, strong_candidate: 1, watch_list: 2, unlikely: 3, excluded: 4,
+  // 2026-07-13: flum_only_verify inserted between confirmed_qualifying
+  // and strong_candidate. See scoring.py assign_master_tier for the
+  // semantics -- these are the FLUM-only false-positives from the pre-
+  // fix pipeline, awaiting human aerial review before outreach.
+  confirmed_qualifying: 0, flum_only_verify: 1, strong_candidate: 2,
+  watch_list: 3, unlikely: 4, excluded: 5,
 };
 function _dbTier(r){
   const legacy = {confident: 'confirmed_qualifying', possible: 'strong_candidate', watch: 'watch_list'};
@@ -2842,6 +2873,7 @@ const _msState = {
 // time. Tier is fixed; county/metro come from _dbAllParcels.
 const _TIER_OPTIONS = [
   ['confirmed_qualifying', 'Confirmed qualifying'],
+  ['flum_only_verify',     'FLUM-only (verify)'],
   ['strong_candidate',     'Strong candidate'],
   ['watch_list',           'Watch list'],
   ['unlikely',             'Unlikely'],

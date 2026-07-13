@@ -492,6 +492,7 @@ def determine_pathways(
     inside_rural_study_area: bool = False,
     interstate_frontage_pct: float = 0.0,
     usb_perimeter_pct: float = 0.0,
+    option1_pct: Optional[float] = None,
 ) -> list[int]:
     """
     Map an encirclement result plus a few other facts onto the statutory
@@ -542,7 +543,20 @@ def determine_pathways(
     """
     pathways: list[int] = []
 
-    if encirclement.pct_qualifying >= 75:
+    # 2026-07-13 built-encirclement fix. Option 1 = s. 163.3164(4)(c)1.a,
+    # "existing industrial, commercial, or residential development." The
+    # old code checked encirclement.pct_qualifying, which is a FLUM-
+    # designation match -- a future-land-use overlay is not "existing
+    # development" no matter how it's drawn. option1_pct comes from
+    # adjacent_parcels.compute_option1_pct against the county's own
+    # parcel layer's DOR use codes (residential 1-8 / commercial 10-19
+    # / industrial 20-27 / institutional 71-89). When option1_pct is
+    # None (adjacent-parcel fetch did not run -- Shapely missing, no
+    # parcel_service_url, etc.), Option 1 is NOT fired from FLUM as a
+    # fallback; the caller sees no Option 1 match and the row will
+    # route to flum_only_verify or unlikely depending on the FLUM
+    # signal. See scoring.assign_master_tier's flum_only_verify branch.
+    if option1_pct is not None and option1_pct >= 75:
         pathways.append(1)
 
     if (

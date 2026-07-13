@@ -40,6 +40,7 @@ from county_registry import COUNTIES
 from parcel_fetcher import fetch_candidate_parcels, CandidateParcel, AREA_SR
 from encirclement import compute_encirclement, determine_pathways, EncirclementResult, get_centroid_lat_lon, esri_rings_to_wgs84_geojson
 from arcgis_client import query_layer
+import adjacent_parcels
 import exclusions
 import flu_taxonomy
 import flwmi_client
@@ -131,6 +132,32 @@ class ScanResultRow:
     metro_place_population: Optional[int] = None
     metro_place_median_hh_income: Optional[float] = None
     metro_pull_score: Optional[float] = None
+    # Built-encirclement false-positive fix (2026-07-13). option1_pct is
+    # the REAL statute-Option-1 test: fraction of the candidate's
+    # perimeter (0-100) touching adjacent parcels whose DOR use-code
+    # indicates existing development (residential 1-8 / commercial
+    # 10-19 / industrial 20-27 / institutional 71-89), not just the
+    # FLUM-designation match that pct_perimeter_qualifying above already
+    # measures. See adjacent_parcels.py + STATUS.md 2026-07-13 section.
+    # None when the adjacent-parcel fetch could not run (Shapely
+    # missing, no parcel_service_url configured, etc.) -- distinct from
+    # 0.0 which is a real "no built neighbors found."
+    option1_pct: Optional[float] = None
+    # Count of adjacent parcels that passed is_built_parcel, surfaced
+    # for the frontend "N built neighbors" hover and for the backfill
+    # audit that produced tier_downgrade_reason on existing rows.
+    adjacent_built_count: Optional[int] = None
+    # True when the candidate's own owner name appears on >=3 adjacent
+    # parcels (Farmland Reserve / Deseret Ranch, Rayonier timberland,
+    # Walt Disney Parks / R.C.I.D., etc.). option1_pct is capped at 0
+    # for self-surrounded parcels -- you cannot self-qualify for
+    # Option 1. See adjacent_parcels.detect_self_surrounding.
+    self_surrounding_risk: bool = False
+    # Populated only by the backfill script (scripts/rescore_master_db.py)
+    # when a row's tier changes during a re-score. Live scans leave this
+    # None -- the "why" for a live tier assignment is captured in
+    # driving_pathways above.
+    tier_downgrade_reason: Optional[str] = None
 
 
 _METRO_FIELDS_UNKNOWN = {
@@ -285,6 +312,13 @@ def run_county_scan(
         usb_perimeter_pct = 0.0
         is_unincorporated: Optional[bool] = None
         unincorporated_detail: str = ""
+        # 2026-07-13 built-encirclement fix. option1_pct starts as None
+        # so a scan that skipped adjacent-parcel fetch (excluded early,
+        # Shapely missing, county has no parcel_service_url) surfaces
+        # as "not measured" rather than a fake 0. See adjacent_parcels.py.
+        option1_pct: Optional[float] = None
+        adjacent_built_count: Optional[int] = None
+        self_surrounding_risk = False
 
         # EARLY EXCLUSION GATE (roadmap item 8, 2026-07-06). Runs the
         # Fix-A-cached statewide exclusion intersects (Wekiva /
@@ -338,7 +372,9 @@ def run_county_scan(
                 # exclusion win -- kept concurrent here.
                 interstate_exc: Optional[Exception] = None
                 usb_exc: Optional[Exception] = None
+                adjacents_exc: Optional[Exception] = None
                 neighbor_features: list = []
+                adjacents_list: list = []
 
                 def _fetch_flum():
                     return list(query_layer(
@@ -355,13 +391,25 @@ def run_county_scan(
                     return roads_client.check_adjacent_to_usb(parcel.geometry, county.rural_area_layer_url)
                 def _check_unincorp():
                     return statutory_checks.check_unincorporated(county, parcel.geometry, AREA_SR)
+                # 2026-07-13 built-encirclement fix. Reuses the already-
+                # buffered candidate geometry so we don't buffer twice,
+                # and hands the candidate's parcel_id in so the county's
+                # own parcel layer excludes it from the WHERE clause
+                # (double-line defense against a candidate returning
+                # itself as an "adjacent" parcel and passing is_built).
+                def _fetch_adjacents():
+                    return adjacent_parcels.fetch_adjacent_parcels(
+                        county, parcel.geometry, parcel.parcel_id,
+                        buffered_geometry=buffered_geom,
+                    )
 
                 with _time_block("concurrent_io_phase"):
-                    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="scan") as ex:
+                    with ThreadPoolExecutor(max_workers=5, thread_name_prefix="scan") as ex:
                         f_flum = ex.submit(_fetch_flum)
                         f_int = ex.submit(_check_interstate)
                         f_usb = ex.submit(_check_usb)
                         f_uninc = ex.submit(_check_unincorp)
+                        f_adj = ex.submit(_fetch_adjacents)
 
                         with _time_block("flum_neighbor_fetch"):
                             neighbor_features = f_flum.result()
@@ -379,6 +427,12 @@ def run_county_scan(
                             adjacent_to_usb = False
                         with _time_block("unincorporated_check"):
                             is_unincorporated, unincorporated_detail = f_uninc.result()
+                        try:
+                            with _time_block("adjacent_parcels_fetch"):
+                                adjacents_list = f_adj.result()
+                        except Exception as exc:  # noqa: BLE001 -- fail-soft
+                            adjacents_exc = exc
+                            adjacents_list = []
                         # Early-gate short-circuit: if concurrent phase found
                         # this parcel incorporated, promote to hard flag so
                         # scoring hits tier=excluded like the other early
@@ -399,6 +453,57 @@ def run_county_scan(
                         agricultural_flu_values=county.agricultural_flu_values,
                     )
                 pct_qualifying = encirclement.pct_qualifying
+
+                # 2026-07-13 built-encirclement fix (see adjacent_parcels.py
+                # + STATUS.md). pct_qualifying above is the FLUM-designation
+                # proxy the old Option 1 test relied on -- correct for
+                # Option 4 (statute-designated-development), not for Option
+                # 1 (existing development). option1_pct below measures the
+                # real Option 1 signal against the county's OWN parcel
+                # layer and is what determine_pathways uses for the (c)1.a
+                # test from this commit onward.
+                if adjacents_exc is not None:
+                    needs_review.append(
+                        f"Adjacent-parcel fetch failed to run: {adjacents_exc} -- "
+                        f"Option 1 (built-encirclement) could not be measured "
+                        f"and the flum_only_verify tier could not be evaluated. "
+                        f"Frontend rendering falls back to FLUM proxy only."
+                    )
+                    option1_pct = None
+                    adjacent_built_count = None
+                    self_surrounding_risk = False
+                else:
+                    option1_raw, adjacent_built_count = adjacent_parcels.compute_option1_pct(
+                        parcel.geometry, adjacents_list,
+                    )
+                    self_surrounding_risk = adjacent_parcels.detect_self_surrounding(
+                        parcel.owner_name, adjacents_list,
+                    )
+                    # Self-surrounding cap: an institutional landholder
+                    # whose adjacent parcels are its own other holdings
+                    # cannot self-qualify for Option 1. Farmland Reserve
+                    # Inc / Deseret Ranch is the canonical case surfaced
+                    # in the false-positive review that motivated this fix.
+                    option1_pct = 0.0 if self_surrounding_risk else option1_raw
+                    if self_surrounding_risk:
+                        needs_review.append(
+                            f"Self-surrounding risk detected: the parcel owner "
+                            f"appears on {adjacent_parcels.SELF_SURROUNDING_MIN_MATCHES}+ "
+                            f"adjacent parcels. Option 1 (existing development) "
+                            f"perimeter capped at 0 -- you cannot self-qualify. "
+                            f"Verify aerials and consider whether Options 3-5 apply."
+                        )
+                    # 2026-07-13 fix (3 of 6): surrounding_density derived
+                    # from the adjacent-parcel population (built fraction +
+                    # avg neighbor acreage) rather than the FLUM keyword
+                    # classifier below, which was returning "unknown" for
+                    # most Pasco/Manatee/Hardee parcels because their FLUM
+                    # abbreviations (RES-6, PD, AG-R) don't hit descriptive
+                    # keywords. Overrides the FLUM-derived value assigned
+                    # after this block.
+                    surrounding_density_from_parcels = adjacent_parcels.compute_surrounding_density(
+                        adjacents_list,
+                    )
 
                 # Conditional follow-ups stay serial: skipping the
                 # measure_* calls when their adjacency check returned
@@ -472,6 +577,7 @@ def run_county_scan(
                     inside_rural_study_area=inside_rural_study_area,
                     interstate_frontage_pct=interstate_frontage_pct,
                     usb_perimeter_pct=usb_perimeter_pct,
+                    option1_pct=option1_pct,
                 )
                 if not pathways:
                     needs_review.append(
@@ -504,6 +610,14 @@ def run_county_scan(
                 )
                 dominant_neighbor_flu = flu_taxonomy.dominant_segment_flu(encirclement.segments)
                 surrounding_density = flu_taxonomy.classify_density(dominant_neighbor_flu)
+                # 2026-07-13 fix: prefer the adjacent-parcel-derived
+                # density label since it uses actual built fraction +
+                # neighbor size, not FLUM string keywords. Falls back
+                # to the FLUM value when adjacent fetch failed and to
+                # "unknown" when neither has data. See STATUS.md
+                # 2026-07-13 section for the coverage gap this closes.
+                if adjacents_exc is None:
+                    surrounding_density = surrounding_density_from_parcels
             except ImportError:
                 needs_review.append(
                     "Shapely not installed in this environment — "
@@ -669,6 +783,10 @@ def run_county_scan(
             # data gaps, not findings. See scoring._driving_pathway_
             # potentials.
             county_has_usb_layer=county.rural_area_layer_url is not None,
+            # 2026-07-13 built-encirclement fix inputs, see
+            # adjacent_parcels.py + scoring.py's flum_only_verify branch.
+            option1_pct=option1_pct,
+            self_surrounding_risk=self_surrounding_risk,
         )
 
         rows.append(ScanResultRow(
@@ -704,6 +822,9 @@ def run_county_scan(
             adjacent_to_interstate=adjacent_to_interstate,
             adjacent_to_usb=adjacent_to_usb,
             geometry_wgs84=geometry_wgs84,
+            option1_pct=option1_pct,
+            adjacent_built_count=adjacent_built_count,
+            self_surrounding_risk=self_surrounding_risk,
             **_metro_fields_for(centroid_lat, centroid_lon, _fl_places),
         ))
 

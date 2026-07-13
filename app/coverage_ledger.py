@@ -222,8 +222,16 @@ def set_zcta_total(county_id: str, zcta5: str, total_candidates: int) -> None:
             "complete": False,
         })
         z["total_candidates"] = total_candidates
-        # Recompute complete based on the new total.
-        z["complete"] = (total_candidates == len(z["processed_parcel_ids"]))
+        # Recompute complete based on the new total. Uses >= (not ==) so
+        # a revalidation pass that SHRINKS the upstream count below what
+        # has already been processed still flips complete to True. Prior
+        # to 2026-07-13 this used == and roadmap item 19's shrink branch
+        # (background_jobs.revalidate_complete_zctas: new_total < stored)
+        # left the ZCTA permanently incomplete when processed_count had
+        # been > new_total, spinning _run_job_loop's line-401 "force
+        # complete flag" early-out indefinitely. Matches mark_processed's
+        # own >= completion check.
+        z["complete"] = (len(z["processed_parcel_ids"]) >= total_candidates)
         _save(data)
 
 

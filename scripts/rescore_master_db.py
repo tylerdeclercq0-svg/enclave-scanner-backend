@@ -63,21 +63,46 @@ def _http_get_json(url: str, timeout: int = 90) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+# Retry sleeps (seconds) for transient network errors. First DNS hiccup on
+# 2026-07-13 killed a 700-row run midway through, forcing a full re-run
+# (idempotent, but wasted ~15 min). Exponential-ish so we back off through
+# a short DNS blip without spinning; caps at 30s. NOT applied to HTTPError
+# (4xx/5xx from the server), which are real endpoint states we want to
+# surface as-is, not retry-storm.
+_RETRY_SLEEPS_SEC = (2, 5, 10, 30)
+
+
 def _http_post_json(url: str, key: str, timeout: int = 90) -> tuple[int, dict]:
-    """POST with an X-Debug-Key header. Empty body. Returns (status, json)."""
+    """
+    POST with an X-Debug-Key header. Empty body. Returns (status, json).
+
+    Retries on URLError (DNS / connection reset / timeout at the socket
+    layer) with exponential backoff -- see _RETRY_SLEEPS_SEC. HTTPError
+    responses (401, 404, 500, etc.) come back as-is without retry so the
+    caller sees the real endpoint state.
+    """
     req = urllib.request.Request(
         url, data=b"", method="POST",
         headers={"X-Debug-Key": key, "Content-Type": "application/json"},
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-            return resp.status, json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
+    last_url_exc: urllib.error.URLError | None = None
+    for attempt in range(len(_RETRY_SLEEPS_SEC) + 1):
         try:
-            return exc.code, json.loads(body)
-        except json.JSONDecodeError:
-            return exc.code, {"error": body[:400]}
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            try:
+                return exc.code, json.loads(body)
+            except json.JSONDecodeError:
+                return exc.code, {"error": body[:400]}
+        except urllib.error.URLError as exc:
+            last_url_exc = exc
+            if attempt < len(_RETRY_SLEEPS_SEC):
+                sleep_sec = _RETRY_SLEEPS_SEC[attempt]
+                time.sleep(sleep_sec)
+                continue
+            raise
 
 
 def load_eligible_parcels(counties: set[str] | None) -> list[dict]:

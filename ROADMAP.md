@@ -1012,6 +1012,80 @@ the index/checklist, not the full spec.
   confirmed_live set now exactly matches STATUS.md's 13-county
   canon.
 
+- [x] **BUILT-ENCIRCLEMENT FIX (Option 1 vs FLUM separation)** *(done 2026-07-13, commits 783d30d + 2d7bcc1 + a2ffc2c + 1fe0ce0 held)*
+  Not originally a numbered roadmap item -- surfaced mid-session when
+  Tyler flagged three parcels (Farmland Reserve / Pioneer HCR / Mathis
+  Edward Neil) scoring 100% qualifying perimeter on rural land.
+
+  Root cause: `encirclement.compute_encirclement` was reading FLUM
+  (future-land-use) designations, not built status. SB 686
+  s. 163.3164(4)(c)1.a requires "existing industrial, commercial, or
+  residential development" -- a FLUM designation is a future-land-use
+  overlay, not existing development.
+
+  Fix: new `app/adjacent_parcels.py` module fetches parcels from each
+  county's OWN parcel layer (reusing existing `CountyEndpoint.parcel_*`
+  field wiring), classifies via DOR use-code (built classes 1-27 +
+  71-89), and measures the real perimeter fraction touching
+  actually-built adjacent parcels as `option1_pct`.
+  `detect_self_surrounding` gates on 3+ same-owner adjacents AND >500
+  combined ac -- the acreage AND-gate distinguishes institutional
+  landholders (Farmland Reserve / Deseret Ranch, Rayonier timberland,
+  Walt Disney Parks / R.C.I.D.) from individual landowners with a few
+  small contiguous holdings. `scoring.assign_master_tier` grows a new
+  `flum_only_verify` tier for cases where FLUM proxy >=75% but real
+  built-status <75% -- routes the false-positive population to human
+  aerial review rather than either silently sitting in
+  confirmed_qualifying (pre-fix bug) or silently dropping to
+  unlikely (which would lose the FLUM signal).
+
+  Frontend (`web/index.html`): new master-tier-pill CSS for
+  flum_only_verify, results section renders it as its own group,
+  Master DB `_DB_TIER_ORDER` inserts at sort position 1, `_TIER_OPTIONS`
+  filter dropdown includes it, detail overlay shows FLUM % and
+  built-status % as SEPARATE progress bars with a self-surrounding
+  callout in clay-tone when the flag fires.
+
+  Production backfill via new `POST /api/property-db/rescore/
+  {county_id}/{parcel_id:path}` endpoint (gated by DEBUG_API_KEY) +
+  `scripts/rescore_master_db.py` client. Full 1,457-row run completed
+  cleanly on 2026-07-13 (0 errors, ~87 min wall clock). Authoritative
+  before/after: 1,040 confirmed_qualifying -> 371 (-669, 64.3% were
+  FLUM-only false positives), 0 flum_only_verify -> 808, 206
+  strong_candidate -> 113, 211 watch_list -> 165, unlikely and
+  excluded untouched. Also populated `surrounding_density` on 4,793
+  rows (was ~0 before -- old FLUM keyword classifier returned
+  "unknown" for most parcels) and flagged 309 institutional-landholder
+  self-surrounding cases.
+
+  All 3 canonical targets verified persisted correctly after backfill:
+  Pioneer HCR at 17% real built, Mathis at 61% raw (below threshold),
+  Farmland Reserve at 0% with self_surrounding=True.
+
+- [ ] **21. Per-county `year_built` field discovery** *(new 2026-07-13)*
+  The 2026-07-13 built-encirclement fix's `is_built_parcel` includes
+  a documented gap: the "ag-coded lot with a house and <5 ac"
+  fallback (from Tyler's original fix spec) was skipped because no
+  county's parcel layer exposes `year_built` in our fetcher today.
+  DOR use-code check still catches genuine residential / commercial /
+  industrial / institutional parcels regardless, but we miss the
+  edge case of an ag-coded lot with a structure that hasn't been
+  re-coded to DOR class 01 yet.
+
+  Do a `describe_layer` pass on each county's parcel layer for a
+  `year_built`-shaped field. Where present, add `parcel_year_built_
+  field` to `CountyEndpoint`, wire into `adjacent_parcels.fetch_
+  adjacent_parcels`'s out_fields, and re-open `is_built_parcel` for
+  the small-lot-with-structure branch. Where absent, document the
+  gap per-county (many county PA layers publish year_built through
+  a separate building-improvements sublayer that's not what we
+  fetch today, so this may involve a second per-county query).
+
+  Low priority: the fix already closes the primary false-positive
+  path (669 of 1,040 confirmed_qualifying rows correctly demoted);
+  year_built would catch a much narrower edge case. Wire only if a
+  real production example surfaces.
+
 - [ ] **20. Flag-persistence gap in item 19's disappeared-parcel path** *(new 2026-07-13)*
   Surfaced during item 19's first live production reverify batch.
   Two related issues, both fail-open (missing flag, not corrupted
@@ -1055,7 +1129,7 @@ the index/checklist, not the full spec.
 
 ## Open items -- what's left after this session
 
-Everything except four items is closed. Still open:
+Still open:
 
 - **Item 9 (Scale-Up Phase 3 to 30+ counties)** -- partial, 13
   wired. The 7 SWFWMD-schema counties still parcel-ready + FLUM-
@@ -1068,23 +1142,31 @@ Everything except four items is closed. Still open:
   `interrupted` as terminal-error rather than "resume once, then
   error". Only bites during process crashes mid-scan.
 - **Item 20 (flag-persistence gap in item 19's disappeared-parcel
-  path)** -- new this session. Item 19's shrink-branch diligence
+  path)** -- 2026-07-13 A.M. Item 19's shrink-branch diligence
   note fails-open when a processed_parcel_id isn't in the property
   DB (8-pid drift on st_johns alone), silently losing "sold /
   subdivided / reclassified" flags. Two subitems: A) log warnings
   on silent no-op, B) audit `mark_processed` /
   `save_parcel_results` pairing for the save-side leak.
+- **Item 21 (per-county year_built field discovery)** -- 2026-07-13
+  P.M. Small edge-case follow-up from the built-encirclement fix.
+  Wire only if a real production example of an ag-coded lot with
+  a structure gets flagged as a false negative (the fix's DOR
+  use-code check catches the primary population; year_built is a
+  narrower edge case).
 - **Ground-truth `hillsborough`, `brevard`, `volusia`** (or others
   from Phase 1 that had FeatureLayer-only confirmation) -- their
   confirmed_live=False today reflects the fact that they were never
   scanned end-to-end. A proper item-9-style pass could flip them
   back to True.
-- **One-time Render Blueprint apply** (not a code item, but
-  required for weekly cron to start firing on its own):
-  Render dashboard -> New -> Blueprint -> point at this repo. The
-  cron path itself (POST /api/batch/start with
-  revalidate_before_scan=True) is proven live; only the blueprint-
-  provisioning step is pending.
+- **One-time human actions** (not code items):
+  1. Render dashboard -> New -> Blueprint -> point at this repo to
+     provision the weekly cron service that render.yaml declares
+     (the cron endpoint path itself is proven live via
+     scripts/weekly_batch_scan.py).
+  2. Render dashboard -> Environment -> DEBUG_API_KEY -> regenerate.
+     The current value got pasted into a Claude chat session during
+     the 2026-07-13 P.M. backfill and should be considered exposed.
 
 ## How to use this file
 

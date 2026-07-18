@@ -2316,6 +2316,192 @@ silently skip the save (possibly `scan_orchestrator.rows_to_dicts`
 dropping some rows, or filtered pipeline branches marking-without-
 saving). Filed as roadmap item 20.
 
+## Session 2026-07-13 (later): built-encirclement fix + 1,457-row DB rescore
+
+Root cause of the false positives Tyler surfaced (Farmland Reserve /
+Pioneer HCR / Mathis Edward Neil, all scoring 100% qualifying
+perimeter on rural land): `encirclement.compute_encirclement` reads
+FLUM (future-land-use) designations, not built status. A 640-ac cow
+pasture with a residential FLUM overlay contributes 100% "qualifying"
+perimeter today, even though the neighbor is undeveloped rural land.
+SB 686 s. 163.3164(4)(c)1.a requires "existing industrial, commercial,
+or residential development" -- FLUM is a future-land-use overlay, not
+existing development.
+
+### The fix, six pieces
+
+Commits 783d30d + 2d7bcc1 + a2ffc2c + 1fe0ce0.
+
+1. **`app/adjacent_parcels.py`** (new). Spatially queries the county's
+   OWN parcel layer (not FLUM) for every parcel intersecting a buffered
+   candidate, reusing each `CountyEndpoint.parcel_*` field wiring
+   already ground-truthed for all 13 confirmed_live counties.
+   `is_built_parcel(adj)` normalizes each county's use-code encoding
+   to a standard DOR class integer and checks it against DOR built
+   classes 1-27 (residential/commercial) + 71-89 (institutional).
+   Handles both 2-3 char DOR-standard encodings (Pasco DIR_CLASS,
+   Nassau DORUC, Lee DORCODE, SWFWMD PARUSECODE) and 4-char county-
+   local encodings packing `DOR_class * 100 + subcategory` (St. Johns
+   USE_CODE, Osceola DORCode, Citrus LUC, Leon PROP_USE) -- normalizes
+   via `int(code) // 100 if int(code) >= 1000 else int(code)`.
+2. **`compute_option1_pct`** measures the fraction of the candidate's
+   perimeter (0-100%) touching adjacent parcels that pass
+   `is_built_parcel`. Same boundary-line-inside-neighbor-area math
+   as `encirclement.compute_encirclement`'s FLUM path, with the same
+   150-ft ROW/canal substitution.
+3. **`compute_surrounding_density`** returns urban/suburban/rural/
+   unknown from adjacent-parcel built fraction + avg neighbor acreage
+   (thresholds 60%/30%/10% built, 2/10/50 avg ac). Replaces
+   `flu_taxonomy.classify_density`'s FLUM-keyword classifier, which
+   was returning "unknown" for most Pasco/Manatee/Hardee parcels
+   because their FLUM abbreviations (RES-6, PD, AG-R) don't hit the
+   descriptive keywords the old classifier looked for.
+4. **`detect_self_surrounding`** flags institutional landholders
+   (Farmland Reserve Inc / Deseret Ranch, Rayonier, Walt Disney Parks
+   / R.C.I.D.) whose adjacent parcels are their own other holdings.
+   Requires BOTH >=3 same-owner adjacents AND >500 total same-owner
+   adjacent acreage -- the acreage AND-gate (added in a2ffc2c) came
+   out of the first three-parcel verification pass over-flagging
+   Mathis Edward Neil, a legitimate individual landowner with a few
+   small contiguous holdings. Institutional landholders effectively
+   always control 500+ ac of contiguous same-owner land; ordinary
+   individual landowners almost never do. `option1_pct` is capped at
+   0 whenever this fires -- you cannot self-qualify for Option 1.
+5. **`app/scan_orchestrator.py`**. Adjacent-parcel fetch added to the
+   concurrent I/O phase (now 5 workers instead of 4; rides alongside
+   the ~800 ms FLUM fetch essentially free). Computes option1_pct +
+   self_surrounding + parcel-based density after the phase, passes
+   option1_pct to `determine_pathways`.
+6. **`app/encirclement.py: determine_pathways`** now takes
+   `option1_pct` and fires Option 1 on `option1_pct >= 75` (not the
+   FLUM proxy). Options 3 and 4 continue to use the FLUM proxy since
+   those are statute-designated-development tests that FLUM correctly
+   serves.
+7. **`app/scoring.py: assign_master_tier`** grows a new tier
+   `flum_only_verify` between `confirmed_qualifying` and
+   `strong_candidate`. Fires when FLUM proxy shows >=75% qualifying
+   perimeter (which pre-fix would have fired Option 1) but the real
+   built-status test came back below 75%. Routes the false-positive
+   population to human aerial review rather than either sitting in
+   confirmed_qualifying (the pre-fix bug) or silently dropping to
+   unlikely (which would lose the FLUM signal).
+8. **`ScanResultRow`** gains `option1_pct`, `adjacent_built_count`,
+   `self_surrounding_risk`, `tier_downgrade_reason` -- everything
+   additive, nothing renamed / removed, so the frontend keeps
+   rendering existing fields.
+9. **Frontend (`web/index.html`)**. New `master-tier-pill` CSS for
+   flum_only_verify (brass-toned: warmer than strong, softer than
+   confirmed). Results section renders the tier as its own group.
+   Master DB list-view `_DB_TIER_ORDER` inserts at sort position 1;
+   `_TIER_OPTIONS` filter dropdown includes it. Detail overlay shows
+   FLUM % and built-status % as SEPARATE progress bars with
+   adjacent_built_count under the built bar and a self-surrounding
+   risk callout in clay-tone when the flag fires. Diligence export
+   payload gains the new fields.
+
+### 3-parcel verification (before backfill)
+
+Ran adjacent_parcels.compute_option1_pct + detect_self_surrounding
+against all three canonical false positives (live production ArcGIS
+endpoints). Every prediction from the fix spec matched:
+
+| Parcel | Owner | Pre-fix tier | option1_pct | self_surr | Post-fix tier |
+|---|---|---|---|---|---|
+| pasco/01-25-19-...-00600-... | Pioneer HCR LLC (120 ac) | confirmed | 17% | False | flum_only_verify |
+| pasco/18-25-20-...-00100-... | Mathis Edward Neil (406 ac) | confirmed | 61% (raw) | False | flum_only_verify |
+| osceola/332634000000100000 | Farmland Reserve Inc (619 ac) | confirmed | 0% (capped) | True | flum_only_verify |
+
+Farmland Reserve: all 8 adjacents are Farmland Reserve Inc, well over
+500 ac combined -- self_surrounding_risk fires, option1_pct capped at
+0. Exactly the institutional-landholder pattern the flag exists for.
+Mathis Edward Neil: 3/21 adjacents share the name, but under 500 ac
+combined -- NOT flagged self_surrounding. Real option1_pct=61% (below
+75% threshold) drops the parcel to flum_only_verify for the right
+reason (real built encirclement falls short) not the wrong one
+(miscategorized as institutional).
+
+### Production backfill (rescore_backfill.py + scripts/rescore_master_db.py)
+
+New `POST /api/property-db/rescore/{county_id}/{parcel_id:path}`
+endpoint gated by DEBUG_API_KEY (production data write must be
+authenticated). Per-parcel: re-fetches candidate own geometry from
+the county parcel layer (stored geometry_wgs84 is in lat/lon;
+adjacent_parcels wants AREA_SR/3086, and re-fetching is simpler
+than reprojecting locally), fetches adjacents, computes new
+option1_pct + self_surrounding + surrounding_density, re-runs
+determine_pathways + assign_master_tier using stored FLUM /
+interstate / USB / ownership values. Does NOT re-run exclusions or
+FLUM neighbor fetch or roads adjacency -- none depend on the
+built-status signal.
+
+`scripts/rescore_master_db.py` drives the endpoint in a loop over
+tier-eligible rows (confirmed_qualifying + flum_only_verify +
+strong_candidate + watch_list). Client-side filter first to skip
+14,929 unlikely + 802 excluded no-op calls. stdlib urllib, no
+third-party dep. First run died at row ~700/1457 on a transient
+DNS failure; added URLError retry with 2s/5s/10s/30s backoff in
+1fe0ce0 (script only, no backend redeploy). Second run completed
+cleanly: 599 CHANGED / 858 unchanged / 0 errors / ~87 min wall
+clock. Combined with the first run's partial 245 CHANGED, total
+unique rows moved from original state = ~844.
+
+**Authoritative before/after tier counts across the 17,188-parcel
+master DB:**
+
+| tier | before | after | delta |
+|---|---|---|---|
+| confirmed_qualifying | 1,040 | 371 | **-669 (64.3%)** |
+| flum_only_verify (new) | 0 | 808 | +808 |
+| strong_candidate | 206 | 113 | -93 |
+| watch_list | 211 | 165 | -46 |
+| unlikely | 14,929 | 14,929 | 0 |
+| excluded | 802 | 802 | 0 |
+
+**669 of 1,040 previously-confirmed_qualifying parcels (64.3%) were
+FLUM-only false positives**, now correctly in flum_only_verify. Real
+built-encirclement-supported confirmed_qualifying population: 371.
+
+Signal populations after the run:
+- 1,457 rows carry `option1_pct` (matches eligible-for-rescore count)
+- 309 rows flagged `self_surrounding_risk=True` -- institutional
+  landholders across the DB
+- 4,793 rows have real `surrounding_density` (rural/suburban/urban)
+  vs. ~0 before -- the FLUM keyword classifier was returning "unknown"
+  for most parcels
+- 854 rows carry a `tier_downgrade_reason` audit string
+
+Spot-check via `/api/property-db/parcel/{cid}/{pid}` confirmed all 3
+canonical test parcels persisted correctly with every new field
+populated + a human-readable tier_downgrade_reason.
+
+### Known limitations of the fix (documented, not oversights)
+
+- **year_built check skipped.** No county's parcel layer exposes
+  year_built in our fetcher today, so the "ag-coded lot with a house
+  and <5 ac" fallback from the fix spec silently no-ops county-wide.
+  DOR use-code check still catches genuine residential / commercial /
+  industrial / institutional parcels regardless. When year_built
+  discovery is added per-county, re-open `is_built_parcel` for the
+  small-lot-with-structure fallback.
+- **`unlikely` tier not rescored.** A new option1_pct >=75 on a
+  currently-unlikely parcel would mean the FLUM proxy was <30% while
+  built proxy is >=75% -- a data-source combination not seen in the
+  17k current DB (verified: zero unlikely rows had FLUM=~0 and
+  built=high in the manatee/hardee/lee-etc. spot checks during the
+  run). If a legitimate example ever surfaces, wire an unlikely
+  rescore branch.
+- **DOR class 10 (Vacant Commercial) is included in BUILT_DOR_CLASSES;
+  DOR 40 (Vacant Industrial) is NOT.** DOR 10 in FL PA records means
+  zoned/coded commercial in a suburban context (real built-adjacent
+  parcel). DOR 40 more commonly means genuinely undeveloped
+  industrial-zoned rural land. Conservative asymmetry, documented in
+  adjacent_parcels.py.
+- **Owner-string fuzzy match not implemented for self-surrounding.**
+  "SMITH FAMILY LLC" vs "SMITH FAMILY REVOCABLE TRUST" would slip
+  past exact-match. Deliberate scope limit -- exact match is easier
+  to explain in a diligence report and doesn't silently flag
+  unrelated same-family owners.
+
 ## Paste-into-fresh-conversation summary (2026-07-13)
 
 Copy the block below into the first message of a new session so context
@@ -2327,44 +2513,61 @@ Falcone Group ag enclave scanner (FL SB 686 / Ch. 2026-34) -- backend
 at enclave-scanner-backend.onrender.com (Render Starter + 5 GB
 persistent disk at /var/data via DATA_DIR), frontend at
 enclave-scanner-backend.netlify.app, repo owned by
-tylerdeclercq0-svg. Current real state (2026-07-13, commit 8b77d3f
-live): 13 confirmed-live counties -- Pasco/Nassau/St. Johns/Osceola
-(pilots) + Lee/Leon/Citrus (Wave 1) + Sarasota/Manatee/Hardee/
-Charlotte/Marion/Polk (Wave 2b, six of them behind SWFWMD's
-6 AM-10 PM ET shared parcel_search MapServer). Property Database
-populated with 17,188 unique parcels (1,040 confirmed_qualifying /
-206 strong_candidate / 211 watch_list / 14,929 unlikely / 802
-excluded; 1,291 pathway matches; Osceola/Pasco/Nassau highest-yield).
-Weekly auto-refresh (item 19) proven end-to-end at production scale
-on 2026-07-12/13: real reverify batch across all 13 counties
-completed cleanly (0 errored), fixing a subtle
-coverage_ledger.set_zcta_total bug (used `==` where mark_processed
-uses `>=`, spun st_johns's loop 3h 40m before the fix) as it
-surfaced. Fully verified end-to-end at production scale in prior
-sessions: coverage-ledger self-heal (item 11), durable persistence
+tylerdeclercq0-svg. Current real state (2026-07-13, commit a2ffc2c
+live, 1fe0ce0 held locally as script-only retry hardening):
+13 confirmed-live counties -- Pasco/Nassau/St. Johns/Osceola (pilots)
++ Lee/Leon/Citrus (Wave 1) + Sarasota/Manatee/Hardee/Charlotte/
+Marion/Polk (Wave 2b, six of them behind SWFWMD's 6 AM-10 PM ET
+shared parcel_search MapServer). Property Database populated with
+17,188 unique parcels; **major tier redistribution 2026-07-13 after
+the built-encirclement fix backfill: 371 confirmed_qualifying (down
+from 1,040 pre-fix -- 669 turned out to be FLUM-only false
+positives) / 808 flum_only_verify (new tier) / 113 strong_candidate
+/ 165 watch_list / 14,929 unlikely / 802 excluded**. Root cause of
+the FLUM false positives (Farmland Reserve / Pioneer HCR / Mathis
+Edward Neil all at 100% "qualifying" perimeter on rural land):
+compute_encirclement was reading FLUM designations, not built
+status. Fix: new app/adjacent_parcels.py fetches parcels from each
+county's OWN parcel layer, is_built_parcel classifies via DOR
+use-code (built classes 1-27 + 71-89) after normalizing per-county
+encodings (2-3 char direct, 4-char // 100), compute_option1_pct
+measures perimeter touching actually-built adjacents, detect_self_
+surrounding flags institutional landholders (>=3 same-owner adjacents
+AND >500 combined ac -- both gates required). scan_orchestrator
+adds a 5th concurrent worker for adjacent-parcel fetch; Option 1 in
+determine_pathways now fires on option1_pct>=75 (not the FLUM
+proxy); scoring.assign_master_tier grows a flum_only_verify tier
+for the demoted-but-FLUM-supported cases. All 3 canonical false
+positives verified: Pioneer HCR (17% real built), Mathis (61% raw,
+below 75% threshold), Farmland Reserve (self_surrounding=True,
+capped 0%). Weekly auto-refresh (item 19) proven end-to-end at
+production scale in prior sessions on 2026-07-12/13; a subtle
+coverage_ledger.set_zcta_total `==` vs `>=` bug surfaced and got
+fixed inline (commit 8b77d3f). Verified end-to-end at production
+scale: coverage-ledger self-heal (item 11), durable persistence
 through OOM (item 12), fetcher dedup + null-ID skip (item 14),
 lightweight /api/property-db/all read path with per-parcel detail
-endpoint (item 16, 18.8 MB stable response), 5-for-5 successful
-list-view load and filter tests, multi-select filter with AND-across
-/ OR-within semantics against real 17k data. Open items if you're
-continuing: (a) item 9 partial -- 7 SWFWMD-schema counties still
-parcel-ready but FLUM-blocked (DeSoto/Hernando/Highlands/Lake/Levy/
-Sumter/Duval); automatable discovery is exhausted so this needs
-per-county interactive investigation or shapefile ingestion for
-Duval; (b) item 15 -- batch coordinator should auto-retry
-`interrupted` counties once before erroring (small scope, only bites
-during process crashes mid-scan); (c) item 20 (new this session) --
-flag_parcel_no_longer_matching silently no-ops on parcels not in
-the property DB, and there's real ledger-vs-DB save-side drift
-(8 processed pids across 5 st_johns ZCTAs never made it to the
-DB), so item 19's disappeared-parcel diligence flags fail-open;
-(d) Hillsborough/Brevard/Volusia still confirmed_live=False
-awaiting a proper ground-truth pass. One-time human action still
-pending: Render dashboard -> New -> Blueprint -> point at this repo
-to provision the cron service that render.yaml declares (Render
-can't auto-provision from the blueprint without an initial apply);
-the cron endpoint path itself is proven live via the actual
-scripts/weekly_batch_scan.py entrypoint. Always read STATUS.md
-through the "Session 2026-07-13" section and ROADMAP.md before
-starting work. Auto mode expected. Never push destructive git
-commands or skip pre-commit hooks unless explicitly asked.
+endpoint (item 16, 18.8 MB stable response), multi-select filter
+with AND-across / OR-within semantics against real 17k data. Open
+items if you're continuing: (a) item 9 partial -- 7 SWFWMD-schema
+counties still parcel-ready but FLUM-blocked (DeSoto/Hernando/
+Highlands/Lake/Levy/Sumter/Duval); automatable discovery exhausted;
+(b) item 15 -- batch coordinator should auto-retry `interrupted`
+counties once before erroring; (c) item 20 -- flag_parcel_no_longer_
+matching silently no-ops on parcels not in the property DB, real
+ledger-vs-DB drift (8 st_johns pids missing) makes item 19's
+disappeared-parcel flags fail-open; (d) item 21 (this session) --
+year_built discovery per-county to unlock the small-lot-with-
+structure branch of is_built_parcel; (e) Hillsborough/Brevard/
+Volusia still confirmed_live=False awaiting a proper ground-truth
+pass. One-time human actions still pending: (1) Render dashboard ->
+New -> Blueprint -> point at this repo to provision the weekly
+cron service that render.yaml declares (Render can't auto-provision
+from the blueprint without an initial apply; the cron endpoint path
+itself is proven live via scripts/weekly_batch_scan.py);
+(2) rotate DEBUG_API_KEY on Render (Environment tab -> regenerate)
+-- the current value got pasted into a Claude chat session during
+the backfill and should be considered exposed. Always read STATUS.md
+through the "Session 2026-07-13 (later)" section and ROADMAP.md
+before starting work. Auto mode expected. Never push destructive
+git commands or skip pre-commit hooks unless explicitly asked.
